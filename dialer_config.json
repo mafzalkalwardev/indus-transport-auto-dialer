@@ -1,0 +1,17 @@
+{
+  "number_field": [
+    1514,
+    315
+  ],
+  "call_button": [
+    1848,
+    309
+  ],
+  "end_call_button": [
+    1693,
+    934
+  ],
+  "excel_path": "C:/Users/pc/Desktop/Auto Dialer/phones.xlsx",
+  "initial_delay": 5,
+  "autocut_duration": 10
+}
