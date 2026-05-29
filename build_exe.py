@@ -9,14 +9,12 @@ import sys
 
 
 def pip(*pkgs):
-    subprocess.check_call([sys.executable, "-m", "pip", "install",
-                           "--quiet", *pkgs])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", *pkgs])
 
 
 DEPS = [
-    "ttkbootstrap", "selenium", "webdriver-manager",
-    "pandas", "openpyxl", "Pillow", "pyperclip",
-    "pygetwindow", "pyautogui", "pynput", "pyinstaller",
+    "PyQt6", "PyQt6-WebEngine",
+    "pandas", "openpyxl", "Pillow", "pyperclip", "pyinstaller",
 ]
 
 print("=" * 60)
@@ -45,13 +43,12 @@ if os.path.exists(LOGO_PNG):
     try:
         from PIL import Image
         img   = Image.open(LOGO_PNG).convert("RGBA")
-        sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+        sizes = [(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)]
         imgs  = []
         for sz in sizes:
             c = Image.new("RGBA", sz, (0, 0, 0, 0))
-            r = img.copy()
-            r.thumbnail(sz, Image.LANCZOS)
-            c.paste(r, ((sz[0] - r.width) // 2, (sz[1] - r.height) // 2))
+            r = img.copy(); r.thumbnail(sz, Image.LANCZOS)
+            c.paste(r, ((sz[0]-r.width)//2, (sz[1]-r.height)//2))
             imgs.append(c)
         imgs[0].save(LOGO_ICO, format="ICO",
                      sizes=sizes, append_images=imgs[1:])
@@ -62,30 +59,28 @@ if os.path.exists(LOGO_PNG):
 
 sep = ";" if os.name == "nt" else ":"
 
+# PyQt6 WebEngine needs special hooks
 cmd = [
     "pyinstaller", "--onefile", "--windowed",
     "--name", "IndusTransports_AutoDialer",
     f"--add-data=dialer_config.json{sep}.",
     f"--add-data=src{sep}src",
+    "--hidden-import=PyQt6.QtWebEngineWidgets",
+    "--hidden-import=PyQt6.QtWebEngineCore",
+    "--hidden-import=PyQt6.sip",
+    "--hidden-import=pandas",
+    "--hidden-import=openpyxl",
+    "--hidden-import=PIL",
+    "--hidden-import=pyperclip",
+    "--collect-all=PyQt6",
+    "--collect-all=PyQt6.QtWebEngineWidgets",
 ]
 for logo in (LOGO_PNG, "Indus Transports LLC (1).jpeg"):
     if os.path.exists(logo):
         cmd.append(f"--add-data={logo}{sep}.")
 if icon_arg:
     cmd += icon_arg
-
-cmd += [
-    "--hidden-import=selenium",
-    "--hidden-import=webdriver_manager",
-    "--hidden-import=PIL",
-    "--hidden-import=pyperclip",
-    "--hidden-import=pygetwindow",
-    "--hidden-import=pandas",
-    "--hidden-import=openpyxl",
-    "--hidden-import=pynput",
-    "--hidden-import=ttkbootstrap",
-    "autodialer_gui.py",
-]
+cmd.append("autodialer_gui.py")
 
 print("\n🔨 Building EXE…")
 result = subprocess.run(cmd)
