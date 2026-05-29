@@ -1,856 +1,923 @@
 #!/usr/bin/env python3
 """
 INDUS TRANSPORTS LLC — Auto Dialer Pro
-Google Voice browser automation with DOM fallback + pyautogui.
+Full CRM + predictive dialer with login, admin panel, and light/dark mode.
+Browser automation via Selenium DOM (no pyautogui).
 """
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import ttkbootstrap as tb
-from ttkbootstrap.constants import *
-import pandas as pd
-import pyautogui
-import time
-import random
-import re
-import webbrowser
-from datetime import datetime
-from pynput import keyboard, mouse
-import csv
 import os
 import json
 import threading
+import webbrowser
+from datetime import datetime
+from tkinter import ttk, filedialog, messagebox, simpledialog
+import tkinter as tk
+import ttkbootstrap as tb
+from ttkbootstrap.constants import *
 
-# ── Optional PIL for logo display ─────────────────────────────────
+import pandas as pd
+
+from src.paths        import (LOGO_PNG, LOGO_JPEG, CONFIG_FILE,
+                               CHROME_PROFILES_DIR)
+from src.crm_db       import CRMDatabase
+from src.phone_utils  import clean_phone, fmt_e164, fmt_display
+from src.predictive_dialer import PredictiveDialer, SlotStatus
+from src.call_session import CallState
+
 try:
     from PIL import Image, ImageTk
-    PIL_AVAILABLE = True
+    PIL_OK = True
 except ImportError:
-    PIL_AVAILABLE = False
+    PIL_OK = False
 
-# ── Optional clipboard paste (faster than char-by-char typing) ────
-try:
-    import pyperclip
-    CLIPBOARD_AVAILABLE = True
-except ImportError:
-    CLIPBOARD_AVAILABLE = False
-
-# ══════════════════════════════════════════════════════════════════
-#  PHONE UTILS
-# ══════════════════════════════════════════════════════════════════
-
-def clean_phone(raw):
-    """
-    Extract 10-digit US number from many formats.
-    Handles: +1XXXXXXXXXX, (XXX)XXX-XXXX, XXX.XXX.XXXX, XXXXXXXXXX
-    Returns 10-digit string or None.
-    """
-    s = str(raw).strip()
-    if not s or s.lower() in ('nan', 'none', ''):
-        return None
-    digits = re.sub(r'\D', '', s)
-    if len(digits) == 11 and digits[0] == '1':
-        digits = digits[1:]
-    if len(digits) != 10:
-        return None
-    if digits[0] in ('0', '1'):      # invalid area code
-        return None
-    if digits[3] in ('0', '1'):      # invalid exchange code
-        return None
-    return digits
-
-
-def fmt_e164(d10):
-    return f"+1{d10}"
-
-
-# ══════════════════════════════════════════════════════════════════
-#  BROWSER AUTOMATION  (Selenium DOM — optional, graceful fallback)
-# ══════════════════════════════════════════════════════════════════
-
-class BrowserAutomation:
-    """
-    Connects to an existing Chrome session via remote-debugging.
-    User must log into Google Voice manually first.
-    This class never bypasses login, CAPTCHA, or 2FA.
-    """
-
-    def __init__(self):
-        self.driver    = None
-        self.connected = False
-        self._ok       = False
-        try:
-            from selenium.webdriver.chrome.options import Options as _Opts
-            from selenium import webdriver as _wd
-            self._Opts      = _Opts
-            self._webdriver = _wd
-            self._ok        = True
-        except ImportError:
-            pass
-
-    def connect(self, port=9222):
-        if not self._ok:
-            return False, "selenium not installed — run: pip install selenium"
-        try:
-            opts = self._Opts()
-            opts.add_experimental_option("debuggerAddress", f"127.0.0.1:{port}")
-            self.driver    = self._webdriver.Chrome(options=opts)
-            self.connected = True
-            return True, "Connected"
-        except Exception as e:
-            self.driver    = None
-            self.connected = False
-            return False, str(e)
-
-    def focus_window(self):
-        try:
-            import pygetwindow as gw
-            for frag in ('Google Voice', 'voice.google.com'):
-                wins = gw.getWindowsWithTitle(frag)
-                if wins:
-                    wins[0].activate()
-                    time.sleep(0.25)
-                    return True
-        except Exception:
-            pass
-        return False
-
-    def dial(self, number_e164):
-        if not self.connected or not self.driver:
-            return False
-        try:
-            from selenium.webdriver.common.by import By
-            from selenium.webdriver.support.ui import WebDriverWait
-            from selenium.webdriver.support import expected_conditions as EC
-            wait = WebDriverWait(self.driver, 3)
-            inp  = None
-            for sel in [
-                'input[placeholder="Enter a number"]',
-                'input[aria-label*="number" i]',
-                'input[aria-label*="Enter" i]',
-            ]:
-                try:
-                    inp = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
-                    break
-                except Exception:
-                    pass
-            if not inp:
-                return False
-            inp.clear()
-            inp.send_keys(number_e164)
-            time.sleep(0.3)
-            for sel in [
-                'button[aria-label*="Call" i]',
-                'button[aria-label*="Dial" i]',
-                '[jsaction*="dial"]',
-            ]:
-                try:
-                    self.driver.find_element(By.CSS_SELECTOR, sel).click()
-                    return True
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        return False
-
-    def hangup(self):
-        if not self.connected or not self.driver:
-            return False
-        try:
-            from selenium.webdriver.common.by import By
-            for sel in [
-                'button[aria-label*="End call" i]',
-                'button[aria-label*="Hang up" i]',
-                'button[aria-label*="hangup" i]',
-            ]:
-                try:
-                    self.driver.find_element(By.CSS_SELECTOR, sel).click()
-                    return True
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        return False
-
-    def disconnect(self):
-        if self.driver:
-            try:
-                self.driver.quit()
-            except Exception:
-                pass
-        self.driver    = None
-        self.connected = False
-
-
-# ══════════════════════════════════════════════════════════════════
-#  CONFIG & LOGGING
-# ══════════════════════════════════════════════════════════════════
-
-BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(BASE_DIR, "dialer_config.json")
-LOG_FILE    = os.path.join(BASE_DIR, "call_logs.csv")
-LOGO_PNG    = os.path.join(BASE_DIR, "Indus_Transports_LLC__1_-removebg-preview (1).png")
-LOGO_JPEG   = os.path.join(BASE_DIR, "Indus Transports LLC (1).jpeg")
-
+# ── Constants ─────────────────────────────────────────────────────────────────
 WHATSAPP_URL = "https://wa.me/923079670503"
 WA_NUMBER    = "+92 307 967 0503"
-TYPE_DELAY   = 0.04
+APP_TITLE    = "INDUS TRANSPORTS LLC — Auto Dialer Pro"
 
-pyautogui.FAILSAFE = True
+DARK_THEME  = "darkly"
+LIGHT_THEME = "flatly"
 
-DEFAULT_CONFIG = {
-    "number_field":      [1514, 315],
-    "call_button":       [1848, 309],
-    "end_call_button":   [1693, 934],
-    "excel_path":        "",
-    "initial_delay":     5,
-    "autocut_duration":  10,
-    "browser_mode":      False,
-    "chrome_debug_port": 9222,
+DARK_PAL = dict(
+    BG="#0d1117", BG2="#161b22", BG3="#1c2128", HDR="#010409",
+    FG="#e6edf3", ACCENT="#00e676", ACCENT2="#58a6ff",
+    WARN="#ffd166", DANGER="#ff4444", PURPLE="#c084fc",
+    ORANGE="#ff6b35", MUTED="#8b949e", WA="#25D366",
+    CARD="#1c2128", BORDER="#30363d",
+)
+LIGHT_PAL = dict(
+    BG="#f6f8fa", BG2="#ffffff", BG3="#f1f3f5", HDR="#24292f",
+    FG="#24292f", ACCENT="#1a7f37", ACCENT2="#0969da",
+    WARN="#9a6700", DANGER="#cf222e", PURPLE="#8250df",
+    ORANGE="#bc4c00", MUTED="#57606a", WA="#128C7E",
+    CARD="#ffffff", BORDER="#d0d7de",
+)
+
+STATUS_COLORS = {
+    SlotStatus.IDLE:      "MUTED",
+    SlotStatus.LAUNCHING: "ACCENT2",
+    SlotStatus.LOGIN_WAIT:"WARN",
+    SlotStatus.DIALING:   "ACCENT2",
+    SlotStatus.RINGING:   "WARN",
+    SlotStatus.CONNECTED: "ACCENT",
+    SlotStatus.VOICEMAIL: "ORANGE",
+    SlotStatus.NO_ANSWER: "MUTED",
+    SlotStatus.FAILED:    "DANGER",
+    SlotStatus.STOPPED:   "MUTED",
 }
 
-COMPLETED_STATUSES = {"ENDED"}
-
-
-def load_config():
+# ── Config helpers ────────────────────────────────────────────────────────────
+def _load_cfg() -> dict:
+    defaults = {"theme": "dark", "n_slots": 2, "call_timeout": 60,
+                "cooldown_min": 2.0, "cooldown_max": 4.0,
+                "excel_path": ""}
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, "r") as fh:
-                cfg = json.load(fh)
-            for k, v in DEFAULT_CONFIG.items():
+            with open(CONFIG_FILE) as f:
+                cfg = json.load(f)
+            for k, v in defaults.items():
                 if k not in cfg:
                     cfg[k] = v
             return cfg
         except Exception:
             pass
-    return DEFAULT_CONFIG.copy()
+    return defaults
 
-
-def save_config(cfg):
+def _save_cfg(cfg: dict) -> None:
     try:
-        with open(CONFIG_FILE, "w") as fh:
-            json.dump(cfg, fh, indent=2)
-    except Exception as e:
-        print(f"[WARN] save_config: {e}")
-
-
-def log_call(number, status):
-    try:
-        exists = os.path.isfile(LOG_FILE)
-        with open(LOG_FILE, mode='a', newline='', encoding='utf-8') as fh:
-            w = csv.writer(fh)
-            if not exists:
-                w.writerow(["Time", "Phone", "Status"])
-            w.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), number, status])
-    except Exception as e:
-        print(f"[WARN] log_call: {e}")
-
-
-def get_completed_numbers():
-    if not os.path.exists(LOG_FILE):
-        return set()
-    done = set()
-    try:
-        with open(LOG_FILE, mode='r', encoding='utf-8') as fh:
-            for row in csv.DictReader(fh):
-                if row.get("Status") in COMPLETED_STATUSES:
-                    done.add(row["Phone"])
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(cfg, f, indent=2)
     except Exception:
         pass
-    return done
 
 
-def load_call_logs():
-    logs = []
-    if not os.path.exists(LOG_FILE):
-        return logs
-    try:
-        with open(LOG_FILE, mode='r', encoding='utf-8') as fh:
-            for row in csv.DictReader(fh):
-                logs.append(row)
-    except Exception:
-        pass
-    return logs
+# ══════════════════════════════════════════════════════════════════════════════
+#  ROOT CONTROLLER
+# ══════════════════════════════════════════════════════════════════════════════
+
+class DialerApp:
+    """Manages login → main-app lifecycle on a single root window."""
+
+    def __init__(self, root: tb.Window):
+        self.root  = root
+        self.root.title(APP_TITLE)
+        self.root.geometry("1140x820")
+        self.root.minsize(980, 720)
+        self.db    = CRMDatabase()
+        self.cfg   = _load_cfg()
+        self._frame: tk.Widget | None = None
+        self._user: dict | None = None
+        self._apply_theme(self.cfg.get("theme", "dark"), boot=True)
+
+        if self.db.needs_admin_setup():
+            self._show_admin_setup()
+        else:
+            self._show_login()
+
+    def _apply_theme(self, name: str, boot: bool = False) -> None:
+        theme = DARK_THEME if name == "dark" else LIGHT_THEME
+        if boot:
+            self.root.style.theme_use(theme)
+        else:
+            try:
+                self.root.style.theme_use(theme)
+            except Exception:
+                pass
+        self.cfg["theme"] = name
+        _save_cfg(self.cfg)
+        self.pal = DARK_PAL if name == "dark" else LIGHT_PAL
+
+    def _clear(self) -> None:
+        if self._frame:
+            self._frame.destroy()
+            self._frame = None
+
+    def _show_admin_setup(self) -> None:
+        self._clear()
+        self._frame = AdminSetupFrame(self.root, self, self.db)
+        self._frame.pack(fill=BOTH, expand=True)
+
+    def _show_login(self) -> None:
+        self._clear()
+        self._frame = LoginFrame(self.root, self, self.db)
+        self._frame.pack(fill=BOTH, expand=True)
+
+    def after_login(self, user: dict) -> None:
+        self._user = user
+        self._clear()
+        self._frame = MainApp(self.root, self, self.db, user, self.cfg)
+        self._frame.pack(fill=BOTH, expand=True)
+
+    def logout(self) -> None:
+        self._user = None
+        self._show_login()
+
+    def toggle_theme(self) -> None:
+        new = "light" if self.cfg.get("theme") == "dark" else "dark"
+        self._apply_theme(new)
+        messagebox.showinfo(
+            "Theme Changed",
+            f"Switched to {new.title()} mode.\n"
+            "Restart the app for a complete refresh.",
+            parent=self.root
+        )
 
 
-# ══════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+#  ADMIN FIRST-RUN SETUP
+# ══════════════════════════════════════════════════════════════════════════════
+
+class AdminSetupFrame(tk.Frame):
+    def __init__(self, parent, app: DialerApp, db: CRMDatabase):
+        super().__init__(parent, bg=app.pal["BG"])
+        self.app = app
+        self.db  = db
+        p = app.pal
+        self._logo = _load_logo(p)
+
+        # Centre card
+        card = tk.Frame(self, bg=p["BG2"], bd=0)
+        card.place(relx=0.5, rely=0.5, anchor="center")
+
+        if self._logo:
+            tk.Label(card, image=self._logo, bg=p["BG2"]).pack(pady=(24, 8))
+        tk.Label(card, text="INDUS TRANSPORTS LLC",
+                 font=("Segoe UI", 16, "bold"), bg=p["BG2"], fg=p["ACCENT"]
+                 ).pack()
+        tk.Label(card, text="Create Administrator Account",
+                 font=("Segoe UI", 11), bg=p["BG2"], fg=p["MUTED"]
+                 ).pack(pady=(4, 20))
+
+        def row(label, show=""):
+            tk.Label(card, text=label, font=("Segoe UI", 10),
+                     bg=p["BG2"], fg=p["FG"], anchor="w", width=18).pack(
+                anchor="w", padx=32)
+            e = tk.Entry(card, show=show, font=("Segoe UI", 11),
+                         bg=p["BG3"], fg=p["FG"], insertbackground=p["ACCENT"],
+                         bd=0, relief="flat", highlightthickness=1,
+                         highlightbackground=p["BORDER"], width=30)
+            e.pack(padx=32, pady=(2, 10), ipady=5)
+            return e
+
+        self.e_name  = row("Full Name")
+        self.e_email = row("Email Address")
+        self.e_pw    = row("Password", show="•")
+        self.e_pw2   = row("Confirm Password", show="•")
+
+        tk.Button(card, text="Create Admin Account",
+                  command=self._submit,
+                  font=("Segoe UI", 11, "bold"),
+                  bg=p["ACCENT"], fg="#000000",
+                  activebackground=p["ACCENT2"], cursor="hand2",
+                  bd=0, relief="flat", padx=20, pady=10,
+                  ).pack(pady=(8, 24))
+
+    def _submit(self):
+        name  = self.e_name.get().strip()
+        email = self.e_email.get().strip()
+        pw    = self.e_pw.get()
+        pw2   = self.e_pw2.get()
+        if not all([name, email, pw]):
+            messagebox.showerror("Missing Fields", "All fields are required.")
+            return
+        if pw != pw2:
+            messagebox.showerror("Password Mismatch", "Passwords do not match.")
+            return
+        if len(pw) < 8:
+            messagebox.showerror("Weak Password", "Password must be 8+ characters.")
+            return
+        try:
+            self.db.create_admin(email, name, pw)
+            messagebox.showinfo(
+                "Admin Created",
+                f"Admin account created!\n\nEmail:    {email}\n\n"
+                "Store these credentials securely. This dialog will not appear again."
+            )
+            self.app._show_login()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  LOGIN SCREEN
+# ══════════════════════════════════════════════════════════════════════════════
+
+class LoginFrame(tk.Frame):
+    def __init__(self, parent, app: DialerApp, db: CRMDatabase):
+        super().__init__(parent, bg=app.pal["BG"])
+        self.app = app
+        self.db  = db
+        p = app.pal
+        self._logo = _load_logo(p)
+
+        card = tk.Frame(self, bg=p["BG2"], bd=0)
+        card.place(relx=0.5, rely=0.5, anchor="center")
+
+        if self._logo:
+            tk.Label(card, image=self._logo, bg=p["BG2"]).pack(pady=(28, 8))
+        tk.Label(card, text="INDUS TRANSPORTS LLC",
+                 font=("Segoe UI", 16, "bold"), bg=p["BG2"], fg=p["ACCENT"]
+                 ).pack()
+        tk.Label(card, text="Auto Dialer Pro — Sign In",
+                 font=("Segoe UI", 10), bg=p["BG2"], fg=p["MUTED"]
+                 ).pack(pady=(2, 20))
+
+        def row(label, show=""):
+            tk.Label(card, text=label, font=("Segoe UI", 10),
+                     bg=p["BG2"], fg=p["FG"], anchor="w", width=20).pack(
+                anchor="w", padx=36)
+            e = tk.Entry(card, show=show, font=("Segoe UI", 12),
+                         bg=p["BG3"], fg=p["FG"], insertbackground=p["ACCENT"],
+                         bd=0, relief="flat", highlightthickness=1,
+                         highlightbackground=p["BORDER"], width=28)
+            e.pack(padx=36, pady=(2, 12), ipady=6)
+            return e
+
+        self.e_email = row("Email Address")
+        self.e_pw    = row("Password", show="•")
+        self.e_pw.bind("<Return>", lambda _: self._login())
+
+        tk.Button(card, text="Sign In",
+                  command=self._login,
+                  font=("Segoe UI", 12, "bold"),
+                  bg=p["ACCENT"], fg="#000000",
+                  activebackground=p["ACCENT2"], cursor="hand2",
+                  bd=0, relief="flat", padx=20, pady=10, width=20,
+                  ).pack(pady=(4, 4))
+
+        self.lbl_err = tk.Label(card, text="", font=("Segoe UI", 9),
+                                bg=p["BG2"], fg=p["DANGER"])
+        self.lbl_err.pack(pady=(0, 16))
+
+        tk.Label(card,
+                 text="Contact your administrator for access",
+                 font=("Segoe UI", 8), bg=p["BG2"], fg=p["MUTED"]
+                 ).pack(pady=(0, 24))
+
+        # Theme toggle at bottom
+        tk.Button(self, text="☀ / ☾  Toggle Theme",
+                  command=app.toggle_theme,
+                  font=("Segoe UI", 8), bg=p["BG"], fg=p["MUTED"],
+                  bd=0, relief="flat", cursor="hand2",
+                  ).place(relx=1.0, rely=1.0, anchor="se", x=-16, y=-12)
+
+    def _login(self):
+        email = self.e_email.get().strip()
+        pw    = self.e_pw.get()
+        user  = self.db.authenticate(email, pw)
+        if user:
+            self.app.after_login(user)
+        else:
+            self.lbl_err.config(text="Incorrect email or password.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  MAIN APPLICATION
-# ══════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
-class AutoDialerApp:
+class MainApp(tk.Frame):
+    """Full application shell — shown after successful login."""
 
-    # ── palette ───────────────────────────────────────────────────
-    BG      = "#0d1117"
-    BG2     = "#161b22"
-    BG3     = "#1c2128"
-    HDR     = "#010409"
-    FG      = "#e6edf3"
-    ACCENT  = "#00e676"
-    ACCENT2 = "#58a6ff"
-    WARN    = "#ffd166"
-    DANGER  = "#ff4444"
-    PURPLE  = "#c084fc"
-    ORANGE  = "#ff6b35"
-    GREEN_WA = "#25D366"
-    MUTED   = "#8b949e"
+    def __init__(self, parent, app: DialerApp, db: CRMDatabase,
+                 user: dict, cfg: dict):
+        super().__init__(parent, bg=app.pal["BG"])
+        self.app  = app
+        self.db   = db
+        self.user = user
+        self.cfg  = cfg
+        self.p    = app.pal
 
-    FONT      = ("Segoe UI", 10)
-    FONT_B    = ("Segoe UI", 10, "bold")
-    FONT_LG   = ("Segoe UI", 13, "bold")
-    FONT_XL   = ("Segoe UI", 17, "bold")
-    FONT_SM   = ("Segoe UI", 9)
-    FONT_MONO = ("Consolas", 9)
+        # Dialer state
+        self.contacts:      list[tuple[str, str]] = []
+        self.dialer:        PredictiveDialer | None = None
+        self._slot_labels:  dict = {}   # slot_id → {widgets}
+        self._all_logs:     list = []
 
-    def __init__(self, root):
-        self.root = root
-        self.root.title("INDUS TRANSPORTS LLC — Auto Dialer Pro")
-        self.root.geometry("1100x800")
-        self.root.minsize(960, 700)
-        self.root.configure(bg=self.BG)
+        self._logo_img = _load_logo(self.p)
+        self._build_header()
+        self._build_tabs()
 
-        self.config        = load_config()
-        self.browser       = BrowserAutomation()
-        self.contacts      = []
-        self.current_index = 0
-        self.call_active   = False
-        self.running       = False
-        self.listener      = None
-        self.coord_target  = None
-        self.mouse_listener = None
-        self._all_logs     = []
+    # ── Header ────────────────────────────────────────────────────────────────
 
-        self._logo_img = self._load_logo()
-        self._build_ui()
-        self._load_logs_table()
+    def _build_header(self):
+        h = tk.Frame(self, bg=self.p["HDR"], height=68)
+        h.pack(fill=X)
+        h.pack_propagate(False)
 
-    # ── logo ──────────────────────────────────────────────────────
-    def _load_logo(self):
-        if not PIL_AVAILABLE:
-            return None
-        for path in [LOGO_PNG, LOGO_JPEG]:
-            if os.path.exists(path):
-                try:
-                    img = Image.open(path).convert("RGBA")
-                    img.thumbnail((220, 52), Image.LANCZOS)
-                    return ImageTk.PhotoImage(img)
-                except Exception:
-                    pass
-        return None
+        left = tk.Frame(h, bg=self.p["HDR"])
+        left.pack(side=LEFT, padx=16, pady=8)
+        if self._logo_img:
+            tk.Label(left, image=self._logo_img,
+                     bg=self.p["HDR"]).pack(side=LEFT, padx=(0, 12))
+        col = tk.Frame(left, bg=self.p["HDR"])
+        col.pack(side=LEFT)
+        tk.Label(col, text="INDUS TRANSPORTS LLC",
+                 font=("Segoe UI", 14, "bold"),
+                 bg=self.p["HDR"], fg=self.p["ACCENT"]).pack(anchor=W)
+        tk.Label(col, text="Auto Dialer Pro  •  Google Voice",
+                 font=("Segoe UI", 8),
+                 bg=self.p["HDR"], fg=self.p["MUTED"]).pack(anchor=W)
 
-    # ── helpers ───────────────────────────────────────────────────
+        right = tk.Frame(h, bg=self.p["HDR"])
+        right.pack(side=RIGHT, padx=16, pady=8)
+
+        tk.Button(right, text="⏻  Logout",
+                  command=self._logout,
+                  font=("Segoe UI", 9), bg=self.p["HDR"], fg=self.p["MUTED"],
+                  bd=0, relief="flat", cursor="hand2", padx=6,
+                  ).pack(side=RIGHT, padx=(8, 0))
+
+        tk.Button(right, text="☀/☾",
+                  command=self.app.toggle_theme,
+                  font=("Segoe UI", 9), bg=self.p["HDR"], fg=self.p["MUTED"],
+                  bd=0, relief="flat", cursor="hand2",
+                  ).pack(side=RIGHT, padx=4)
+
+        tk.Frame(right, bg=self.p["BORDER"], width=1).pack(
+            side=RIGHT, fill=Y, padx=8)
+
+        tk.Button(right, text="💬  WhatsApp Support",
+                  command=lambda: webbrowser.open(WHATSAPP_URL),
+                  font=("Segoe UI", 9, "bold"), cursor="hand2",
+                  bg="#0d2b1a", fg=self.p["WA"],
+                  bd=0, relief="flat", padx=8, pady=4,
+                  highlightbackground=self.p["WA"], highlightthickness=1,
+                  ).pack(side=RIGHT, padx=4)
+        tk.Label(right, text=WA_NUMBER,
+                 font=("Segoe UI", 8), bg=self.p["HDR"], fg=self.p["WA"],
+                 ).pack(side=RIGHT, padx=(0, 4))
+
+        # User badge
+        tk.Frame(right, bg=self.p["BORDER"], width=1).pack(
+            side=RIGHT, fill=Y, padx=8)
+        role_color = self.p["WARN"] if self.user["role"] == "admin" else self.p["ACCENT2"]
+        tk.Label(right,
+                 text=f"👤 {self.user['name']}  [{self.user['role'].upper()}]",
+                 font=("Segoe UI", 9), bg=self.p["HDR"], fg=role_color,
+                 ).pack(side=RIGHT)
+
+    # ── Tabs ──────────────────────────────────────────────────────────────────
+
+    def _build_tabs(self):
+        sty = ttk.Style()
+        sty.configure("TNotebook",     background=self.p["BG"],  borderwidth=0)
+        sty.configure("TNotebook.Tab", background=self.p["HDR"], foreground=self.p["MUTED"],
+                      font=("Segoe UI", 10), padding=[14, 6])
+        sty.map("TNotebook.Tab",
+                background=[("selected", self.p["BG2"])],
+                foreground=[("selected", self.p["ACCENT"])])
+
+        nb = ttk.Notebook(self)
+        nb.pack(fill=BOTH, expand=True, padx=8, pady=(4, 8))
+
+        tabs = [
+            ("  🚀  Dialer",       self._build_dialer_tab),
+            ("  📞  Live Calls",   self._build_live_calls_tab),
+            ("  📋  Call Logs",    self._build_logs_tab),
+            ("  🏢  CRM",          self._build_crm_tab),
+            ("  ⚙️  Settings",     self._build_settings_tab),
+        ]
+        if self.user["role"] == "admin":
+            tabs.append(("  👑  Admin", self._build_admin_tab))
+
+        for label, builder in tabs:
+            f = tk.Frame(nb, bg=self.p["BG"])
+            nb.add(f, text=label)
+            builder(f)
+
+    # ── UI helpers ────────────────────────────────────────────────────────────
+
     def _lf(self, parent, text, fg=None):
-        return tk.LabelFrame(
-            parent, text=text,
-            bg=self.BG2, fg=fg or self.ACCENT2,
-            font=("Segoe UI", 9, "bold"),
-            bd=1, relief="groove",
-        )
+        return tk.LabelFrame(parent, text=text,
+                              bg=self.p["BG2"], fg=fg or self.p["ACCENT2"],
+                              font=("Segoe UI", 9, "bold"), bd=1, relief="groove")
 
-    def _btn(self, parent, text, command, color=None, width=None, state=NORMAL):
-        color = color or self.ACCENT2
-        kw = dict(
-            text=text, command=command,
-            bg=self.BG3, fg=color,
-            activebackground="#1c3040", activeforeground=color,
-            font=self.FONT_B, bd=0, relief="flat",
-            highlightbackground=color, highlightthickness=1,
-            cursor="hand2", state=state, padx=12, pady=6,
-        )
+    def _btn(self, parent, text, cmd, color=None, width=None, state=NORMAL):
+        color = color or self.p["ACCENT2"]
+        kw = dict(text=text, command=cmd,
+                  bg=self.p["BG3"], fg=color,
+                  activebackground=self.p["BG2"], activeforeground=color,
+                  font=("Segoe UI", 10, "bold"), bd=0, relief="flat",
+                  highlightbackground=color, highlightthickness=1,
+                  cursor="hand2", state=state, padx=10, pady=6)
         if width:
             kw["width"] = width
         return tk.Button(parent, **kw)
 
-    def _label(self, parent, text, font=None, fg=None, bg=None):
-        return tk.Label(parent,
-                        text=text,
-                        font=font or self.FONT,
-                        fg=fg or self.FG,
-                        bg=bg or self.BG2)
+    def _log(self, msg: str):
+        def _w():
+            if not hasattr(self, "console"):
+                return
+            self.console.configure(state=NORMAL)
+            ts = datetime.now().strftime("%H:%M:%S")
+            self.console.insert(END, f"[{ts}]  {msg}\n")
+            self.console.see(END)
+            self.console.configure(state=DISABLED)
+        self.after(0, _w)
 
-    # ══════════════════════════════════════════════════════════════
-    #  BUILD UI
-    # ══════════════════════════════════════════════════════════════
+    def _logout(self):
+        if self.dialer and self.dialer.is_running():
+            if not messagebox.askyesno(
+                    "Active Dialer", "Dialer is running. Stop and logout?"):
+                return
+            self.dialer.stop()
+        self.app.logout()
 
-    def _build_ui(self):
-        self._build_header()
-        self._build_tabs()
-
-    # ── header ────────────────────────────────────────────────────
-    def _build_header(self):
-        hdr = tk.Frame(self.root, bg=self.HDR, height=70)
-        hdr.pack(fill=X)
-        hdr.pack_propagate(False)
-
-        # left: logo + company name
-        left = tk.Frame(hdr, bg=self.HDR)
-        left.pack(side=LEFT, padx=18, pady=8)
-
-        if self._logo_img:
-            tk.Label(left, image=self._logo_img, bg=self.HDR,
-                     cursor="arrow").pack(side=LEFT, padx=(0, 14))
-
-        title_col = tk.Frame(left, bg=self.HDR)
-        title_col.pack(side=LEFT)
-        tk.Label(title_col, text="INDUS TRANSPORTS LLC",
-                 font=("Segoe UI", 15, "bold"),
-                 bg=self.HDR, fg=self.ACCENT).pack(anchor=W)
-        tk.Label(title_col, text="Auto Dialer Pro  •  Google Voice Edition",
-                 font=("Segoe UI", 9),
-                 bg=self.HDR, fg=self.MUTED).pack(anchor=W)
-
-        # right: status + whatsapp
-        right = tk.Frame(hdr, bg=self.HDR)
-        right.pack(side=RIGHT, padx=18, pady=8)
-
-        self.status_badge = tk.Label(right, text="● IDLE",
-                                     font=("Segoe UI", 10, "bold"),
-                                     bg=self.HDR, fg=self.MUTED)
-        self.status_badge.pack(side=RIGHT, padx=(16, 0))
-
-        tk.Frame(right, bg=self.MUTED, width=1).pack(side=RIGHT, fill=Y, padx=12)
-
-        wa_col = tk.Frame(right, bg=self.HDR)
-        wa_col.pack(side=RIGHT)
-        tk.Button(wa_col,
-                  text="💬  WhatsApp Help & Support",
-                  command=lambda: webbrowser.open(WHATSAPP_URL),
-                  bg="#0d2b1a", fg=self.GREEN_WA,
-                  activebackground="#1a3d25", activeforeground=self.GREEN_WA,
-                  font=("Segoe UI", 9, "bold"),
-                  bd=0, relief="flat",
-                  highlightbackground=self.GREEN_WA, highlightthickness=1,
-                  cursor="hand2", padx=10, pady=4,
-                  ).pack(anchor=E)
-        tk.Label(wa_col, text=WA_NUMBER,
-                 font=("Segoe UI", 8),
-                 bg=self.HDR, fg=self.GREEN_WA).pack(anchor=E, pady=(2, 0))
-
-    # ── tabs ──────────────────────────────────────────────────────
-    def _build_tabs(self):
-        sty = ttk.Style()
-        sty.theme_use("clam")
-        sty.configure("TNotebook",     background=self.BG,  borderwidth=0)
-        sty.configure("TNotebook.Tab", background=self.HDR, foreground=self.MUTED,
-                      font=("Segoe UI", 10), padding=[16, 7])
-        sty.map("TNotebook.Tab",
-                background=[("selected", self.BG2)],
-                foreground=[("selected", self.ACCENT)])
-
-        nb = ttk.Notebook(self.root)
-        nb.pack(fill=BOTH, expand=True, padx=10, pady=(6, 10))
-
-        self.tab_dialer = tk.Frame(nb, bg=self.BG)
-        self.tab_coords = tk.Frame(nb, bg=self.BG)
-        self.tab_logs   = tk.Frame(nb, bg=self.BG)
-
-        nb.add(self.tab_dialer, text="  🚀  Dialer  ")
-        nb.add(self.tab_coords, text="  🎯  Coordinates  ")
-        nb.add(self.tab_logs,   text="  📋  Call Logs  ")
-
-        self._build_dialer_tab()
-        self._build_coords_tab()
-        self._build_logs_tab()
-
-    # ══════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════════
     #  DIALER TAB
-    # ══════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════════
 
-    def _build_dialer_tab(self):
-        f = self.tab_dialer
-
+    def _build_dialer_tab(self, f: tk.Frame):
         # File picker
-        fc = self._lf(f, "  📂  Phone List  (Excel .xlsx / .xls)", fg=self.ACCENT2)
-        fc.pack(fill=X, padx=16, pady=(14, 6))
+        fc = self._lf(f, "  📂  Phone List  (Excel .xlsx / .xls)")
+        fc.pack(fill=X, padx=14, pady=(12, 6))
         fc.columnconfigure(0, weight=1)
 
-        self.excel_var = tk.StringVar(value=self.config.get("excel_path", ""))
+        self.excel_var = tk.StringVar(value=self.cfg.get("excel_path", ""))
         tk.Entry(fc, textvariable=self.excel_var,
-                 bg=self.HDR, fg=self.FG, insertbackground=self.ACCENT,
-                 font=self.FONT_MONO, bd=0, relief="flat",
-                 highlightthickness=1, highlightbackground=self.MUTED,
+                 bg=self.p["HDR"], fg=self.p["FG"],
+                 insertbackground=self.p["ACCENT"],
+                 font=("Consolas", 9), bd=0, relief="flat",
+                 highlightthickness=1, highlightbackground=self.p["BORDER"],
                  ).grid(row=0, column=0, sticky="ew", padx=(10, 8), pady=10, ipady=5)
-        self._btn(fc, "📂  Browse", self._browse_file,
-                  color=self.ACCENT2).grid(row=0, column=1, padx=(0, 10), pady=10)
+        self._btn(fc, "📂 Browse", self._browse, color=self.p["ACCENT2"]
+                  ).grid(row=0, column=1, padx=(0, 10), pady=10)
 
         # Settings
-        sc = self._lf(f, "  ⚙️  Settings")
-        sc.pack(fill=X, padx=16, pady=6)
+        sc = self._lf(f, "  ⚙️  Dialer Settings")
+        sc.pack(fill=X, padx=14, pady=6)
 
-        tk.Label(sc, text="Start Delay (sec):", font=self.FONT,
-                 bg=self.BG2, fg=self.FG).pack(side=LEFT, padx=(12, 4), pady=8)
-        self.delay_var = tk.IntVar(value=self.config.get("initial_delay", 5))
-        tk.Spinbox(sc, from_=2, to=30, textvariable=self.delay_var, width=4,
-                   font=self.FONT, bg=self.HDR, fg=self.ACCENT,
-                   buttonbackground=self.BG2, insertbackground=self.ACCENT,
+        def lbl(parent, text):
+            return tk.Label(parent, text=text, font=("Segoe UI", 10),
+                            bg=self.p["BG2"], fg=self.p["FG"])
+
+        lbl(sc, "Simultaneous Slots:").pack(side=LEFT, padx=(12, 4), pady=8)
+        self.slots_var = tk.IntVar(value=self.cfg.get("n_slots", 2))
+        tk.Spinbox(sc, from_=1, to=5, textvariable=self.slots_var, width=3,
+                   font=("Segoe UI", 10), bg=self.p["HDR"], fg=self.p["ACCENT"],
+                   buttonbackground=self.p["BG2"],
                    ).pack(side=LEFT, pady=8)
 
-        tk.Label(sc, text="   Auto-Cut Duration (sec):", font=self.FONT,
-                 bg=self.BG2, fg=self.FG).pack(side=LEFT, padx=(18, 4))
-        self.autocut_var = tk.IntVar(value=self.config.get("autocut_duration", 10))
-        tk.Spinbox(sc, from_=5, to=300, textvariable=self.autocut_var, width=4,
-                   font=self.FONT, bg=self.HDR, fg=self.PURPLE,
-                   buttonbackground=self.BG2, insertbackground=self.PURPLE,
+        lbl(sc, "   Call Timeout (sec):").pack(side=LEFT, padx=(16, 4))
+        self.timeout_var = tk.IntVar(value=self.cfg.get("call_timeout", 60))
+        tk.Spinbox(sc, from_=20, to=120, textvariable=self.timeout_var, width=4,
+                   font=("Segoe UI", 10), bg=self.p["HDR"], fg=self.p["ACCENT"],
+                   buttonbackground=self.p["BG2"],
                    ).pack(side=LEFT, pady=8)
-        tk.Label(sc, text="(auto-cut only)", font=self.FONT_SM,
-                 bg=self.BG2, fg=self.MUTED).pack(side=LEFT, padx=(4, 20))
 
-        self.browser_mode_var = tk.BooleanVar(value=self.config.get("browser_mode", False))
-        tk.Checkbutton(sc,
-                       text="🌐  Browser DOM Mode (Selenium)",
-                       variable=self.browser_mode_var,
-                       command=self._on_browser_mode_toggle,
-                       bg=self.BG2, fg=self.ACCENT2,
-                       selectcolor=self.HDR, activebackground=self.BG2,
-                       font=self.FONT, padx=6,
-                       ).pack(side=LEFT)
+        lbl(sc, "   Cooldown (sec):").pack(side=LEFT, padx=(16, 4))
+        self.cooldown_var = tk.DoubleVar(value=self.cfg.get("cooldown_min", 2.0))
+        tk.Spinbox(sc, from_=0, to=30, increment=0.5,
+                   textvariable=self.cooldown_var, width=4,
+                   font=("Segoe UI", 10), bg=self.p["HDR"], fg=self.p["PURPLE"],
+                   buttonbackground=self.p["BG2"],
+                   ).pack(side=LEFT, pady=8)
 
         # Progress
-        pc = self._lf(f, "  📊  Progress", fg=self.ACCENT2)
-        pc.pack(fill=X, padx=16, pady=6)
-
-        sr = tk.Frame(pc, bg=self.BG2)
+        pc = self._lf(f, "  📊  Progress")
+        pc.pack(fill=X, padx=14, pady=6)
+        sr = tk.Frame(pc, bg=self.p["BG2"])
         sr.pack(fill=X, padx=10, pady=(8, 4))
 
-        def stat(lbl, col):
-            tk.Label(sr, text=lbl, font=self.FONT, bg=self.BG2, fg=self.MUTED).pack(side=LEFT)
-            v = tk.Label(sr, text="—", font=self.FONT_B, bg=self.BG2, fg=col)
+        def stat(lbl_text, col):
+            tk.Label(sr, text=lbl_text, font=("Segoe UI", 10),
+                     bg=self.p["BG2"], fg=self.p["MUTED"]).pack(side=LEFT)
+            v = tk.Label(sr, text="—", font=("Segoe UI", 10, "bold"),
+                         bg=self.p["BG2"], fg=self.p[col])
             v.pack(side=LEFT, padx=(2, 16))
             return v
 
-        self.lbl_total     = stat("Total:",     self.ACCENT2)
-        self.lbl_done      = stat("Completed:", self.ACCENT)
-        self.lbl_remaining = stat("Remaining:", self.WARN)
-        self.lbl_skipped   = stat("Invalid:",   self.ORANGE)
+        self.lbl_total   = stat("Total:", "ACCENT2")
+        self.lbl_done    = stat("Completed:", "ACCENT")
+        self.lbl_rem     = stat("Remaining:", "WARN")
+        self.lbl_invalid = stat("Invalid:", "ORANGE")
 
-        ps = ttk.Style()
-        ps.configure("G.Horizontal.TProgressbar",
-                     troughcolor=self.HDR, background=self.ACCENT, thickness=14)
-        self.progress_bar = ttk.Progressbar(pc,
-                                            style="G.Horizontal.TProgressbar",
-                                            mode="determinate")
-        self.progress_bar.pack(fill=X, padx=10, pady=(0, 10))
+        pb_sty = ttk.Style()
+        pb_sty.configure("G.Horizontal.TProgressbar",
+                         troughcolor=self.p["HDR"],
+                         background=self.p["ACCENT"], thickness=12)
+        self.progress = ttk.Progressbar(pc, style="G.Horizontal.TProgressbar",
+                                        mode="determinate")
+        self.progress.pack(fill=X, padx=10, pady=(0, 10))
 
-        # Current call
-        cc = self._lf(f, "  📞  Current Call", fg=self.WARN)
-        cc.pack(fill=X, padx=16, pady=6)
-        self.lbl_current = tk.Label(cc, text="No active call",
-                                    font=("Segoe UI", 13, "bold"),
-                                    bg=self.BG2, fg=self.WARN)
-        self.lbl_current.pack(pady=10)
+        # Buttons
+        bf = tk.Frame(f, bg=self.p["BG"])
+        bf.pack(fill=X, padx=14, pady=(8, 4))
 
-        # Control buttons
-        bf = tk.Frame(f, bg=self.BG)
-        bf.pack(fill=X, padx=16, pady=(10, 4))
+        self.btn_load  = self._btn(bf, "⬇  Load Numbers",  self._load_numbers, color=self.p["ACCENT2"], width=18)
+        self.btn_start = self._btn(bf, "▶  Start Dialer",   self._start_power_dial, color=self.p["ACCENT"],  width=18, state=DISABLED)
+        self.btn_stop  = self._btn(bf, "⏹  Stop All",       self._stop_dialer,  color=self.p["DANGER"],  width=14, state=DISABLED)
 
-        self.btn_load  = self._btn(bf, "⬇  Load Numbers",  self._load_numbers,  color=self.ACCENT2, width=18)
-        self.btn_start = self._btn(bf, "▶  Start Dialer",   self._start_dialer,  color=self.ACCENT,  width=18, state=DISABLED)
-        self.btn_next  = self._btn(bf, "⏭  Next Call [X]",  self._manual_next,   color=self.WARN,    width=18, state=DISABLED)
-        self.btn_stop  = self._btn(bf, "⏹  Stop",           self._stop_dialer,   color=self.DANGER,  width=12, state=DISABLED)
-
-        for b in (self.btn_load, self.btn_start, self.btn_next, self.btn_stop):
+        for b in (self.btn_load, self.btn_start, self.btn_stop):
             b.pack(side=LEFT, padx=4)
 
-        # Auto-Cut row
-        bf2 = tk.Frame(f, bg=self.BG)
-        bf2.pack(fill=X, padx=16, pady=(0, 4))
-        tk.Frame(bf2, bg=self.MUTED, height=1).pack(fill=X, pady=(2, 6))
-        tk.Label(bf2, text="🤖  Auto-Cut Mode:", font=self.FONT_B,
-                 bg=self.BG, fg=self.PURPLE).pack(side=LEFT, padx=(4, 8))
-        self.btn_autocut = self._btn(
-            bf2, "⚡  Start Auto-Cut  (dial → wait → hangup → repeat)",
-            self._start_autocut, color=self.PURPLE, width=50, state=DISABLED
-        )
-        self.btn_autocut.pack(side=LEFT, padx=4)
-
-        # Activity console
+        # Console
         lc = self._lf(f, "  🖥️  Activity Log")
-        lc.pack(fill=BOTH, expand=True, padx=16, pady=(6, 10))
-        self.console = tk.Text(
-            lc, height=8, font=self.FONT_MONO,
-            bg="#050e18", fg=self.ACCENT,
-            insertbackground=self.ACCENT,
-            bd=0, relief="flat", state=DISABLED,
-            wrap="word", padx=8, pady=6,
-        )
-        cs = tk.Scrollbar(lc, command=self.console.yview,
-                          bg=self.BG2, troughcolor=self.HDR)
-        self.console.configure(yscrollcommand=cs.set)
-        cs.pack(side=RIGHT, fill=Y)
+        lc.pack(fill=BOTH, expand=True, padx=14, pady=(6, 10))
+        self.console = tk.Text(lc, height=9, font=("Consolas", 9),
+                               bg="#050e18" if self.p is DARK_PAL else "#f0f0f0",
+                               fg=self.p["ACCENT"],
+                               insertbackground=self.p["ACCENT"],
+                               bd=0, relief="flat", state=DISABLED,
+                               wrap="word", padx=8, pady=6)
+        sc2 = tk.Scrollbar(lc, command=self.console.yview,
+                           bg=self.p["BG2"])
+        self.console.configure(yscrollcommand=sc2.set)
+        sc2.pack(side=RIGHT, fill=Y)
         self.console.pack(fill=BOTH, expand=True, padx=(8, 0), pady=8)
 
-    # ══════════════════════════════════════════════════════════════
-    #  COORDINATES TAB
-    # ══════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════════
+    #  LIVE CALLS TAB  (predictive dialer panel)
+    # ══════════════════════════════════════════════════════════════════════════
 
-    def _build_coords_tab(self):
-        f = self.tab_coords
-
-        tk.Label(f, text="Screen Coordinate Setup",
-                 font=self.FONT_XL, bg=self.BG, fg=self.ACCENT).pack(pady=(20, 4))
+    def _build_live_calls_tab(self, f: tk.Frame):
+        tk.Label(f, text="Live Call Slots",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=self.p["BG"], fg=self.p["ACCENT2"]).pack(
+            anchor=W, padx=16, pady=(12, 2))
         tk.Label(f,
-                 text="Click  🎯 Pick  then click the matching element on your Google Voice screen.",
-                 font=self.FONT_SM, bg=self.BG, fg=self.MUTED).pack(pady=(0, 10))
+                 text="When a slot shows CONNECTED, the Chrome window comes to front automatically.\n"
+                      "Click  Release Slot  when the agent finishes the conversation.",
+                 font=("Segoe UI", 9), bg=self.p["BG"], fg=self.p["MUTED"],
+                 justify=LEFT).pack(anchor=W, padx=16, pady=(0, 10))
 
-        # Browser connect panel
-        bc = self._lf(f, "  🌐  Browser DOM Mode  (Selenium — optional)", fg=self.ACCENT2)
-        bc.pack(fill=X, padx=50, pady=(0, 10))
+        # Slot cards container
+        self.slots_frame = tk.Frame(f, bg=self.p["BG"])
+        self.slots_frame.pack(fill=X, padx=14, pady=4)
 
-        br = tk.Frame(bc, bg=self.BG2)
-        br.pack(fill=X, padx=12, pady=8)
+        # Build slot cards (default 2; rebuilt on dialer start)
+        self._build_slot_cards(self.cfg.get("n_slots", 2))
 
-        tk.Label(br, text="Chrome Debug Port:", font=self.FONT,
-                 bg=self.BG2, fg=self.FG).pack(side=LEFT)
-        self.port_var = tk.IntVar(value=self.config.get("chrome_debug_port", 9222))
-        tk.Spinbox(br, from_=1024, to=65535, textvariable=self.port_var, width=6,
-                   font=self.FONT, bg=self.HDR, fg=self.ACCENT2,
-                   buttonbackground=self.BG2).pack(side=LEFT, padx=(6, 16))
-        self._btn(br, "🔌  Connect to Chrome",
-                  self._connect_browser, color=self.ACCENT2, width=22).pack(side=LEFT)
-        self.browser_status = tk.Label(br, text="Not connected",
-                                       font=self.FONT, bg=self.BG2, fg=self.MUTED)
-        self.browser_status.pack(side=LEFT, padx=12)
+        # Bottom controls
+        bf = tk.Frame(f, bg=self.p["BG"])
+        bf.pack(fill=X, padx=14, pady=10)
+        self._btn(bf, "▶  Start Power Dial", self._start_power_dial,
+                  color=self.p["ACCENT"], width=22).pack(side=LEFT, padx=4)
+        self._btn(bf, "⏹  Stop All",         self._stop_dialer,
+                  color=self.p["DANGER"], width=14).pack(side=LEFT, padx=4)
 
-        tk.Label(bc,
-                 text="How to enable: launch Chrome with --remote-debugging-port=9222\n"
-                      "Then log into Google Voice normally.  This app will NOT bypass login or security.",
-                 font=("Segoe UI", 8), bg=self.BG2, fg=self.MUTED, justify=LEFT,
-                 ).pack(anchor=W, padx=12, pady=(0, 8))
+    def _build_slot_cards(self, n: int):
+        for w in self.slots_frame.winfo_children():
+            w.destroy()
+        self._slot_labels = {}
+        for i in range(n):
+            self._slot_labels[i] = self._make_slot_card(self.slots_frame, i)
 
-        # Coordinates grid
-        cc = self._lf(f, "  🖱️  Coordinate Settings  (used when Browser DOM Mode is OFF)",
-                      fg=self.ACCENT2)
-        cc.pack(fill=X, padx=50, pady=6)
-        cc.columnconfigure(1, weight=1)
+    def _make_slot_card(self, parent, slot_id: int) -> dict:
+        card = tk.Frame(parent, bg=self.p["CARD"],
+                        highlightbackground=self.p["BORDER"],
+                        highlightthickness=1, padx=12, pady=10)
+        card.grid(row=slot_id // 2, column=slot_id % 2,
+                  padx=8, pady=6, sticky="ew")
+        parent.columnconfigure(0, weight=1)
+        parent.columnconfigure(1, weight=1)
 
-        fields = [
-            ("number_field",    "📱  Number Input Field",  "Where the phone number is typed"),
-            ("call_button",     "📞  Call / Dial Button",  "Button that starts the call"),
-            ("end_call_button", "🔴  End Call Button",     "Button that hangs up the call"),
-        ]
-        self.coord_vars = {}
-        for i, (key, label, hint) in enumerate(fields):
-            tk.Label(cc, text=label, font=self.FONT_B,
-                     bg=self.BG2, fg=self.FG).grid(row=i, column=0, sticky=W,
-                                                    pady=10, padx=(12, 8))
-            x_var = tk.IntVar(value=self.config[key][0])
-            y_var = tk.IntVar(value=self.config[key][1])
-            self.coord_vars[key] = (x_var, y_var)
+        def lbl(text, font=None, fg=None):
+            l = tk.Label(card, text=text,
+                         font=font or ("Segoe UI", 9),
+                         bg=self.p["CARD"], fg=fg or self.p["FG"])
+            l.pack(anchor=W)
+            return l
 
-            cf2 = tk.Frame(cc, bg=self.BG2)
-            cf2.grid(row=i, column=1, sticky=W, pady=6)
-            for lbl_txt, var in [("X:", x_var), ("Y:", y_var)]:
-                tk.Label(cf2, text=lbl_txt, font=self.FONT,
-                         bg=self.BG2, fg=self.MUTED).pack(side=LEFT)
-                tk.Entry(cf2, textvariable=var, width=7,
-                         font=("Consolas", 11, "bold"),
-                         bg=self.HDR, fg=self.ACCENT,
-                         insertbackground=self.ACCENT,
-                         relief="flat", bd=0,
-                         highlightthickness=1, highlightbackground=self.MUTED,
-                         ).pack(side=LEFT, padx=(2, 12), ipady=4)
+        title = lbl(f"Slot {slot_id + 1}",
+                    font=("Segoe UI", 11, "bold"), fg=self.p["ACCENT2"])
+        status_lbl = lbl("● IDLE", font=("Segoe UI", 10, "bold"),
+                          fg=self.p["MUTED"])
+        phone_lbl  = lbl("—", fg=self.p["MUTED"])
+        dur_lbl    = lbl("Duration: —", fg=self.p["MUTED"])
 
-            self._btn(cc, "🎯 Pick",
-                      lambda k=key: self._pick_coordinate(k),
-                      color=self.WARN, width=10).grid(row=i, column=2, padx=10)
-            tk.Label(cc, text=hint, font=self.FONT_SM,
-                     bg=self.BG2, fg=self.MUTED).grid(row=i, column=3,
-                                                       sticky=W, padx=(8, 12))
+        btn_release = self._btn(card, "Release Slot",
+                                lambda sid=slot_id: self._release_slot(sid),
+                                color=self.p["ACCENT"], width=14,
+                                state=DISABLED)
+        btn_release.pack(pady=(6, 0))
 
-        self.coord_status = tk.Label(f, text="",
-                                     font=self.FONT_B, bg=self.BG, fg=self.WARN)
-        self.coord_status.pack(pady=8)
+        return {"card": card, "status": status_lbl,
+                "phone": phone_lbl, "dur": dur_lbl,
+                "release_btn": btn_release}
 
-        self._btn(f, "💾  Save All Settings", self._save_coords,
-                  color=self.ACCENT, width=24).pack(pady=(4, 6))
+    def _update_slot_card(self, slot_id: int, status: SlotStatus,
+                           phone: str, elapsed: str):
+        widgets = self._slot_labels.get(slot_id)
+        if not widgets:
+            return
+        color_key = STATUS_COLORS.get(status, "MUTED")
+        color = self.p[color_key]
+        disp  = fmt_display(phone[2:]) if phone.startswith("+1") and len(phone) == 12 \
+            else (phone or "—")
+        widgets["status"].config(text=f"● {status.value}", fg=color)
+        widgets["phone"].config(text=disp)
+        widgets["dur"].config(text=f"Duration: {elapsed}")
 
-        # Test movement
-        tc = self._lf(f, "  🧪  Test Mouse Position")
-        tc.pack(fill=X, padx=50, pady=(12, 6))
-        tk.Label(tc,
-                 text="Moves mouse to position (does NOT click) — visual verification only.",
-                 font=self.FONT_SM, bg=self.BG2, fg=self.MUTED,
-                 ).pack(anchor=W, padx=10, pady=(8, 4))
-        tr = tk.Frame(tc, bg=self.BG2)
-        tr.pack(pady=8)
-        for key, lbl in [("number_field", "Number Field"),
-                         ("call_button",  "Call Button"),
-                         ("end_call_button", "End Call")]:
-            self._btn(tr, f"→ {lbl}",
-                      lambda k=key: self._test_move(k),
-                      color=self.ACCENT2, width=16).pack(side=LEFT, padx=6)
+        # Flash card background green when connected
+        bg = "#0a2010" if status == SlotStatus.CONNECTED and self.p is DARK_PAL \
+            else ("#ccffdd" if status == SlotStatus.CONNECTED else self.p["CARD"])
+        widgets["card"].config(bg=bg)
 
-    # ══════════════════════════════════════════════════════════════
-    #  LOGS TAB
-    # ══════════════════════════════════════════════════════════════
+        # Enable release button only when connected
+        is_connected = status == SlotStatus.CONNECTED
+        widgets["release_btn"].config(
+            state=NORMAL if is_connected else DISABLED)
 
-    def _build_logs_tab(self):
-        f = self.tab_logs
+    # ══════════════════════════════════════════════════════════════════════════
+    #  CALL LOGS TAB
+    # ══════════════════════════════════════════════════════════════════════════
 
-        top = tk.Frame(f, bg=self.BG)
-        top.pack(fill=X, padx=16, pady=(12, 4))
+    def _build_logs_tab(self, f: tk.Frame):
+        top = tk.Frame(f, bg=self.p["BG"])
+        top.pack(fill=X, padx=14, pady=(12, 4))
         tk.Label(top, text="Call History",
-                 font=self.FONT_LG, bg=self.BG, fg=self.ACCENT2).pack(side=LEFT)
+                 font=("Segoe UI", 13, "bold"),
+                 bg=self.p["BG"], fg=self.p["ACCENT2"]).pack(side=LEFT)
+
         for txt, cmd, col in [
-            ("📤  Export CSV", self._export_logs,    self.ACCENT),
-            ("🗑  Clear Logs", self._clear_logs,      self.DANGER),
-            ("🔄  Refresh",    self._load_logs_table, self.ACCENT2),
+            ("📤 Export", self._export_logs, self.p["ACCENT"]),
+            ("🗑 Clear",  self._clear_logs,  self.p["DANGER"]),
+            ("🔄 Refresh", self._refresh_logs, self.p["ACCENT2"]),
         ]:
-            self._btn(top, txt, cmd, color=col, width=14).pack(side=RIGHT, padx=4)
+            self._btn(top, txt, cmd, color=col, width=12).pack(side=RIGHT, padx=3)
 
         # Stats
-        stats = tk.Frame(f, bg=self.BG)
-        stats.pack(fill=X, padx=16, pady=4)
-        self.lbl_log_total   = tk.Label(stats, text="Total: 0",     font=self.FONT, bg=self.BG, fg=self.ACCENT2)
-        self.lbl_log_ended   = tk.Label(stats, text="Completed: 0", font=self.FONT, bg=self.BG, fg=self.ACCENT)
-        self.lbl_log_skipped = tk.Label(stats, text="Skipped: 0",   font=self.FONT, bg=self.BG, fg=self.ORANGE)
-        self.lbl_log_failed  = tk.Label(stats, text="Failed: 0",    font=self.FONT, bg=self.BG, fg=self.DANGER)
-        for w in (self.lbl_log_total, self.lbl_log_ended,
-                  self.lbl_log_skipped, self.lbl_log_failed):
+        stats = tk.Frame(f, bg=self.p["BG"])
+        stats.pack(fill=X, padx=14, pady=4)
+        self.log_stat_total  = tk.Label(stats, text="Total: 0",    font=("Segoe UI", 9), bg=self.p["BG"], fg=self.p["ACCENT2"])
+        self.log_stat_ended  = tk.Label(stats, text="Ended: 0",    font=("Segoe UI", 9), bg=self.p["BG"], fg=self.p["ACCENT"])
+        self.log_stat_vm     = tk.Label(stats, text="Voicemail: 0",font=("Segoe UI", 9), bg=self.p["BG"], fg=self.p["ORANGE"])
+        self.log_stat_fail   = tk.Label(stats, text="Failed: 0",   font=("Segoe UI", 9), bg=self.p["BG"], fg=self.p["DANGER"])
+        for w in (self.log_stat_total, self.log_stat_ended,
+                  self.log_stat_vm, self.log_stat_fail):
             w.pack(side=LEFT, padx=10)
 
-        # Search bar + status filter
-        sf = tk.Frame(f, bg=self.BG)
-        sf.pack(fill=X, padx=16, pady=(4, 2))
-        tk.Label(sf, text="🔍  Filter:", font=self.FONT,
-                 bg=self.BG, fg=self.MUTED).pack(side=LEFT)
-        self.filter_var = tk.StringVar()
-        self.filter_var.trace_add("write", lambda *_: self._apply_log_filter())
-        tk.Entry(sf, textvariable=self.filter_var,
-                 bg=self.HDR, fg=self.FG, insertbackground=self.ACCENT,
-                 font=self.FONT_MONO, bd=0, relief="flat",
-                 highlightthickness=1, highlightbackground=self.MUTED,
-                 width=28,
-                 ).pack(side=LEFT, padx=(6, 16), ipady=4, pady=4)
+        # Filter bar
+        sf = tk.Frame(f, bg=self.p["BG"])
+        sf.pack(fill=X, padx=14, pady=(2, 4))
+        tk.Label(sf, text="🔍 Filter:", font=("Segoe UI", 9),
+                 bg=self.p["BG"], fg=self.p["MUTED"]).pack(side=LEFT)
+        self.log_filter = tk.StringVar()
+        self.log_filter.trace_add("write", lambda *_: self._apply_log_filter())
+        tk.Entry(sf, textvariable=self.log_filter,
+                 bg=self.p["HDR"], fg=self.p["FG"],
+                 insertbackground=self.p["ACCENT"],
+                 font=("Consolas", 9), bd=0, relief="flat",
+                 highlightthickness=1, highlightbackground=self.p["BORDER"],
+                 width=26).pack(side=LEFT, padx=(6, 16), ipady=4, pady=4)
 
-        self.status_filter = tk.StringVar(value="ALL")
-        for label, val, color in [
-            ("All",              "ALL",             self.ACCENT2),
-            ("Completed",        "ENDED",           self.ACCENT),
-            ("Skipped/Invalid",  "SKIPPED_INVALID", self.ORANGE),
-            ("Failed",           "FAILED",          self.DANGER),
-            ("Stopped",          "STOPPED",         self.MUTED),
+        self.log_status_filter = tk.StringVar(value="ALL")
+        for label, val, col in [
+            ("All",       "ALL",       self.p["ACCENT2"]),
+            ("Ended",     "ENDED",     self.p["ACCENT"]),
+            ("Voicemail", "VOICEMAIL", self.p["ORANGE"]),
+            ("No Answer", "NO_ANSWER", self.p["MUTED"]),
+            ("Failed",    "FAILED",    self.p["DANGER"]),
         ]:
-            tk.Radiobutton(sf, text=label, variable=self.status_filter,
+            tk.Radiobutton(sf, text=label, variable=self.log_status_filter,
                            value=val, command=self._apply_log_filter,
-                           bg=self.BG, fg=color, selectcolor=self.HDR,
-                           activebackground=self.BG,
-                           font=self.FONT_SM,
-                           ).pack(side=LEFT, padx=4)
+                           bg=self.p["BG"], fg=col,
+                           selectcolor=self.p["HDR"],
+                           activebackground=self.p["BG"],
+                           font=("Segoe UI", 9),
+                           ).pack(side=LEFT, padx=3)
 
         # Treeview
-        tf = tk.Frame(f, bg=self.BG)
-        tf.pack(fill=BOTH, expand=True, padx=16, pady=(4, 12))
+        tf = tk.Frame(f, bg=self.p["BG"])
+        tf.pack(fill=BOTH, expand=True, padx=14, pady=(4, 12))
 
         ts = ttk.Style()
-        ts.configure("dark.Treeview",
-                     background=self.HDR, foreground=self.FG,
-                     fieldbackground=self.HDR, rowheight=26, font=self.FONT)
-        ts.configure("dark.Treeview.Heading",
-                     background=self.BG2, foreground=self.ACCENT2, font=self.FONT_B)
-        ts.map("dark.Treeview", background=[("selected", "#1e3a5f")])
+        ts.configure("L.Treeview",
+                     background=self.p["HDR"], foreground=self.p["FG"],
+                     fieldbackground=self.p["HDR"], rowheight=26,
+                     font=("Segoe UI", 9))
+        ts.configure("L.Treeview.Heading",
+                     background=self.p["BG2"], foreground=self.p["ACCENT2"],
+                     font=("Segoe UI", 9, "bold"))
+        ts.map("L.Treeview", background=[("selected", "#1e3a5f")])
 
-        sb = tk.Scrollbar(tf, bg=self.BG2, troughcolor=self.HDR)
+        sb = tk.Scrollbar(tf, bg=self.p["BG2"])
         sb.pack(side=RIGHT, fill=Y)
         self.log_tree = ttk.Treeview(tf,
-                                     columns=("Time", "Phone", "Status"),
-                                     show="headings",
-                                     style="dark.Treeview",
+                                     columns=("Time", "Phone", "Status", "Duration", "Slot"),
+                                     show="headings", style="L.Treeview",
                                      yscrollcommand=sb.set)
         sb.config(command=self.log_tree.yview)
-        for col, w in [("Time", 200), ("Phone", 160), ("Status", 150)]:
+        for col, w in [("Time", 180), ("Phone", 150), ("Status", 120),
+                       ("Duration", 100), ("Slot", 60)]:
             self.log_tree.heading(col, text=col)
             self.log_tree.column(col, width=w)
 
-        self.log_tree.tag_configure("ENDED",           background="#0a2010", foreground="#00e676")
-        self.log_tree.tag_configure("STARTED",         background="#1a1600", foreground="#ffd166")
-        self.log_tree.tag_configure("SKIPPED_INVALID", background="#1a0f00", foreground="#ff6b35")
-        self.log_tree.tag_configure("FAILED",          background="#1a0000", foreground="#ff4444")
-        self.log_tree.tag_configure("STOPPED",         background="#111820", foreground="#8b949e")
+        self.log_tree.tag_configure("ENDED",     background="#0a2010", foreground="#00e676")
+        self.log_tree.tag_configure("VOICEMAIL", background="#1a0f00", foreground="#ff6b35")
+        self.log_tree.tag_configure("NO_ANSWER", background="#111820", foreground="#8b949e")
+        self.log_tree.tag_configure("FAILED",    background="#1a0000", foreground="#ff4444")
         self.log_tree.pack(fill=BOTH, expand=True)
+        self._refresh_logs()
 
-    # ══════════════════════════════════════════════════════════════
-    #  COORDINATE PICKER
-    # ══════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════════
+    #  CRM TAB
+    # ══════════════════════════════════════════════════════════════════════════
 
-    def _pick_coordinate(self, key):
-        self.coord_target = key
-        self.coord_status.config(
-            text=f"⏳  Minimizing… click the target on screen  (picking: {key})",
-            fg=self.WARN)
-        self.root.after(800, self._start_mouse_listener)
+    def _build_crm_tab(self, f: tk.Frame):
+        top = tk.Frame(f, bg=self.p["BG"])
+        top.pack(fill=X, padx=14, pady=(12, 4))
+        tk.Label(top, text="Contacts",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=self.p["BG"], fg=self.p["ACCENT2"]).pack(side=LEFT)
+        for txt, cmd, col in [
+            ("📥 Import Excel", self._import_contacts, self.p["ACCENT2"]),
+            ("+ Add Contact",   self._add_contact,     self.p["ACCENT"]),
+            ("🗑 Delete",       self._delete_contact,  self.p["DANGER"]),
+            ("🔄 Refresh",      self._refresh_crm,     self.p["MUTED"]),
+        ]:
+            self._btn(top, txt, cmd, color=col).pack(side=RIGHT, padx=3)
 
-    def _start_mouse_listener(self):
-        self.root.iconify()
-        def on_click(x, y, button, pressed):
-            if pressed:
-                key = self.coord_target
-                if key:
-                    self.coord_vars[key][0].set(int(x))
-                    self.coord_vars[key][1].set(int(y))
-                    self.root.after(0, lambda: self.coord_status.config(
-                        text=f"✅  Captured '{key}':  X={int(x)},  Y={int(y)}",
-                        fg=self.ACCENT))
-                    self.root.after(300, self.root.deiconify)
-                return False
-        self.mouse_listener = mouse.Listener(on_click=on_click)
-        self.mouse_listener.start()
+        # Status filter
+        sf = tk.Frame(f, bg=self.p["BG"])
+        sf.pack(fill=X, padx=14, pady=2)
+        tk.Label(sf, text="Status:", font=("Segoe UI", 9),
+                 bg=self.p["BG"], fg=self.p["MUTED"]).pack(side=LEFT)
+        self.crm_status_filter = tk.StringVar(value="all")
+        for label, val in [("All", "all"), ("New", "new"), ("Called", "called"),
+                            ("Interested", "interested"),
+                            ("Not Interested", "not_interested"),
+                            ("Callback", "callback")]:
+            tk.Radiobutton(sf, text=label, variable=self.crm_status_filter,
+                           value=val, command=self._refresh_crm,
+                           bg=self.p["BG"], fg=self.p["FG"],
+                           selectcolor=self.p["HDR"],
+                           activebackground=self.p["BG"],
+                           font=("Segoe UI", 9),
+                           ).pack(side=LEFT, padx=3)
 
-    def _test_move(self, key):
-        x = self.coord_vars[key][0].get()
-        y = self.coord_vars[key][1].get()
-        pyautogui.moveTo(x, y, duration=0.4)
-        self.coord_status.config(text=f"🖱️  Mouse moved to ({x}, {y})", fg=self.ACCENT2)
+        # Treeview
+        tf = tk.Frame(f, bg=self.p["BG"])
+        tf.pack(fill=BOTH, expand=True, padx=14, pady=(4, 12))
+        sb = tk.Scrollbar(tf, bg=self.p["BG2"])
+        sb.pack(side=RIGHT, fill=Y)
+        self.crm_tree = ttk.Treeview(tf,
+                                     columns=("Phone", "Name", "Company",
+                                              "Status", "Last Called"),
+                                     show="headings", style="L.Treeview",
+                                     yscrollcommand=sb.set)
+        sb.config(command=self.crm_tree.yview)
+        for col, w in [("Phone", 150), ("Name", 140), ("Company", 140),
+                       ("Status", 110), ("Last Called", 150)]:
+            self.crm_tree.heading(col, text=col)
+            self.crm_tree.column(col, width=w)
+        self.crm_tree.pack(fill=BOTH, expand=True)
+        self._refresh_crm()
 
-    def _save_coords(self):
-        for key, (x_var, y_var) in self.coord_vars.items():
-            self.config[key] = [x_var.get(), y_var.get()]
-        self.config["initial_delay"]      = self.delay_var.get()
-        self.config["autocut_duration"]   = self.autocut_var.get()
-        self.config["excel_path"]         = self.excel_var.get()
-        self.config["browser_mode"]       = self.browser_mode_var.get()
-        self.config["chrome_debug_port"]  = self.port_var.get()
-        save_config(self.config)
-        self.coord_status.config(text="✅  All settings saved!", fg=self.ACCENT)
-        messagebox.showinfo("Saved", "✅ Settings saved to dialer_config.json")
+    # ══════════════════════════════════════════════════════════════════════════
+    #  SETTINGS TAB
+    # ══════════════════════════════════════════════════════════════════════════
 
-    def _connect_browser(self):
-        port = self.port_var.get()
-        self.browser_status.config(text="Connecting…", fg=self.WARN)
-        self.root.update()
-        ok, msg = self.browser.connect(port=port)
-        if ok:
-            self.browser_status.config(text=f"✅  Connected (port {port})", fg=self.ACCENT)
-            self._log(f"🌐 Browser DOM connected on port {port}")
-        else:
-            self.browser_status.config(text=f"❌  {msg[:55]}", fg=self.DANGER)
-            self._log(f"⚠️ Browser connect failed: {msg}")
+    def _build_settings_tab(self, f: tk.Frame):
+        tk.Label(f, text="Application Settings",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=self.p["BG"], fg=self.p["ACCENT"]).pack(
+            anchor=W, padx=16, pady=(16, 6))
 
-    def _on_browser_mode_toggle(self):
-        self.config["browser_mode"] = self.browser_mode_var.get()
-        mode = "DOM/Selenium" if self.browser_mode_var.get() else "pyautogui (coordinates)"
-        self._log(f"🔄 Automation mode: {mode}")
+        # Chrome profiles info
+        pc = self._lf(f, "  🌐  Chrome Profiles  (one per dialer slot)")
+        pc.pack(fill=X, padx=16, pady=8)
+        tk.Label(pc,
+                 text=f"Profile directory:  {CHROME_PROFILES_DIR}\n\n"
+                      "Each slot uses its own Chrome profile (slot_0, slot_1, …)\n"
+                      "which stores a separate Google Voice login session.\n\n"
+                      "Setup: launch the dialer, let Chrome open for each slot,\n"
+                      "then log into a different Google Voice account in each window.",
+                 font=("Segoe UI", 9), bg=self.p["BG2"], fg=self.p["FG"],
+                 justify=LEFT).pack(anchor=W, padx=12, pady=10)
 
-    # ══════════════════════════════════════════════════════════════
-    #  FILE & NUMBER LOADING
-    # ══════════════════════════════════════════════════════════════
+        self._btn(pc, "📂 Open Profiles Folder",
+                  lambda: os.startfile(CHROME_PROFILES_DIR),
+                  color=self.p["ACCENT2"]).pack(anchor=W, padx=12, pady=(0, 12))
 
-    def _browse_file(self):
+        # Theme
+        tc = self._lf(f, "  🎨  Appearance")
+        tc.pack(fill=X, padx=16, pady=8)
+        tr = tk.Frame(tc, bg=self.p["BG2"])
+        tr.pack(fill=X, padx=12, pady=10)
+        tk.Label(tr, text="Theme:", font=("Segoe UI", 10),
+                 bg=self.p["BG2"], fg=self.p["FG"]).pack(side=LEFT, padx=(0, 12))
+        self._btn(tr, "☀ Light Mode",
+                  lambda: self.app._apply_theme("light") or self.app.toggle_theme.__doc__,
+                  color=self.p["WARN"]).pack(side=LEFT, padx=4)
+        self._btn(tr, "☾ Dark Mode",
+                  lambda: self.app._apply_theme("dark"),
+                  color=self.p["ACCENT2"]).pack(side=LEFT, padx=4)
+        tk.Label(tr, text="(restart to fully apply)",
+                 font=("Segoe UI", 8), bg=self.p["BG2"], fg=self.p["MUTED"]
+                 ).pack(side=LEFT, padx=8)
+
+        # Dialer defaults
+        dc = self._lf(f, "  ⚙️  Dialer Defaults")
+        dc.pack(fill=X, padx=16, pady=8)
+        dr = tk.Frame(dc, bg=self.p["BG2"])
+        dr.pack(fill=X, padx=12, pady=10)
+        tk.Label(dr, text="Default slots:", font=("Segoe UI", 10),
+                 bg=self.p["BG2"], fg=self.p["FG"]).pack(side=LEFT)
+        self.settings_slots = tk.IntVar(value=self.cfg.get("n_slots", 2))
+        tk.Spinbox(dr, from_=1, to=5, textvariable=self.settings_slots, width=3,
+                   font=("Segoe UI", 10), bg=self.p["HDR"], fg=self.p["ACCENT"],
+                   buttonbackground=self.p["BG2"]).pack(side=LEFT, padx=(4, 16))
+        self._btn(dr, "💾 Save Settings",
+                  self._save_settings, color=self.p["ACCENT"], width=16
+                  ).pack(side=LEFT)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  ADMIN TAB
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _build_admin_tab(self, f: tk.Frame):
+        top = tk.Frame(f, bg=self.p["BG"])
+        top.pack(fill=X, padx=14, pady=(12, 4))
+        tk.Label(top, text="User Management",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=self.p["BG"], fg=self.p["WARN"]).pack(side=LEFT)
+        for txt, cmd, col in [
+            ("+ Create User",   self._admin_create_user,     self.p["ACCENT"]),
+            ("🔑 Reset Password", self._admin_reset_pw,      self.p["WARN"]),
+            ("🚫 Toggle Active", self._admin_toggle_active,  self.p["ORANGE"]),
+            ("🗑 Delete User",   self._admin_delete_user,    self.p["DANGER"]),
+            ("🔄 Refresh",       self._admin_refresh_users,  self.p["MUTED"]),
+        ]:
+            self._btn(top, txt, cmd, color=col).pack(side=RIGHT, padx=3)
+
+        tf = tk.Frame(f, bg=self.p["BG"])
+        tf.pack(fill=BOTH, expand=True, padx=14, pady=(6, 12))
+        sb = tk.Scrollbar(tf, bg=self.p["BG2"])
+        sb.pack(side=RIGHT, fill=Y)
+        self.admin_tree = ttk.Treeview(tf,
+                                       columns=("ID", "Email", "Name",
+                                                "Role", "Active", "Last Login"),
+                                       show="headings", style="L.Treeview",
+                                       yscrollcommand=sb.set)
+        sb.config(command=self.admin_tree.yview)
+        for col, w in [("ID", 40), ("Email", 200), ("Name", 140),
+                       ("Role", 80), ("Active", 60), ("Last Login", 160)]:
+            self.admin_tree.heading(col, text=col)
+            self.admin_tree.column(col, width=w)
+        self.admin_tree.tag_configure("admin", foreground=self.p["WARN"])
+        self.admin_tree.tag_configure("inactive", foreground=self.p["MUTED"])
+        self.admin_tree.pack(fill=BOTH, expand=True)
+        self._admin_refresh_users()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  DIALER ACTIONS
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _browse(self):
         path = filedialog.askopenfilename(
             title="Select Excel File",
-            filetypes=[("Excel Files", "*.xlsx *.xls"), ("All Files", "*.*")]
-        )
+            filetypes=[("Excel Files", "*.xlsx *.xls"), ("All Files", "*.*")])
         if path:
             self.excel_var.set(path)
-            self.config["excel_path"] = path
+            self.cfg["excel_path"] = path
+            _save_cfg(self.cfg)
 
     def _load_numbers(self):
         path = self.excel_var.get().strip()
-        if not path:
-            messagebox.showerror("No File", "Please select an Excel file first.")
-            return
-        if not os.path.exists(path):
+        if not path or not os.path.exists(path):
             messagebox.showerror("File Not Found", f"File not found:\n{path}")
             return
-
         try:
             df = pd.read_excel(path)
         except Exception as e:
@@ -858,456 +925,433 @@ class AutoDialerApp:
             return
 
         df.columns = df.columns.str.strip()
-        phone_col  = None
-        candidates = ['Phone', 'phone', 'PHONE', 'Phone Number', 'phone_number',
-                      'Mobile', 'mobile', 'Number', 'number', 'Tel', 'tel',
-                      'Telephone', 'Cell', 'cell']
+        phone_col = None
         for col in df.columns:
-            if col.strip() in candidates:
+            if col.strip().lower() in (
+                    "phone", "phone number", "mobile", "number", "tel",
+                    "telephone", "cell"):
                 phone_col = col
                 break
 
         if phone_col is None:
             messagebox.showerror(
                 "Column Not Found",
-                f"No phone column found.\n\n"
-                f"Available columns:\n  {list(df.columns)}\n\n"
-                f"Rename your column to one of:\n"
-                f"  Phone, Mobile, Number, Tel"
-            )
+                f"No phone column.\nColumns found: {list(df.columns)}")
             return
 
-        raw_values     = df[phone_col].tolist()
-        valid_numbers  = []
-        invalid_count  = 0
+        name_col = next((c for c in df.columns
+                        if c.strip().lower() in ("name", "full name",
+                                                  "contact name", "client")), None)
 
-        for raw in raw_values:
-            cleaned = clean_phone(raw)
-            if cleaned:
-                valid_numbers.append(cleaned)
-            else:
-                s = str(raw).strip()
-                if s and s.lower() not in ('nan', 'none', ''):
-                    invalid_count += 1
-                    log_call(s, "SKIPPED_INVALID")
+        valid, invalid = [], 0
+        completed = self.db.get_completed_phones()
+        for _, row in df.iterrows():
+            raw = row[phone_col]
+            d10 = clean_phone(raw)
+            if not d10:
+                if str(raw).strip().lower() not in ("nan", "none", ""):
+                    invalid += 1
+                continue
+            phone = fmt_e164(d10)
+            name  = str(row[name_col]).strip() if name_col else ""
+            if name.lower() in ("nan", "none"):
+                name = ""
+            if phone not in completed:
+                valid.append((phone, name))
 
-        if not valid_numbers:
-            messagebox.showerror(
-                "No Valid Numbers",
-                f"No valid US 10-digit numbers found.\n"
-                f"Invalid/skipped entries: {invalid_count}\n\n"
-                f"Supported formats:\n"
-                f"  10 digits, +1XXXXXXXXXX, (XXX) XXX-XXXX, XXX-XXX-XXXX"
-            )
+        if not valid:
+            messagebox.showerror("No Valid Numbers",
+                                 "No valid undialed US numbers found.")
             return
 
-        if invalid_count:
-            self._log(f"⚠️  Skipped {invalid_count} invalid entries (logged as SKIPPED_INVALID)")
-
-        completed = get_completed_numbers()
-        self.contacts = [
-            p for p in valid_numbers
-            if fmt_e164(p) not in completed and p not in completed
-        ]
-        self.current_index = 0
-
-        total  = len(valid_numbers)
-        done   = total - len(self.contacts)
-        rem    = len(self.contacts)
-
+        self.contacts = valid
+        done  = len(completed)
+        total = len(valid) + done
         self.lbl_total.config(text=str(total))
         self.lbl_done.config(text=str(done))
-        self.lbl_remaining.config(text=str(rem))
-        self.lbl_skipped.config(text=str(invalid_count))
-        self._update_progress(done, total)
-        self._log(
-            f"✅  Loaded {total} valid  |  Done: {done}  |  "
-            f"Remaining: {rem}  |  Invalid: {invalid_count}"
-        )
-        self._load_logs_table()
+        self.lbl_rem.config(text=str(len(valid)))
+        self.lbl_invalid.config(text=str(invalid))
+        self.progress["value"] = (done / max(total, 1)) * 100
+        self._log(f"✅ Loaded {len(valid)} remaining  |  Done: {done}  |  Invalid: {invalid}")
+        self.btn_start.config(state=NORMAL)
 
-        if rem == 0:
-            messagebox.showinfo("All Done",
-                                "All numbers in this file are already completed!")
-        else:
-            self.btn_start.config(state=NORMAL)
-            self.btn_autocut.config(state=NORMAL)
-
-    # ══════════════════════════════════════════════════════════════
-    #  DIALER CORE
-    # ══════════════════════════════════════════════════════════════
-
-    def _start_dialer(self):
+    def _start_power_dial(self):
         if not self.contacts:
             messagebox.showwarning("No Contacts", "Load an Excel file first.")
             return
-        self.config["initial_delay"] = self.delay_var.get()
-        self.config["excel_path"]    = self.excel_var.get()
-        save_config(self.config)
-        self.running = True
+
+        n = self.slots_var.get()
+        self._build_slot_cards(n)        # rebuild slot cards in Live Calls tab
+
+        self.cfg.update({
+            "n_slots":      n,
+            "call_timeout": self.timeout_var.get(),
+            "cooldown_min": self.cooldown_var.get(),
+            "cooldown_max": self.cooldown_var.get() + 2,
+        })
+        _save_cfg(self.cfg)
+
+        self.dialer = PredictiveDialer(
+            n_slots      = n,
+            call_timeout = self.cfg["call_timeout"],
+            cooldown_min = self.cfg["cooldown_min"],
+            cooldown_max = self.cfg["cooldown_max"],
+        )
+
+        def _log_call(slot_id, phone, name, status, duration_s):
+            self.db.log_call(self.user["id"], phone, status,
+                             contact_name=name, duration_s=duration_s,
+                             slot_id=slot_id)
+            self.after(0, self._refresh_logs)
+
+        self.dialer._log_call_cb = _log_call
+
+        self.dialer.on_log       = lambda m: self._log(m)
+        self.dialer.on_status    = lambda sid, st, ph, el: self.after(
+            0, lambda: self._update_slot_card(sid, st, ph, el))
+        self.dialer.on_connected = self._on_call_connected
+        self.dialer.on_all_done  = lambda: self.after(0, self._on_all_done)
+
+        self.dialer.start(list(self.contacts))
+        self.contacts = []
+
         self.btn_start.config(state=DISABLED)
         self.btn_stop.config(state=NORMAL)
-        self.btn_next.config(state=NORMAL)
-        self._set_status("STARTING", self.WARN)
-        threading.Thread(target=self._dialer_thread, daemon=True).start()
+        self._log(f"⚡ Power Dial started — {n} simultaneous slots")
 
-    def _dialer_thread(self):
-        delay = self.config.get("initial_delay", 5)
-        self._log(f"🚀  Starting in {delay}s — switch to Google Voice now!")
-        for i in range(delay, 0, -1):
-            self._log(f"   ⏳ {i}…")
-            time.sleep(1)
-        if not self.running:
-            return
-        self._make_call(self.contacts[self.current_index])
-        self._set_status("ACTIVE", self.ACCENT)
+    def _on_call_connected(self, slot_id: int, phone: str, browser):
+        display = fmt_display(phone[2:]) if phone.startswith("+1") and len(phone) == 12 \
+            else phone
+        self.after(0, lambda: messagebox.showinfo(
+            "📞  CALL CONNECTED",
+            f"Slot {slot_id + 1} — {display}\n\n"
+            "The Chrome window has been brought to front.\n"
+            "Talk to the contact normally.\n\n"
+            "When finished, click  Release Slot  in the Live Calls tab.",
+        ))
 
-        def on_press(key):
-            try:
-                if hasattr(key, 'char') and key.char and key.char.lower() == 'x' and self.running:
-                    self._log("⌨️  X pressed → Hangup + Next")
-                    threading.Thread(target=self._hangup_and_next, daemon=True).start()
-            except AttributeError:
-                pass
-            if key == keyboard.Key.esc:
-                self._stop_dialer()
-                return False
-
-        self.listener = keyboard.Listener(on_press=on_press)
-        self.listener.start()
-        self.listener.join()
-
-    def _make_call(self, number):
-        formatted = fmt_e164(number) if len(number) == 10 else number
-        self._log(f"📞  Dialing {formatted} …")
-        self.root.after(0, lambda: self.lbl_current.config(text=f"Calling: {formatted}"))
-
-        try:
-            # Browser DOM path
-            if self.browser_mode_var.get() and self.browser.connected:
-                self.browser.focus_window()
-                time.sleep(0.3)
-                if self.browser.dial(formatted):
-                    self.call_active = True
-                    log_call(formatted, "STARTED")
-                    self._log(f"✅  Call started via DOM: {formatted}")
-                    return
-                self._log("⚠️  DOM dial failed — falling back to pyautogui")
-
-            # pyautogui path
-            cfg = self.config
-            nx, ny = cfg["number_field"]
-            pyautogui.click(nx, ny, clicks=2)
-            time.sleep(random.uniform(0.2, 0.4))
-            pyautogui.hotkey('ctrl', 'a')
-            pyautogui.press('backspace')
-            time.sleep(random.uniform(0.15, 0.3))
-
-            if CLIPBOARD_AVAILABLE:
-                pyperclip.copy(formatted)
-                pyautogui.hotkey('ctrl', 'v')
-            else:
-                pyautogui.write(formatted, interval=TYPE_DELAY)
-
-            time.sleep(random.uniform(0.2, 0.35))
-            cx, cy = cfg["call_button"]
-            pyautogui.click(cx, cy, clicks=2)
-
-            self.call_active = True
-            log_call(formatted, "STARTED")
-            self._log(f"✅  Call started: {formatted}")
-
-        except Exception as e:
-            self._log(f"❌  Call failed: {formatted} — {e}")
-            log_call(formatted, "FAILED")
-
-    def _hangup_call(self):
-        if not self.call_active:
-            return
-        try:
-            if self.browser_mode_var.get() and self.browser.connected:
-                if self.browser.hangup():
-                    self.call_active = False
-                    self._log("📴  Call ended via DOM")
-                    return
-                self._log("⚠️  DOM hangup failed — falling back to pyautogui")
-            ex, ey = self.config["end_call_button"]
-            pyautogui.click(ex, ey)
-            time.sleep(0.7)
-            self.call_active = False
-            self._log("📴  Call ended")
-        except Exception as e:
-            self._log(f"⚠️  Hangup error: {e}")
-            self.call_active = False
-
-    def _hangup_and_next(self):
-        if self.current_index >= len(self.contacts):
-            return
-        prev      = self.contacts[self.current_index]
-        formatted = fmt_e164(prev)
-        self._hangup_call()
-        log_call(formatted, "ENDED")
-        self._log(f"📝  Logged ENDED: {formatted}")
-        self.current_index += 1
-        self._refresh_progress()
-        self.root.after(0, self._load_logs_table)
-
-        if self.current_index >= len(self.contacts):
-            self._log("🎯  All calls completed!")
-            self.root.after(0, lambda: self.lbl_current.config(text="✅  All calls done!"))
-            self._set_status("DONE", self.ACCENT)
-            self.root.after(500, self._on_all_done)
-            return
-        self._make_call(self.contacts[self.current_index])
-
-    def _refresh_progress(self):
-        total  = len(self.contacts)
-        done_n = len(get_completed_numbers())
-        rem    = max(total - self.current_index, 0)
-        self.root.after(0, lambda: self.lbl_done.config(text=str(done_n)))
-        self.root.after(0, lambda: self.lbl_remaining.config(text=str(rem)))
-        self._update_progress(self.current_index, total)
-
-    def _manual_next(self):
-        if not self.running:
-            return
-        threading.Thread(target=self._hangup_and_next, daemon=True).start()
+    def _release_slot(self, slot_id: int):
+        if self.dialer:
+            self.dialer.release(slot_id)
+            self._log(f"[Slot {slot_id}] Agent released — slot continuing…")
 
     def _stop_dialer(self):
-        if self.call_active and self.current_index < len(self.contacts):
-            try:
-                self._hangup_call()
-            except Exception:
-                pass
-            log_call(fmt_e164(self.contacts[self.current_index]), "STOPPED")
-        self.running     = False
-        self.call_active = False
-        if self.listener:
-            try:
-                self.listener.stop()
-            except Exception:
-                pass
-        self.root.after(0, lambda: self.btn_start.config(state=NORMAL))
-        self.root.after(0, lambda: self.btn_stop.config(state=DISABLED))
-        self.root.after(0, lambda: self.btn_next.config(state=DISABLED))
-        self.root.after(0, lambda: self.btn_autocut.config(state=NORMAL))
-        self.root.after(0, lambda: self.lbl_current.config(text="Stopped"))
-        self._set_status("IDLE", self.MUTED)
-        self._log("⛔  Dialer stopped")
-        self.root.after(300, self._load_logs_table)
-
-    # ══════════════════════════════════════════════════════════════
-    #  AUTO-CUT MODE
-    # ══════════════════════════════════════════════════════════════
-
-    def _start_autocut(self):
-        if not self.contacts:
-            messagebox.showwarning("No Contacts", "Load an Excel file first.")
-            return
-        duration = self.autocut_var.get()
-        self.config["initial_delay"]    = self.delay_var.get()
-        self.config["autocut_duration"] = duration
-        self.config["excel_path"]       = self.excel_var.get()
-        save_config(self.config)
-        self.running = True
-        self.btn_start.config(state=DISABLED)
-        self.btn_autocut.config(state=DISABLED)
-        self.btn_next.config(state=DISABLED)
-        self.btn_stop.config(state=NORMAL)
-        self._set_status("AUTO-CUT", self.PURPLE)
-        self._log(f"⚡  Auto-Cut mode started — {duration}s per call, fully automatic")
-        threading.Thread(target=self._autocut_thread, daemon=True).start()
-
-    def _autocut_thread(self):
-        delay    = self.config.get("initial_delay", 5)
-        duration = self.config.get("autocut_duration", 10)
-        self._log(f"🚀  Starting in {delay}s — switch to Google Voice now!")
-        for i in range(delay, 0, -1):
-            self._log(f"   ⏳ {i}…")
-            time.sleep(1)
-            if not self.running:
-                return
-
-        total = len(self.contacts)
-        while self.running and self.current_index < total:
-            number    = self.contacts[self.current_index]
-            formatted = fmt_e164(number)
-
-            try:
-                self._make_call(number)
-            except Exception as e:
-                self._log(f"❌  Auto-cut call error: {e}")
-                log_call(formatted, "FAILED")
-                self.current_index += 1
-                self._refresh_progress()
-                continue
-
-            for remaining in range(duration, 0, -1):
-                if not self.running:
-                    break
-                self.root.after(0, lambda r=remaining, fmt=formatted:
-                    self.lbl_current.config(
-                        text=f"⚡  Auto-Cut  {fmt}  ─  hanging up in {r}s"))
-                time.sleep(1)
-
-            if not self.running:
-                break
-
-            try:
-                if self.browser_mode_var.get() and self.browser.connected:
-                    if not self.browser.hangup():
-                        raise Exception("DOM hangup failed")
-                else:
-                    ex, ey = self.config["end_call_button"]
-                    pyautogui.click(ex, ey)
-                    pyautogui.click(ex, ey)
-                    time.sleep(0.3)
-                    pyautogui.press('esc')
-            except Exception as e:
-                self._log(f"⚠️  Hangup error in auto-cut: {e}")
-
-            self.call_active = False
-            log_call(formatted, "ENDED")
-            self._log(f"🔴  Auto-cut: {formatted} hung up after {duration}s")
-            self.current_index += 1
-            self._refresh_progress()
-            self.root.after(0, self._load_logs_table)
-
-            if self.running and self.current_index < total:
-                cooldown = random.uniform(2, 4)
-                self._log(f"   ⏸  Cooldown {cooldown:.1f}s…")
-                time.sleep(cooldown)
-
-        if self.running:
-            self._log("🎯  Auto-Cut: all calls completed!")
-            self.root.after(0, lambda: self.lbl_current.config(text="✅  All auto-cut calls done!"))
-            self._set_status("DONE", self.ACCENT)
-            self.root.after(500, self._on_all_done)
-        else:
-            self.root.after(0, lambda: self.lbl_current.config(text="Stopped"))
+        if self.dialer:
+            self.dialer.stop()
+        self.btn_stop.config(state=DISABLED)
+        self.btn_start.config(state=NORMAL)
+        self._log("⛔ Dialer stopped")
 
     def _on_all_done(self):
-        self.running = False
-        self.root.after(0, lambda: self.btn_start.config(state=NORMAL))
-        self.root.after(0, lambda: self.btn_stop.config(state=DISABLED))
-        self.root.after(0, lambda: self.btn_next.config(state=DISABLED))
-        self.root.after(0, lambda: self.btn_autocut.config(state=NORMAL))
-        self._load_logs_table()
-        answer = messagebox.askyesnocancel(
-            "All Calls Completed!",
-            "All phone numbers have been dialed!\n\n"
-            "YES    → Load a new Excel file\n"
-            "NO     → Repeat the same list from the top\n"
-            "CANCEL → Exit the application"
-        )
-        if answer is True:
-            self._browse_file()
-            self._load_numbers()
-        elif answer is False:
-            self._log("🔄  Repeating same list from the top…")
-            self.current_index = 0
-            self.lbl_remaining.config(text=str(len(self.contacts)))
-            self.btn_start.config(state=NORMAL)
-        else:
-            self.root.quit()
+        self.btn_stop.config(state=DISABLED)
+        self.btn_start.config(state=NORMAL)
+        self._log("🎯 All contacts dialed!")
+        messagebox.showinfo("Done", "All contacts have been dialed!")
 
-    # ══════════════════════════════════════════════════════════════
-    #  LOGS
-    # ══════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════════
+    #  LOG ACTIONS
+    # ══════════════════════════════════════════════════════════════════════════
 
-    def _load_logs_table(self):
-        self._all_logs = load_call_logs()
+    def _refresh_logs(self):
+        if not hasattr(self, "log_tree"):
+            return
+        uid = None if self.user["role"] == "admin" else self.user["id"]
+        self._all_logs = self.db.get_call_records(user_id=uid)
         self._apply_log_filter()
 
     def _apply_log_filter(self):
-        query  = self.filter_var.get().strip().lower() if hasattr(self, 'filter_var') else ""
-        status = self.status_filter.get()             if hasattr(self, 'status_filter') else "ALL"
-
+        if not hasattr(self, "log_tree"):
+            return
+        q   = self.log_filter.get().strip().lower() if hasattr(self, "log_filter") else ""
+        sf  = self.log_status_filter.get() if hasattr(self, "log_status_filter") else "ALL"
         filtered = []
-        for row in self._all_logs:
-            st = row.get("Status", "")
-            if status != "ALL" and st != status:
+        for r in self._all_logs:
+            st = r.get("status", "")
+            if sf != "ALL" and st != sf:
                 continue
-            if query and (
-                query not in row.get("Phone", "").lower() and
-                query not in row.get("Time",  "").lower() and
-                query not in st.lower()
-            ):
+            if q and q not in r.get("phone", "").lower() \
+               and q not in r.get("timestamp", "").lower() \
+               and q not in st.lower():
                 continue
-            filtered.append(row)
+            filtered.append(r)
 
         for item in self.log_tree.get_children():
             self.log_tree.delete(item)
+        ended = vm = fail = 0
+        for r in self._all_logs:
+            st = r.get("status", "")
+            if st == "ENDED":    ended += 1
+            elif st == "VOICEMAIL": vm += 1
+            elif st == "FAILED": fail += 1
+        self.log_stat_total.config(text=f"Total: {len(self._all_logs)}")
+        self.log_stat_ended.config(text=f"Ended: {ended}")
+        self.log_stat_vm.config(text=f"Voicemail: {vm}")
+        self.log_stat_fail.config(text=f"Failed: {fail}")
 
-        ended   = sum(1 for r in self._all_logs if r.get("Status") == "ENDED")
-        skipped = sum(1 for r in self._all_logs if r.get("Status") == "SKIPPED_INVALID")
-        failed  = sum(1 for r in self._all_logs if r.get("Status") == "FAILED")
-
-        self.root.after(0, lambda: self.lbl_log_total.config(
-            text=f"Total: {len(self._all_logs)}"))
-        self.root.after(0, lambda: self.lbl_log_ended.config(
-            text=f"Completed: {ended}"))
-        self.root.after(0, lambda: self.lbl_log_skipped.config(
-            text=f"Skipped: {skipped}"))
-        self.root.after(0, lambda: self.lbl_log_failed.config(
-            text=f"Failed: {failed}"))
-
-        for row in reversed(filtered):
-            tag = row.get("Status", "")
+        for r in reversed(filtered):
+            st  = r.get("status", "")
+            dur = r.get("duration_s", 0) or 0
             self.log_tree.insert("", END,
-                                 values=(row.get("Time", ""),
-                                         row.get("Phone", ""),
-                                         tag),
-                                 tags=(tag,))
-
-    def _clear_logs(self):
-        if messagebox.askyesno("Clear Logs",
-                               "Delete ALL call logs?\nThis cannot be undone."):
-            if os.path.exists(LOG_FILE):
-                os.remove(LOG_FILE)
-            self._all_logs = []
-            self._load_logs_table()
-            self._log("🗑  Logs cleared")
+                                 values=(r.get("timestamp", ""),
+                                         r.get("phone", ""),
+                                         st,
+                                         f"{dur:.0f}s",
+                                         f"S{r.get('slot_id', 0)}"),
+                                 tags=(st,))
 
     def _export_logs(self):
         path = filedialog.asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[("CSV", "*.csv")],
-            initialfile="call_logs_export.csv"
-        )
-        if path and os.path.exists(LOG_FILE):
-            import shutil
-            shutil.copy(LOG_FILE, path)
-            messagebox.showinfo("Exported", f"Logs exported to:\n{path}")
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx"), ("CSV", "*.csv")],
+            initialfile=f"IndusTransports_CallLog_{datetime.now().strftime('%Y-%m-%d')}.xlsx")
+        if not path or not self._all_logs:
+            return
+        try:
+            import openpyxl
+            wb  = openpyxl.Workbook()
+            ws  = wb.active
+            ws.title = "Call History"
+            headers = ["Time", "Phone", "Status", "Duration (s)", "Slot"]
+            ws.append(headers)
+            from openpyxl.styles import Font, PatternFill
+            bold = Font(bold=True, color="FFFFFF")
+            fill = PatternFill("solid", fgColor="1a7f37")
+            for i, _ in enumerate(headers, 1):
+                c = ws.cell(1, i)
+                c.font = bold
+                c.fill = fill
+            for r in self._all_logs:
+                ws.append([r.get("timestamp", ""), r.get("phone", ""),
+                           r.get("status", ""), r.get("duration_s", 0),
+                           r.get("slot_id", 0)])
+            wb.save(path)
+            messagebox.showinfo("Exported", f"Saved to:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Export Error", str(e))
 
-    # ══════════════════════════════════════════════════════════════
-    #  UTILITY
-    # ══════════════════════════════════════════════════════════════
+    def _clear_logs(self):
+        if messagebox.askyesno("Clear Logs", "Delete ALL call logs? Cannot be undone."):
+            import os as _os
+            from src.paths import CALL_LOG_CSV, CRM_DB as _CRM_DB
+            # Clear call_records table
+            from src.crm_db import CRMDatabase as _DB
+            with _DB()._conn() as c:
+                c.execute("DELETE FROM call_records")
+            if _os.path.exists(CALL_LOG_CSV):
+                _os.remove(CALL_LOG_CSV)
+            self._all_logs = []
+            self._apply_log_filter()
+            self._log("🗑 Logs cleared")
 
-    def _log(self, msg):
-        def _write():
-            self.console.configure(state=NORMAL)
-            ts = datetime.now().strftime("%H:%M:%S")
-            self.console.insert(END, f"[{ts}]  {msg}\n")
-            self.console.see(END)
-            self.console.configure(state=DISABLED)
-        self.root.after(0, _write)
+    # ══════════════════════════════════════════════════════════════════════════
+    #  CRM ACTIONS
+    # ══════════════════════════════════════════════════════════════════════════
 
-    def _set_status(self, text, color):
-        self.root.after(0, lambda: self.status_badge.config(
-            text=f"● {text}", fg=color))
+    def _refresh_crm(self):
+        if not hasattr(self, "crm_tree"):
+            return
+        sf = self.crm_status_filter.get() if hasattr(self, "crm_status_filter") else "all"
+        contacts = self.db.get_contacts(sf)
+        for item in self.crm_tree.get_children():
+            self.crm_tree.delete(item)
+        for c in contacts:
+            self.crm_tree.insert("", END, values=(
+                c.get("phone", ""), c.get("name", ""), c.get("company", ""),
+                c.get("status", ""), c.get("last_called", "—") or "—"))
 
-    def _update_progress(self, done, total):
-        if total > 0:
-            pct = (done / total) * 100
-            self.root.after(0, lambda: self.progress_bar.configure(value=pct))
+    def _import_contacts(self):
+        path = filedialog.askopenfilename(
+            title="Import Contacts from Excel",
+            filetypes=[("Excel Files", "*.xlsx *.xls"), ("All", "*.*")])
+        if not path:
+            return
+        try:
+            df = pd.read_excel(path)
+            df.columns = df.columns.str.strip().str.lower()
+            rows = []
+            for _, row in df.iterrows():
+                for col in ("phone", "mobile", "number", "tel"):
+                    if col in df.columns:
+                        d10 = clean_phone(row[col])
+                        if d10:
+                            rows.append({
+                                "phone":   fmt_e164(d10),
+                                "name":    str(row.get("name", "")).strip(),
+                                "company": str(row.get("company", "")).strip(),
+                                "email":   str(row.get("email", "")).strip(),
+                            })
+                            break
+            added, skipped = self.db.import_contacts_from_list(rows)
+            messagebox.showinfo("Import Done",
+                                f"Added: {added}  |  Skipped: {skipped}")
+            self._refresh_crm()
+        except Exception as e:
+            messagebox.showerror("Import Error", str(e))
+
+    def _add_contact(self):
+        phone = simpledialog.askstring("Add Contact", "Phone Number:")
+        if not phone:
+            return
+        d10 = clean_phone(phone)
+        if not d10:
+            messagebox.showerror("Invalid", "Not a valid US phone number.")
+            return
+        name = simpledialog.askstring("Add Contact", "Name (optional):") or ""
+        self.db.upsert_contact(fmt_e164(d10), name=name)
+        self._refresh_crm()
+
+    def _delete_contact(self):
+        sel = self.crm_tree.selection()
+        if not sel:
+            return
+        phone = self.crm_tree.item(sel[0])["values"][0]
+        if messagebox.askyesno("Delete", f"Delete contact {phone}?"):
+            self.db.delete_contact(str(phone))
+            self._refresh_crm()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  ADMIN ACTIONS
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _admin_refresh_users(self):
+        if not hasattr(self, "admin_tree"):
+            return
+        for item in self.admin_tree.get_children():
+            self.admin_tree.delete(item)
+        for u in self.db.get_all_users():
+            tag = "admin" if u["role"] == "admin" else \
+                  ("inactive" if not u["is_active"] else "")
+            self.admin_tree.insert("", END, tags=(tag,),
+                                   values=(u["id"], u["email"], u["name"],
+                                           u["role"],
+                                           "✓" if u["is_active"] else "✗",
+                                           u.get("last_login", "—") or "—"))
+
+    def _admin_create_user(self):
+        dlg = tk.Toplevel(self)
+        dlg.title("Create User")
+        dlg.grab_set()
+        dlg.configure(bg=self.p["BG2"])
+        for label, attr, show in [
+            ("Full Name",  "e_name",  ""),
+            ("Email",      "e_email", ""),
+            ("Password",   "e_pw",    "•"),
+        ]:
+            tk.Label(dlg, text=label, font=("Segoe UI", 10),
+                     bg=self.p["BG2"], fg=self.p["FG"]).pack(padx=24, anchor=W)
+            e = tk.Entry(dlg, show=show, font=("Segoe UI", 11),
+                         bg=self.p["BG3"], fg=self.p["FG"],
+                         bd=0, relief="flat",
+                         highlightthickness=1,
+                         highlightbackground=self.p["BORDER"],
+                         width=28)
+            e.pack(padx=24, pady=(2, 10), ipady=5)
+            setattr(dlg, attr, e)
+
+        role_var = tk.StringVar(value="agent")
+        rr = tk.Frame(dlg, bg=self.p["BG2"])
+        rr.pack(padx=24, pady=(0, 8), anchor=W)
+        for val in ("agent", "admin"):
+            tk.Radiobutton(rr, text=val.title(), variable=role_var, value=val,
+                           bg=self.p["BG2"], fg=self.p["FG"],
+                           selectcolor=self.p["HDR"],
+                           activebackground=self.p["BG2"],
+                           font=("Segoe UI", 10),
+                           ).pack(side=LEFT, padx=8)
+
+        def _create():
+            name  = dlg.e_name.get().strip()
+            email = dlg.e_email.get().strip()
+            pw    = dlg.e_pw.get()
+            if not all([name, email, pw]):
+                messagebox.showerror("Error", "All fields required.", parent=dlg)
+                return
+            if len(pw) < 8:
+                messagebox.showerror("Error", "Password must be 8+ characters.",
+                                     parent=dlg)
+                return
+            try:
+                self.db.create_user(email, name, pw, role=role_var.get())
+                dlg.destroy()
+                self._admin_refresh_users()
+                messagebox.showinfo("Created",
+                                    f"User {email} created.\nRole: {role_var.get()}")
+            except Exception as e:
+                messagebox.showerror("Error", str(e), parent=dlg)
+
+        self._btn(dlg, "Create User", _create,
+                  color=self.p["ACCENT"], width=20).pack(pady=(4, 20))
+
+    def _admin_reset_pw(self):
+        sel = self.admin_tree.selection()
+        if not sel:
+            return
+        uid   = self.admin_tree.item(sel[0])["values"][0]
+        email = self.admin_tree.item(sel[0])["values"][1]
+        new_pw = simpledialog.askstring(
+            "Reset Password", f"New password for {email}:", show="•")
+        if not new_pw:
+            return
+        if len(new_pw) < 8:
+            messagebox.showerror("Error", "Password must be 8+ characters.")
+            return
+        self.db.reset_password(int(uid), new_pw)
+        messagebox.showinfo("Done", f"Password reset for {email}.")
+
+    def _admin_toggle_active(self):
+        sel = self.admin_tree.selection()
+        if not sel:
+            return
+        uid    = int(self.admin_tree.item(sel[0])["values"][0])
+        active = self.admin_tree.item(sel[0])["values"][4] == "✓"
+        if uid == self.user["id"]:
+            messagebox.showwarning("Error", "Cannot deactivate your own account.")
+            return
+        self.db.set_user_active(uid, not active)
+        self._admin_refresh_users()
+
+    def _admin_delete_user(self):
+        sel = self.admin_tree.selection()
+        if not sel:
+            return
+        uid   = int(self.admin_tree.item(sel[0])["values"][0])
+        email = self.admin_tree.item(sel[0])["values"][1]
+        if uid == self.user["id"]:
+            messagebox.showwarning("Error", "Cannot delete your own account.")
+            return
+        if messagebox.askyesno("Delete User", f"Delete {email}? Cannot be undone."):
+            self.db.delete_user(uid)
+            self._admin_refresh_users()
+
+    # ── Settings actions ──────────────────────────────────────────────────────
+
+    def _save_settings(self):
+        self.cfg["n_slots"] = self.settings_slots.get()
+        _save_cfg(self.cfg)
+        messagebox.showinfo("Saved", "Settings saved.")
 
 
-# ═══════════════════════════════════════════════════════════════════
+# ── Logo loader ───────────────────────────────────────────────────────────────
+
+def _load_logo(pal: dict):
+    if not PIL_OK:
+        return None
+    for path in (LOGO_PNG, LOGO_JPEG):
+        if os.path.exists(path):
+            try:
+                img = Image.open(path).convert("RGBA")
+                img.thumbnail((200, 50), Image.LANCZOS)
+                return ImageTk.PhotoImage(img)
+            except Exception:
+                pass
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  ENTRY POINT
-# ═══════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    root = tb.Window(themename="darkly")
-    app  = AutoDialerApp(root)
+    root = tb.Window(themename=DARK_THEME)
+    DialerApp(root)
     root.mainloop()
