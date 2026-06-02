@@ -15,6 +15,14 @@ Windows desktop auto dialer for Indus Transports LLC using Google Voice in hidde
 - Local SQLite CRM and call history
 - PyInstaller build script for a Windows EXE
 
+## Screenshots
+
+These interface previews show the current live-call console and the refreshed light-mode settings screen.
+
+![Live Calls dark mode](docs/screenshots/live-calls-dark.png)
+
+![Settings light mode](docs/screenshots/settings-light.png)
+
 ## Requirements
 
 - Windows 10 or 11
@@ -70,6 +78,10 @@ Live call controls:
 - `Next Call`: cuts the current backend Google Voice call and immediately advances the slot.
 - `Cut Call`: hangs up the current backend Google Voice call and leaves the slot idle until the dialer assigns another call.
 - Timeout: unanswered `DIALING` or `RINGING` calls are cut automatically after the configured timeout.
+
+## Live Test Notes
+
+Use only phone numbers you own or are explicitly authorized to call. The app can log in automatically with saved local credentials, but Google security checks such as CAPTCHA, 2FA, or recovery prompts must be completed manually.
 
 ## Excel File Format
 
