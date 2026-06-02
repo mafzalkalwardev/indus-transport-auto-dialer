@@ -7,3 +7,7 @@ logo.ico
 call_logs.csv
 .codegraph/
 *.spec.bak
+Archive_OldProjects/
+chrome_profiles/
+logs/
+data/gv_accounts.json

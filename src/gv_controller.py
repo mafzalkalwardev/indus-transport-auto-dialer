@@ -7,6 +7,7 @@ All control is via JavaScript injection into the embedded browser.
 from __future__ import annotations
 
 import os
+import re
 from typing import Callable, Optional
 
 from PyQt6.QtCore import QObject, QTimer, QUrl, pyqtSignal
@@ -166,7 +167,8 @@ class GVController(QObject):
     login_detected   = pyqtSignal(int)         # slot_id
     log_message      = pyqtSignal(int, str)    # (slot_id, msg)
 
-    def __init__(self, slot_id: int, profile_dir: str, parent: QObject = None):
+    def __init__(self, slot_id: int, profile_dir: str, parent: QObject = None,
+                 profile_key: str = ""):
         super().__init__(parent)
         self.slot_id     = slot_id
         self.profile_dir = profile_dir
@@ -179,7 +181,9 @@ class GVController(QObject):
         cache_dir = os.path.join(profile_dir, "_cache")
         os.makedirs(cache_dir, exist_ok=True)
 
-        self._profile = QWebEngineProfile(f"gv_slot_{slot_id}")
+        key = profile_key or f"slot_{slot_id}"
+        key = re.sub(r"[^a-zA-Z0-9_]+", "_", key).strip("_") or f"slot_{slot_id}"
+        self._profile = QWebEngineProfile(f"gv_{key}")
         self._profile.setPersistentStoragePath(profile_dir)
         self._profile.setCachePath(cache_dir)
         self._profile.setPersistentCookiesPolicy(

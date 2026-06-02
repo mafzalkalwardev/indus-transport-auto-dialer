@@ -33,6 +33,12 @@ from src.paths       import (LOGO_PNG, LOGO_JPEG, CONFIG_FILE,
 from src.crm_db      import CRMDatabase
 from src.phone_utils import clean_phone, fmt_e164, fmt_display
 from src.gv_controller import GVController
+from src.gv_accounts import (
+    load_accounts as load_gv_accounts,
+    save_accounts as save_gv_accounts,
+    make_profile_name,
+    profile_dir as gv_profile_dir,
+)
 
 try:
     from PIL import Image
@@ -322,7 +328,8 @@ def _hline() -> QFrame:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class SlotCard(QGroupBox):
-    release_clicked = pyqtSignal(int)
+    next_clicked = pyqtSignal(int)
+    cut_clicked = pyqtSignal(int)
 
     STATE_COLORS = {
         "IDLE":         "#8b949e",
@@ -356,10 +363,17 @@ class SlotCard(QGroupBox):
         self.lbl_dur = _label("Duration: —", "muted")
         lay.addWidget(self.lbl_dur)
 
-        self.btn_release = _btn("Release Slot", "green")
-        self.btn_release.setEnabled(False)
-        self.btn_release.clicked.connect(lambda: self.release_clicked.emit(self.slot_id))
-        lay.addWidget(self.btn_release)
+        btn_row = QHBoxLayout()
+        self.btn_next = _btn("Next Call", "green")
+        self.btn_next.setEnabled(False)
+        self.btn_next.clicked.connect(lambda: self.next_clicked.emit(self.slot_id))
+        btn_row.addWidget(self.btn_next)
+
+        self.btn_cut = _btn("Cut Call", "red")
+        self.btn_cut.setEnabled(False)
+        self.btn_cut.clicked.connect(lambda: self.cut_clicked.emit(self.slot_id))
+        btn_row.addWidget(self.btn_cut)
+        lay.addLayout(btn_row)
 
     def update_state(self, state: str, phone: str = "", elapsed: str = ""):
         color = self.STATE_COLORS.get(state, "#8b949e")
@@ -367,11 +381,12 @@ class SlotCard(QGroupBox):
         self.lbl_status.setStyleSheet(f"color: {color}; font-weight: bold;")
         self.lbl_phone.setText(phone or "—")
         self.lbl_dur.setText(f"Duration: {elapsed or '—'}")
-        connected = state == "CONNECTED"
-        self.btn_release.setEnabled(connected)
+        active = state in ("DIALING", "RINGING", "CONNECTED", "VOICEMAIL")
+        self.btn_next.setEnabled(active)
+        self.btn_cut.setEnabled(active)
 
         # Flash background green when connected
-        if connected:
+        if state == "CONNECTED":
             self.setStyleSheet("QGroupBox { background: #0a2010; border-color: #00e676; }")
         else:
             self.setStyleSheet("")
@@ -625,6 +640,7 @@ class MainWindow(QMainWindow):
         self._slot_start:  dict[int, float] = {}
         self._slot_phone:  dict[int, str]   = {}
         self._all_logs:    list = []
+        self._gv_accounts: list[dict] = load_gv_accounts()
 
         # ── Timers ────────────────────────────────────────────────────────────
         self._dial_timer   = QTimer(self)    # fires to assign next number to free slot
@@ -880,8 +896,8 @@ class MainWindow(QMainWindow):
 
         info = _label(
             "Google Voice runs silently in the background — the agent only sees this panel.\n"
-            "When a call connects, the slot card turns green. Click  Release Slot  "
-            "when finished.",
+            "When a call connects, the slot card turns green. Use Next Call "
+            "to hang up and advance, or Cut Call to hang up the current call.",
             "muted"
         )
         info.setWordWrap(True)
@@ -917,7 +933,9 @@ class MainWindow(QMainWindow):
         self._slot_cards: dict[int, SlotCard] = {}
         for i in range(n):
             card = SlotCard(i)
-            card.release_clicked.connect(self._release_slot)
+            card.setTitle(f"  Slot {i + 1} - {self._slot_label(i)}")
+            card.next_clicked.connect(self._next_call)
+            card.cut_clicked.connect(self._cut_call)
             self._cards_layout.addWidget(card)
             self._slot_cards[i] = card
         self._cards_layout.addStretch()
@@ -1051,6 +1069,40 @@ class MainWindow(QMainWindow):
         blay.addWidget(open_btn)
         lay.addWidget(grp_b)
 
+        # Google Voice accounts
+        grp_a = QGroupBox("  Google Voice Accounts")
+        alay = QVBoxLayout(grp_a)
+        alay.addWidget(QLabel(
+            "Add each Google Voice account once. The app opens a dedicated "
+            "profile for manual login, then reuses that saved session for "
+            "automatic login on future runs. Google passwords are not stored."
+        ))
+        self.gv_accounts_table = QTableWidget(0, 4)
+        self.gv_accounts_table.setHorizontalHeaderLabels(
+            ["Name", "Email", "Profile", "Notes"])
+        self.gv_accounts_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch)
+        self.gv_accounts_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.gv_accounts_table.setAlternatingRowColors(True)
+        self.gv_accounts_table.verticalHeader().setVisible(False)
+        alay.addWidget(self.gv_accounts_table)
+
+        acct_buttons = QHBoxLayout()
+        for txt, fn, nm in [
+            ("+ Add Account", self._gv_add_account, "green"),
+            ("Login / Setup Selected", self._gv_setup_selected, "yellow"),
+            ("Remove Selected", self._gv_remove_selected, "red"),
+            ("Refresh", self._refresh_gv_accounts, ""),
+        ]:
+            b = _btn(txt, nm)
+            b.clicked.connect(fn)
+            acct_buttons.addWidget(b)
+        acct_buttons.addStretch()
+        alay.addLayout(acct_buttons)
+        lay.addWidget(grp_a, stretch=1)
+        self._refresh_gv_accounts()
+
         # Appearance
         grp_t = QGroupBox("  🎨  Theme")
         tlay = QHBoxLayout(grp_t)
@@ -1112,6 +1164,148 @@ class MainWindow(QMainWindow):
         self._admin_refresh()
 
     # ══════════════════════════════════════════════════════════════════════════
+    #  GOOGLE VOICE ACCOUNTS
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _slot_account(self, slot_id: int) -> dict | None:
+        if 0 <= slot_id < len(self._gv_accounts):
+            return self._gv_accounts[slot_id]
+        return None
+
+    def _slot_label(self, slot_id: int) -> str:
+        acct = self._slot_account(slot_id)
+        if acct:
+            return acct.get("name") or acct.get("email") or f"Slot {slot_id + 1}"
+        return f"Slot {slot_id + 1}"
+
+    def _selected_gv_account_index(self) -> int:
+        if not hasattr(self, "gv_accounts_table"):
+            return -1
+        row = self.gv_accounts_table.currentRow()
+        return row if 0 <= row < len(self._gv_accounts) else -1
+
+    def _refresh_gv_accounts(self):
+        self._gv_accounts = load_gv_accounts()
+        if not hasattr(self, "gv_accounts_table"):
+            return
+        self.gv_accounts_table.setRowCount(0)
+        for acct in self._gv_accounts:
+            row = self.gv_accounts_table.rowCount()
+            self.gv_accounts_table.insertRow(row)
+            vals = [
+                acct.get("name", ""),
+                acct.get("email", ""),
+                acct.get("profile", ""),
+                acct.get("notes", ""),
+            ]
+            for col, val in enumerate(vals):
+                item = QTableWidgetItem(str(val))
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.gv_accounts_table.setItem(row, col, item)
+        self._refresh_slot_titles()
+
+    def _refresh_slot_titles(self):
+        if not hasattr(self, "_slot_cards"):
+            return
+        for sid, card in self._slot_cards.items():
+            card.setTitle(f"  Slot {sid + 1} - {self._slot_label(sid)}")
+
+    def _gv_add_account(self):
+        from PyQt6.QtWidgets import QInputDialog
+
+        name, ok = QInputDialog.getText(self, "Add Google Voice Account",
+                                        "Name / label:")
+        if not ok or not name.strip():
+            return
+        email, ok = QInputDialog.getText(self, "Add Google Voice Account",
+                                         "Google Voice email:")
+        if not ok or not email.strip():
+            return
+        notes, _ = QInputDialog.getText(self, "Add Google Voice Account",
+                                        "Notes (optional):")
+
+        existing = {a.get("profile", "") for a in self._gv_accounts}
+        acct = {
+            "name": name.strip(),
+            "email": email.strip().lower(),
+            "profile": make_profile_name(name, email, existing),
+            "notes": notes.strip(),
+        }
+        self._gv_accounts.append(acct)
+        save_gv_accounts(self._gv_accounts)
+        self._refresh_gv_accounts()
+        self._log(f"Google Voice account added: {acct['name']}")
+
+        if not self._running:
+            self._init_controllers(self.spin_slots.value())
+
+        if QMessageBox.question(
+            self, "Setup Login",
+            "Open this account now so you can log in to Google Voice?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) == QMessageBox.StandardButton.Yes:
+            self.gv_accounts_table.selectRow(len(self._gv_accounts) - 1)
+            self._gv_setup_selected()
+
+    def _gv_remove_selected(self):
+        idx = self._selected_gv_account_index()
+        if idx < 0:
+            QMessageBox.warning(self, "Select Account", "Select an account first.")
+            return
+        acct = self._gv_accounts[idx]
+        if QMessageBox.question(
+            self, "Remove Account",
+            f"Remove {acct.get('name', 'this account')} from the app?\n\n"
+            "The saved browser profile folder is left on disk.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self._gv_accounts.pop(idx)
+        save_gv_accounts(self._gv_accounts)
+        self._refresh_gv_accounts()
+        if not self._running:
+            self._init_controllers(self.spin_slots.value())
+
+    def _gv_setup_selected(self):
+        idx = self._selected_gv_account_index()
+        if idx < 0:
+            QMessageBox.warning(self, "Select Account", "Select an account first.")
+            return
+        acct = self._gv_accounts[idx]
+        target_dir = gv_profile_dir(acct["profile"])
+
+        ctrl = next(
+            (c for c in self._controllers
+             if os.path.abspath(c.profile_dir) == os.path.abspath(target_dir)),
+            None
+        )
+        created_temp = False
+        if ctrl is None:
+            ctrl = GVController(
+                idx,
+                target_dir,
+                parent=self,
+                profile_key=acct["profile"],
+            )
+            ctrl.login_detected.connect(self._on_slot_login)
+            ctrl.log_message.connect(self._on_slot_log)
+            created_temp = True
+
+        dlg = GVSetupDialog(ctrl, idx, self)
+        dlg.setWindowTitle(f"Google Voice Login - {acct.get('name', acct['email'])}")
+        dlg.exec()
+
+        if created_temp:
+            ctrl.view.setParent(None)
+            ctrl.view.deleteLater()
+        else:
+            ctrl.view.setParent(self._browser_host)
+            ctrl.view.setMaximumSize(1, 1)
+            self._browser_layout.addWidget(ctrl.view)
+
+        self._log(f"Login setup checked for {acct.get('name', acct['email'])}")
+
+    # ══════════════════════════════════════════════════════════════════════════
     #  CONTROLLER INIT
     # ══════════════════════════════════════════════════════════════════════════
 
@@ -1119,11 +1313,19 @@ class MainWindow(QMainWindow):
         # Remove old controllers
         for ctrl in self._controllers:
             ctrl.view.setParent(None)
+            ctrl.view.deleteLater()
         self._controllers.clear()
 
         for i in range(n):
-            profile_dir = os.path.join(CHROME_PROFILES_DIR, f"slot_{i}")
-            ctrl = GVController(i, profile_dir, parent=self)
+            acct = self._slot_account(i)
+            if acct:
+                profile_name = acct["profile"]
+                profile_dir = gv_profile_dir(profile_name)
+            else:
+                profile_name = f"slot_{i}"
+                profile_dir = os.path.join(CHROME_PROFILES_DIR, profile_name)
+            ctrl = GVController(i, profile_dir, parent=self,
+                                profile_key=profile_name)
             ctrl.state_changed.connect(self._on_slot_state)
             ctrl.login_detected.connect(self._on_slot_login)
             ctrl.log_message.connect(self._on_slot_log)
@@ -1271,6 +1473,13 @@ class MainWindow(QMainWindow):
                 self._update_card(ctrl.slot_id, "DIALING", phone)
                 self._log(f"[Slot {ctrl.slot_id}] 📞 Dialing {phone}…")
                 ctrl.dial(phone)
+                timeout_ms = int(self.cfg.get("call_timeout", 60) * 1000)
+                started_at = self._slot_start[ctrl.slot_id]
+                QTimer.singleShot(
+                    timeout_ms,
+                    lambda sid=ctrl.slot_id, p=phone, st=started_at:
+                    self._timeout_call(sid, p, st)
+                )
 
         # All done?
         if self._contact_idx >= len(self._contacts):
@@ -1283,16 +1492,45 @@ class MainWindow(QMainWindow):
                 self._on_all_done()
 
     def _release_slot(self, slot_id: int):
-        """Agent finished — hang up and continue dialing."""
+        self._next_call(slot_id)
+
+    def _cut_call(self, slot_id: int):
+        """Hang up the current backend Google Voice call from our UI."""
         ctrl = self._get_ctrl(slot_id)
+        phone = self._slot_phone.get(slot_id, "")
+        state = ctrl.current_state if ctrl else "IDLE"
         if ctrl:
             ctrl.hangup()
-            self._log(f"[Slot {slot_id}] Agent released — continuing…")
-            self.db.log_call(self.user["id"],
-                             self._slot_phone.get(slot_id, ""),
-                             "ENDED", slot_id=slot_id)
+            self._log(f"[Slot {slot_id}] Cut call")
+        if phone:
+            status = "ENDED" if state == "CONNECTED" else "NO_ANSWER"
+            self.db.log_call(self.user["id"], phone, status, slot_id=slot_id)
             self._refresh_logs()
+        self._slot_phone.pop(slot_id, None)
+        self._slot_start.pop(slot_id, None)
         self._update_card(slot_id, "IDLE", "")
+
+    def _next_call(self, slot_id: int):
+        """Cut the current call and immediately assign the next queued number."""
+        self._cut_call(slot_id)
+        self._log(f"[Slot {slot_id}] Moving to next call")
+        if self._running:
+            QTimer.singleShot(250, self._assign_pending_calls)
+
+    def _timeout_call(self, slot_id: int, phone: str, started_at: float):
+        """Auto-cut an unanswered call once the configured timeout expires."""
+        ctrl = self._get_ctrl(slot_id)
+        if not ctrl:
+            return
+        if self._slot_phone.get(slot_id) != phone:
+            return
+        if self._slot_start.get(slot_id) != started_at:
+            return
+        if ctrl.current_state in ("DIALING", "RINGING"):
+            self._log(f"[Slot {slot_id}] Timeout reached - cutting call")
+            self._cut_call(slot_id)
+            if self._running:
+                QTimer.singleShot(250, self._assign_pending_calls)
 
     def _on_all_done(self):
         self._running = False
@@ -1318,7 +1556,7 @@ class MainWindow(QMainWindow):
                 f"Slot {slot_id + 1}  —  {disp}\n\n"
                 "Google Voice is connected in the background.\n"
                 "Your microphone and speakers are active now.\n\n"
-                "Talk to the contact, then click  Release Slot."
+                "Talk to the contact, then use Next Call or Cut Call."
             )
         elif state == "VOICEMAIL":
             self._log(f"[Slot {slot_id}] 📭 Voicemail — auto-hanging up in 2s")
