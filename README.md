@@ -7,7 +7,7 @@ Windows desktop auto dialer for Indus Transports LLC using Google Voice in hidde
 - Branded PyQt6 desktop UI with admin login, agent login, CRM, logs, and live call panels
 - Hidden Google Voice browser per call slot using `QWebEngineView`
 - Google Voice account manager with persistent profile folders
-- Automatic Google Voice login after first manual setup, using saved browser sessions
+- Automatic Google Voice login using saved local email/password plus persistent browser sessions
 - Live call cards showing slot status, current phone number, and call duration
 - Operator controls for `Next Call` and `Cut Call`
 - Call timeout auto-cut for unanswered dialing/ringing calls
@@ -41,17 +41,21 @@ On first run, create the admin account. Admin users can create app users from th
 1. Open `Settings`.
 2. In `Google Voice Accounts`, click `+ Add Account`.
 3. Enter a label and the Google Voice email.
-4. Choose `Login / Setup Selected`.
-5. Log in to Google Voice in the setup browser window.
-6. Close/continue after login is complete.
+4. Enter the Google Voice password when prompted.
+5. Choose `Login / Setup Selected`.
+6. The app will autofill Google's normal email/password pages through the DOM.
+7. If Google asks for CAPTCHA, 2FA, recovery email, or another security challenge, finish that step manually in the setup window.
+8. Close/continue after login is complete.
 
-Each account gets its own persistent profile under `chrome_profiles/`. On future launches, the app reopens that same profile so Google Voice is already signed in. The app does not store Google passwords and does not bypass Google login, CAPTCHA, or 2FA.
+Each account gets its own persistent profile under `chrome_profiles/`. On future launches, the app reopens that same profile so Google Voice is already signed in. Passwords are stored only in the local ignored file `data/gv_accounts.json`; do not commit or share that file. The app does not bypass Google CAPTCHA, 2FA, or security checks.
 
 Slots use accounts in order:
 
 - Slot 1 uses the first Google Voice account.
 - Slot 2 uses the second Google Voice account.
 - Extra slots fall back to legacy `slot_N` profile folders if there are fewer accounts than slots.
+
+Use `Move Up`, `Move Down`, and `Duplicate` in Settings to control account priority. Duplicated accounts get separate profile folders, which is useful for testing profile priority without retyping credentials.
 
 ## Dialing Workflow
 

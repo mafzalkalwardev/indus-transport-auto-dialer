@@ -1075,11 +1075,11 @@ class MainWindow(QMainWindow):
         alay.addWidget(QLabel(
             "Add each Google Voice account once. The app opens a dedicated "
             "profile for manual login, then reuses that saved session for "
-            "automatic login on future runs. Google passwords are not stored."
+            "automatic login on future runs. Passwords stay in ignored local data."
         ))
-        self.gv_accounts_table = QTableWidget(0, 4)
+        self.gv_accounts_table = QTableWidget(0, 5)
         self.gv_accounts_table.setHorizontalHeaderLabels(
-            ["Name", "Email", "Profile", "Notes"])
+            ["Priority", "Name", "Email", "Password", "Profile"])
         self.gv_accounts_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
         self.gv_accounts_table.setEditTriggers(
@@ -1092,6 +1092,9 @@ class MainWindow(QMainWindow):
         for txt, fn, nm in [
             ("+ Add Account", self._gv_add_account, "green"),
             ("Login / Setup Selected", self._gv_setup_selected, "yellow"),
+            ("Move Up", self._gv_move_up, ""),
+            ("Move Down", self._gv_move_down, ""),
+            ("Duplicate", self._gv_duplicate_selected, ""),
             ("Remove Selected", self._gv_remove_selected, "red"),
             ("Refresh", self._refresh_gv_accounts, ""),
         ]:
@@ -1189,14 +1192,15 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "gv_accounts_table"):
             return
         self.gv_accounts_table.setRowCount(0)
-        for acct in self._gv_accounts:
+        for idx, acct in enumerate(self._gv_accounts, start=1):
             row = self.gv_accounts_table.rowCount()
             self.gv_accounts_table.insertRow(row)
             vals = [
+                str(idx),
                 acct.get("name", ""),
                 acct.get("email", ""),
+                "Saved" if acct.get("password") else "Manual",
                 acct.get("profile", ""),
-                acct.get("notes", ""),
             ]
             for col, val in enumerate(vals):
                 item = QTableWidgetItem(str(val))
@@ -1221,6 +1225,13 @@ class MainWindow(QMainWindow):
                                          "Google Voice email:")
         if not ok or not email.strip():
             return
+        password, ok = QInputDialog.getText(
+            self, "Add Google Voice Account",
+            "Google password (saved only in local ignored data/gv_accounts.json):",
+            QLineEdit.EchoMode.Password,
+        )
+        if not ok:
+            return
         notes, _ = QInputDialog.getText(self, "Add Google Voice Account",
                                         "Notes (optional):")
 
@@ -1228,6 +1239,7 @@ class MainWindow(QMainWindow):
         acct = {
             "name": name.strip(),
             "email": email.strip().lower(),
+            "password": password,
             "profile": make_profile_name(name, email, existing),
             "notes": notes.strip(),
         }
@@ -1246,6 +1258,47 @@ class MainWindow(QMainWindow):
         ) == QMessageBox.StandardButton.Yes:
             self.gv_accounts_table.selectRow(len(self._gv_accounts) - 1)
             self._gv_setup_selected()
+
+    def _gv_move_up(self):
+        idx = self._selected_gv_account_index()
+        if idx <= 0:
+            return
+        self._gv_accounts[idx - 1], self._gv_accounts[idx] = (
+            self._gv_accounts[idx], self._gv_accounts[idx - 1])
+        save_gv_accounts(self._gv_accounts)
+        self._refresh_gv_accounts()
+        self.gv_accounts_table.selectRow(idx - 1)
+        if not self._running:
+            self._init_controllers(self.spin_slots.value())
+
+    def _gv_move_down(self):
+        idx = self._selected_gv_account_index()
+        if idx < 0 or idx >= len(self._gv_accounts) - 1:
+            return
+        self._gv_accounts[idx + 1], self._gv_accounts[idx] = (
+            self._gv_accounts[idx], self._gv_accounts[idx + 1])
+        save_gv_accounts(self._gv_accounts)
+        self._refresh_gv_accounts()
+        self.gv_accounts_table.selectRow(idx + 1)
+        if not self._running:
+            self._init_controllers(self.spin_slots.value())
+
+    def _gv_duplicate_selected(self):
+        idx = self._selected_gv_account_index()
+        if idx < 0:
+            QMessageBox.warning(self, "Select Account", "Select an account first.")
+            return
+        src = self._gv_accounts[idx]
+        existing = {a.get("profile", "") for a in self._gv_accounts}
+        copy = dict(src)
+        copy["name"] = f"{src.get('name', 'Account')} Copy"
+        copy["profile"] = make_profile_name(copy["name"], src.get("email", ""), existing)
+        self._gv_accounts.insert(idx + 1, copy)
+        save_gv_accounts(self._gv_accounts)
+        self._refresh_gv_accounts()
+        self.gv_accounts_table.selectRow(idx + 1)
+        if not self._running:
+            self._init_controllers(self.spin_slots.value())
 
     def _gv_remove_selected(self):
         idx = self._selected_gv_account_index()
@@ -1286,10 +1339,17 @@ class MainWindow(QMainWindow):
                 target_dir,
                 parent=self,
                 profile_key=acct["profile"],
+                login_email=acct.get("email", ""),
+                login_password=acct.get("password", ""),
             )
             ctrl.login_detected.connect(self._on_slot_login)
             ctrl.log_message.connect(self._on_slot_log)
             created_temp = True
+        else:
+            ctrl.set_login_credentials(
+                acct.get("email", ""),
+                acct.get("password", ""),
+            )
 
         dlg = GVSetupDialog(ctrl, idx, self)
         dlg.setWindowTitle(f"Google Voice Login - {acct.get('name', acct['email'])}")
@@ -1321,11 +1381,17 @@ class MainWindow(QMainWindow):
             if acct:
                 profile_name = acct["profile"]
                 profile_dir = gv_profile_dir(profile_name)
+                login_email = acct.get("email", "")
+                login_password = acct.get("password", "")
             else:
                 profile_name = f"slot_{i}"
                 profile_dir = os.path.join(CHROME_PROFILES_DIR, profile_name)
+                login_email = ""
+                login_password = ""
             ctrl = GVController(i, profile_dir, parent=self,
-                                profile_key=profile_name)
+                                profile_key=profile_name,
+                                login_email=login_email,
+                                login_password=login_password)
             ctrl.state_changed.connect(self._on_slot_state)
             ctrl.login_detected.connect(self._on_slot_login)
             ctrl.log_message.connect(self._on_slot_log)

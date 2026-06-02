@@ -1,7 +1,8 @@
 """Google Voice account registry.
 
-Only labels, emails, notes, and local profile folder names are stored. Google
-login itself remains inside the persistent browser profile.
+Labels, emails, optional passwords, notes, and local profile folder names are
+stored in an ignored local JSON file. Google's logged-in session remains inside
+the persistent browser profile.
 """
 from __future__ import annotations
 
@@ -67,6 +68,7 @@ def load_accounts() -> list[dict[str, Any]]:
         accounts.append({
             "name": name,
             "email": email,
+            "password": str(raw.get("password", "")),
             "profile": profile,
             "notes": str(raw.get("notes", "")).strip(),
         })

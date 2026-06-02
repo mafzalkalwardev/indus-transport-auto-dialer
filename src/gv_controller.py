@@ -6,6 +6,7 @@ All control is via JavaScript injection into the embedded browser.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import Callable, Optional
@@ -91,6 +92,88 @@ _JS_HANGUP = """
 """
 
 
+def _js_autofill_login(email: str, password: str) -> str:
+    email_js = json.dumps(email)
+    password_js = json.dumps(password)
+    return f"""
+(function(){{
+  const email = {email_js};
+  const password = {password_js};
+  const url = window.location.href || '';
+
+  if (!/accounts\\.google\\.com|signin|ServiceLogin/i.test(url)) {{
+    return 'not_login_page';
+  }}
+
+  const visible = el => {{
+    if (!el) return false;
+    const s = window.getComputedStyle(el);
+    const r = el.getBoundingClientRect();
+    return s.display !== 'none' && s.visibility !== 'hidden' &&
+           r.width > 0 && r.height > 0;
+  }};
+
+  const setNativeVal = (el, val) => {{
+    const proto = el.tagName === 'TEXTAREA'
+      ? window.HTMLTextAreaElement.prototype
+      : window.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    el.focus();
+    if (setter) setter.call(el, val); else el.value = val;
+    el.dispatchEvent(new InputEvent('input', {{bubbles:true, inputType:'insertText', data:val}}));
+    el.dispatchEvent(new Event('change', {{bubbles:true}}));
+    el.dispatchEvent(new KeyboardEvent('keyup', {{bubbles:true, key:'a'}}));
+  }};
+
+  const clickNext = () => {{
+    const candidates = [
+      '#identifierNext button', '#passwordNext button',
+      'button[jsname="LgbsSe"]', 'div[role="button"][jsname="LgbsSe"]',
+      'button[type="button"]', 'button'
+    ];
+    for (const sel of candidates) {{
+      for (const btn of document.querySelectorAll(sel)) {{
+        const txt = (btn.innerText || btn.textContent || '').toLowerCase();
+        if (visible(btn) && !btn.disabled &&
+            (txt.includes('next') || btn.closest('#identifierNext,#passwordNext'))) {{
+          btn.click();
+          return true;
+        }}
+      }}
+    }}
+    return false;
+  }};
+
+  const challengeText = (document.body?.innerText || '').toLowerCase();
+  if (challengeText.includes('2-step verification') ||
+      challengeText.includes('verify it') ||
+      challengeText.includes('couldn\\'t verify') ||
+      challengeText.includes('captcha') ||
+      challengeText.includes('recovery email')) {{
+    return 'security_step_required';
+  }}
+
+  const pass = Array.from(document.querySelectorAll(
+    'input[type="password"], input[name="Passwd"]')).find(visible);
+  if (pass) {{
+    if (!password) return 'password_missing';
+    if (pass.value !== password) setNativeVal(pass, password);
+    return clickNext() ? 'password_submitted' : 'password_filled';
+  }}
+
+  const ident = Array.from(document.querySelectorAll(
+    'input[type="email"], input[name="identifier"], #identifierId')).find(visible);
+  if (ident) {{
+    if (!email) return 'email_missing';
+    if (ident.value !== email) setNativeVal(ident, email);
+    return clickNext() ? 'email_submitted' : 'email_filled';
+  }}
+
+  return 'waiting_for_login_fields';
+}})();
+"""
+
+
 def _js_dial(phone: str) -> str:
     """Build the JS dial sequence for a given E.164 phone number."""
     safe = phone.replace("'", "")
@@ -168,13 +251,17 @@ class GVController(QObject):
     log_message      = pyqtSignal(int, str)    # (slot_id, msg)
 
     def __init__(self, slot_id: int, profile_dir: str, parent: QObject = None,
-                 profile_key: str = ""):
+                 profile_key: str = "", login_email: str = "",
+                 login_password: str = ""):
         super().__init__(parent)
         self.slot_id     = slot_id
         self.profile_dir = profile_dir
         self._state      = "IDLE"
         self._ctrl_count = 0   # debounce for answered-controls
         self._logged_in  = False
+        self._login_email = login_email
+        self._login_password = login_password
+        self._last_login_fill_status = ""
 
         # ── WebEngine setup ───────────────────────────────────────────────────
         os.makedirs(profile_dir, exist_ok=True)
@@ -192,6 +279,8 @@ class GVController(QObject):
 
         self._page = QWebEnginePage(self._profile)
         self._page.featurePermissionRequested.connect(self._grant_permission)
+        self._page.loadFinished.connect(lambda _ok: QTimer.singleShot(
+            500, self._try_auto_login))
 
         # Disable JS console noise appearing in our log
         self._page.javaScriptConsoleMessage = lambda *_: None
@@ -217,13 +306,26 @@ class GVController(QObject):
         self._login_timer.setInterval(2000)
         self._login_timer.timeout.connect(self._check_login)
 
+        self._login_fill_timer = QTimer(self)
+        self._login_fill_timer.setInterval(1200)
+        self._login_fill_timer.timeout.connect(self._try_auto_login)
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def load(self) -> None:
         """Navigate to Google Voice. Profile auto-logs in if cookies are present."""
         self._page.load(QUrl(GV_URL))
         self._login_timer.start()
+        if self._login_email or self._login_password:
+            self._login_fill_timer.start()
         self._emit_log("Loading Google Voice…")
+
+    def set_login_credentials(self, email: str = "", password: str = "") -> None:
+        self._login_email = email
+        self._login_password = password
+        self._last_login_fill_status = ""
+        if email or password:
+            self._login_fill_timer.start()
 
     def start_polling(self) -> None:
         self._poll_timer.start()
@@ -276,8 +378,28 @@ class GVController(QObject):
         if logged_in and not self._logged_in:
             self._logged_in = True
             self._login_timer.stop()
+            self._login_fill_timer.stop()
             self._emit_log("✅ Google account detected — ready")
             self.login_detected.emit(self.slot_id)
+
+    def _try_auto_login(self) -> None:
+        if self._logged_in or not (self._login_email or self._login_password):
+            return
+        self._page.runJavaScript(
+            _js_autofill_login(self._login_email, self._login_password),
+            self._on_auto_login_result,
+        )
+
+    def _on_auto_login_result(self, status: str) -> None:
+        if not status or status == self._last_login_fill_status:
+            return
+        self._last_login_fill_status = status
+        if status in ("email_submitted", "password_submitted"):
+            self._emit_log("Auto-login submitted saved credentials")
+        elif status == "security_step_required":
+            self._emit_log("Google security step required - finish manually")
+        elif status in ("password_missing", "email_missing"):
+            self._emit_log(f"Auto-login paused: {status.replace('_', ' ')}")
 
     def _poll_state(self) -> None:
         self._page.runJavaScript(_JS_DETECT_STATE, self._on_poll_result)
