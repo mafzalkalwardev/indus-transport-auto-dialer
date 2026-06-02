@@ -25,7 +25,7 @@ These interface previews show the current live-call console and the refreshed li
 
 ## Requirements
 
-- Windows 10 or 11
+- Windows 10 or 110
 - Python 3.10+
 - Google Voice account(s)
 - Microphone permission allowed when the Google Voice setup window asks
@@ -50,10 +50,10 @@ On first run, create the admin account. Admin users can create app users from th
 2. In `Google Voice Accounts`, click `+ Add Account`.
 3. Enter a label and the Google Voice email.
 4. Enter the Google Voice password when prompted.
-5. Choose `Login / Setup Selected`.
-6. The app will autofill Google's normal email/password pages through the DOM.
-7. If Google asks for CAPTCHA, 2FA, recovery email, or another security challenge, finish that step manually in the setup window.
-8. Close/continue after login is complete.
+5. Choose `Login / Setup Selected` — an **embedded browser** opens inside the app (not a separate Chrome window).
+6. Sign in on the live Google page. Saved email/password autofill when possible.
+7. If Google asks for CAPTCHA, 2FA, recovery email, or another security challenge, complete it in that same window.
+8. The setup window closes automatically when login is detected, or click **I'm Logged In — Continue**.
 
 Each account gets its own persistent profile under `chrome_profiles/`. On future launches, the app reopens that same profile so Google Voice is already signed in. Passwords are stored only in the local ignored file `data/gv_accounts.json`; do not commit or share that file. The app does not bypass Google CAPTCHA, 2FA, or security checks.
 
@@ -79,9 +79,41 @@ Live call controls:
 - `Cut Call`: hangs up the current backend Google Voice call and leaves the slot idle until the dialer assigns another call.
 - Timeout: unanswered `DIALING` or `RINGING` calls are cut automatically after the configured timeout.
 
+## How Call Detection Works (Headless)
+
+The app does **not** use AI or audio analysis. Each hidden `QWebEngineView` reads the Google Voice web UI every ~600ms and classifies the call using DOM signals:
+
+| State | How it is detected |
+|-------|-------------------|
+| **RINGING** | Hangup visible, “Ringing” / “Calling” text |
+| **CONNECTED** | Live call timer (`MM:SS`) or Hold/Mute/Transfer buttons (2 polls) |
+| **VOICEMAIL** | Phrases like “leave a message”, “after the beep”, or voicemail UI (2 polls) |
+| **ENDED** | “Call ended” banner |
+
+Voicemail is checked **before** ringing/connected so a VM greeting is not mistaken for a live answer. After voicemail is confirmed, the app hangs up automatically (see **Voicemail hangup** on the Dialer tab) and dials the next number. Live answers switch to the **Live Calls** tab without blocking popups.
+
 ## Live Test Notes
 
 Use only phone numbers you own or are explicitly authorized to call. The app can log in automatically with saved local credentials, but Google security checks such as CAPTCHA, 2FA, or recovery prompts must be completed manually.
+
+## Troubleshooting
+
+### Empty login window (dark panel, no Google page)
+
+This was caused by the hidden dialer browser staying at 1×1 pixels during setup. Current builds expand the embedded view for **Login / Setup Selected**. If the page is still blank:
+
+1. Click **Reload page** in the setup dialog.
+2. Confirm `PyQt6-WebEngine` is installed: `pip install PyQt6-WebEngine`.
+3. On some GPUs, try launching with software rendering before starting the app:
+
+```bat
+set QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu
+python autodialer_gui.py
+```
+
+### Power Dial disabled
+
+Ensure each active slot's Google Voice account shows **READY** on the Live Calls tab, or run **Login / Setup Selected** again in Settings.
 
 ## Excel File Format
 

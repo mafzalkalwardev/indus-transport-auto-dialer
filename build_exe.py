@@ -31,8 +31,14 @@ for dep in DEPS:
 # Default config
 if not os.path.exists("dialer_config.json"):
     with open("dialer_config.json", "w") as f:
-        json.dump({"theme": "dark", "n_slots": 2,
-                   "call_timeout": 60, "excel_path": ""}, f, indent=2)
+        json.dump({
+            "theme": "dark",
+            "n_slots": 2,
+            "call_timeout": 60,
+            "cooldown": 3.0,
+            "voicemail_hangup_sec": 3,
+            "excel_path": "",
+        }, f, indent=2)
     print("\n✅ Created default dialer_config.json")
 
 # ICO from logo PNG

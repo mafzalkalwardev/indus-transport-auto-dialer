@@ -9,9 +9,12 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime
 from typing import Callable, Optional
+from urllib.parse import quote
 
 from PyQt6.QtCore import QObject, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor
 from PyQt6.QtWebEngineCore import (
     QWebEnginePage,
     QWebEngineProfile,
@@ -21,60 +24,139 @@ from PyQt6.QtWebEngineWidgets import QWebEngineView
 
 GV_URL       = "https://voice.google.com"
 GV_CALLS_URL = "https://voice.google.com/u/0/calls"
+SESSION_MARKER = ".gv_session_ok"
+SIGNIN_URL = (
+    "https://accounts.google.com/signin/v2/identifier"
+    f"?continue={quote(GV_URL, safe='')}&flowName=GlifWebSignIn"
+)
 
-POLL_MS = 800   # state-detection poll interval
+POLL_MS = 600   # state-detection poll interval (active calls)
+
+_JS_FORCE_VISIBLE = """
+(function(){
+  try {
+    Object.defineProperty(document, 'hidden', {get: function(){ return false; }, configurable: true});
+    Object.defineProperty(document, 'visibilityState', {get: function(){ return 'visible'; }, configurable: true});
+    document.dispatchEvent(new Event('visibilitychange'));
+  } catch(e) {}
+})();
+"""
 
 # ── JavaScript snippets ───────────────────────────────────────────────────────
 
 _JS_CHECK_LOGIN = """
 (function(){
   var url = window.location.href || '';
-  var acc = document.querySelector(
-    '[aria-label*="Google Account" i], [data-email], img[alt="profile photo"]');
-  return (url.indexOf('voice.google.com') !== -1 && !!acc);
+  if (url.indexOf('voice.google.com') === -1) return false;
+  if (url.indexOf('/signin') !== -1 || url.indexOf('accounts.google.com') !== -1) return false;
+  var sels = [
+    '[aria-label*="Google Account" i]',
+    '[data-email]',
+    'img[alt*="profile" i]',
+    'a[href*="Sign out" i]',
+    'button[aria-label*="Account" i]',
+    'gv-account-switcher',
+    '[data-ogsr-up]'
+  ];
+  for (var i = 0; i < sels.length; i++) {
+    if (document.querySelector(sels[i])) return true;
+  }
+  var t = (document.body && document.body.innerText || '').toLowerCase();
+  if (t.indexOf('sign in') !== -1 && t.indexOf('google voice') !== -1) return false;
+  return document.querySelector('nav, gv-side-panel, [role="navigation"]') !== null;
 })();
 """
 
+
+def session_marker_path(profile_dir: str) -> str:
+    return os.path.join(profile_dir, SESSION_MARKER)
+
+
+def write_session_marker(profile_dir: str) -> None:
+    os.makedirs(profile_dir, exist_ok=True)
+    with open(session_marker_path(profile_dir), "w", encoding="utf-8") as f:
+        f.write(datetime.now().isoformat())
+
+
+def has_session_marker(profile_dir: str) -> bool:
+    return os.path.isfile(session_marker_path(profile_dir))
+
 _JS_DETECT_STATE = r"""
 (function(){
-  // 1. Call timer — most reliable proof of CONNECTED
-  var timerSels = ['[jsname="pRLmDf"]','.call-duration','[aria-label*="call duration" i]'];
-  for(var i=0;i<timerSels.length;i++){
-    var el=document.querySelector(timerSels[i]);
-    if(el && el.offsetParent && /\d:\d\d/.test(el.textContent)) return 'CONNECTED';
+  function vis(el){
+    if(!el) return false;
+    var s=window.getComputedStyle(el), r=el.getBoundingClientRect();
+    return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;
   }
-  // 2. Answered controls — only visible after remote party picks up
-  var ansCtrl=['button[aria-label*="Hold call" i]','button[aria-label*="Mute call" i]',
-               'button[aria-label*="Transfer" i]','button[aria-label*="Add a call" i]'];
-  for(var j=0;j<ansCtrl.length;j++){
-    var b=document.querySelector(ansCtrl[j]);
-    if(b && b.offsetParent) return 'CONNECTED_CTRL';
+  function txt(){
+    return (document.body&&document.body.innerText||'').toLowerCase();
   }
-  // 3. Voicemail cues
-  var vmSels=['.voicemail-indicator','[data-e2eid="voicemail-record"]',
-              '[aria-label*="leave a message" i]','[title*="leave a message" i]'];
-  for(var k=0;k<vmSels.length;k++){
-    var v=document.querySelector(vmSels[k]);
-    if(v && v.offsetParent) return 'VOICEMAIL';
-  }
-  var src=(document.body&&document.body.innerText||'').toLowerCase();
-  if(src.indexOf('leave a message')!==-1||src.indexOf('record after the tone')!==-1||
-     src.indexOf('after the beep')!==-1||src.indexOf('leave a voicemail')!==-1)
-    return 'VOICEMAIL';
-  // 4. Call-ended banner
-  var endedSels=['[aria-label*="Call ended" i]','[data-e2eid="call-ended"]','.call-ended'];
-  for(var m=0;m<endedSels.length;m++){
-    var e=document.querySelector(endedSels[m]);
-    if(e && e.offsetParent) return 'ENDED';
-  }
-  // 5. Ringing — hangup button visible but no answered controls
+  var body=txt();
+  var inCall=false;
   var hangSels=['button[aria-label*="Hang up" i]','button[aria-label*="End call" i]',
-                'gv-icon-button[icon-name="call_end"]'];
-  for(var n=0;n<hangSels.length;n++){
-    var h=document.querySelector(hangSels[n]);
-    if(h && h.offsetParent) return 'RINGING';
+    'button[title*="Hang up" i]','gv-icon-button[icon-name="call_end"]',
+    '[data-action="end-call"]','button.end-call'];
+  for(var h=0;h<hangSels.length;h++){
+    var hang=document.querySelector(hangSels[h]);
+    if(vis(hang)){ inCall=true; break; }
   }
-  return 'IDLE';
+  if(!inCall) return 'IDLE';
+
+  // 1. Voicemail — check before ringing/connected (VM also shows hangup)
+  var vmPhrases=['leave a message','record after the tone','record your message',
+    'after the beep','leave a voicemail','voicemail box','not available to take',
+    'cannot take your call',"can't take your call",'at the tone','mailbox is full',
+    'forwarded to voicemail','has been forwarded','started recording',
+    'person you are calling','reach is not available','no one is available'];
+  for(var p=0;p<vmPhrases.length;p++){
+    if(body.indexOf(vmPhrases[p])!==-1) return 'VOICEMAIL';
+  }
+  var vmSels=['.voicemail-indicator','[data-e2eid="voicemail-record"]',
+    '[aria-label*="leave a message" i]','[aria-label*="voicemail" i]',
+    '[title*="leave a message" i]','[data-tooltip*="voicemail" i]'];
+  for(var v=0;v<vmSels.length;v++){
+    var vm=document.querySelector(vmSels[v]);
+    if(vis(vm)) return 'VOICEMAIL';
+  }
+
+  // 2. Live answer — MM:SS call timer (strict) or answered-call controls
+  var timerSels=['[jsname="pRLmDf"]','.call-duration','[aria-label*="call duration" i]',
+    '[data-e2eid="call-timer"]'];
+  for(var t=0;t<timerSels.length;t++){
+    var el=document.querySelector(timerSels[t]);
+    if(!vis(el)) continue;
+    var tx=(el.textContent||el.getAttribute('aria-label')||'').replace(/\s+/g,' ').trim();
+    if(/^(?:\d{1,2}:)?\d{1,2}:\d{2}$/.test(tx)) return 'CONNECTED';
+    if(/^\d{1,2}:\d{2}$/.test(tx)) return 'CONNECTED';
+  }
+  var ansCtrl=['button[aria-label*="Hold call" i]','button[aria-label*="Mute call" i]',
+    'button[aria-label*="Unmute call" i]','button[aria-label*="Transfer" i]',
+    'button[aria-label*="Add a call" i]','button[aria-label*="Record the call" i]',
+    'button[aria-label*="Send a message" i]'];
+  for(var a=0;a<ansCtrl.length;a++){
+    var btn=document.querySelector(ansCtrl[a]);
+    if(vis(btn)) return 'CONNECTED_CTRL';
+  }
+
+  // 3. Call ended
+  var endedSels=['[aria-label*="Call ended" i]','[data-e2eid="call-ended"]','.call-ended'];
+  for(var e=0;e<endedSels.length;e++){
+    var end=document.querySelector(endedSels[e]);
+    if(vis(end)) return 'ENDED';
+  }
+
+  // 4. Ringing / calling (before pickup)
+  if(body.indexOf('ringing')!==-1||body.indexOf('calling')!==-1){
+    return 'RINGING';
+  }
+  var ringSels=['[aria-label*="Ringing" i]','[aria-label*="Calling" i]'];
+  for(var r=0;r<ringSels.length;r++){
+    var rg=document.querySelector(ringSels[r]);
+    if(vis(rg)) return 'RINGING';
+  }
+
+  // In-call but unknown — treat as ringing until timer/VM/controls appear
+  return 'RINGING';
 })();
 """
 
@@ -153,6 +235,29 @@ def _js_autofill_login(email: str, password: str) -> str:
     return 'security_step_required';
   }}
 
+  const clickUsePassword = () => {{
+    const nodes = document.querySelectorAll(
+      'button, a, div[role="button"], span[role="link"], li[role="link"]');
+    for (const el of nodes) {{
+      const t = (el.innerText || el.textContent || '').toLowerCase();
+      if (t.includes('enter your password') || t.includes('use your password') ||
+          t.includes('use password instead') || t === 'password' ||
+          (t.includes('try another way') && !t.includes('passkey'))) {{
+        el.click();
+        return true;
+      }}
+    }}
+    return false;
+  }};
+
+  if (challengeText.includes('passkey') ||
+      challengeText.includes('security key') ||
+      challengeText.includes('choose a passkey') ||
+      challengeText.includes('use your passkey')) {{
+    if (clickUsePassword()) return 'use_password_clicked';
+    return 'passkey_step_paused';
+  }}
+
   const pass = Array.from(document.querySelectorAll(
     'input[type="password"], input[name="Passwd"]')).find(visible);
   if (pass) {{
@@ -161,11 +266,22 @@ def _js_autofill_login(email: str, password: str) -> str:
     return clickNext() ? 'password_submitted' : 'password_filled';
   }}
 
+  if (challengeText.includes('welcome') && email &&
+      challengeText.includes(email.toLowerCase())) {{
+    if (!password) return 'password_missing';
+    if (clickUsePassword()) return 'use_password_clicked';
+    return 'welcome_need_password';
+  }}
+
   const ident = Array.from(document.querySelectorAll(
     'input[type="email"], input[name="identifier"], #identifierId')).find(visible);
   if (ident) {{
     if (!email) return 'email_missing';
-    if (ident.value !== email) setNativeVal(ident, email);
+    const cur = (ident.value || '').trim().toLowerCase();
+    if (cur !== email.toLowerCase()) setNativeVal(ident, email);
+    if (cur === email.toLowerCase() && challengeText.includes('welcome')) {{
+      return 'welcome_need_password';
+    }}
     return clickNext() ? 'email_submitted' : 'email_filled';
   }}
 
@@ -279,8 +395,6 @@ class GVController(QObject):
 
         self._page = QWebEnginePage(self._profile)
         self._page.featurePermissionRequested.connect(self._grant_permission)
-        self._page.loadFinished.connect(lambda _ok: QTimer.singleShot(
-            500, self._try_auto_login))
 
         # Disable JS console noise appearing in our log
         self._page.javaScriptConsoleMessage = lambda *_: None
@@ -292,9 +406,20 @@ class GVController(QObject):
             QWebEngineSettings.WebAttribute.LocalStorageEnabled, True)
         settings.setAttribute(
             QWebEngineSettings.WebAttribute.AllowRunningInsecureContent, False)
+        settings.setAttribute(
+            QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+        settings.setAttribute(
+            QWebEngineSettings.WebAttribute.AllowGeolocationOnInsecureOrigins, True)
 
         self.view = QWebEngineView()
         self.view.setPage(self._page)
+        self._page.setBackgroundColor(QColor("#ffffff"))
+        self.view.setStyleSheet("background-color: #ffffff;")
+        self._load_ok = False
+        self._page.loadStarted.connect(self._on_load_started)
+        self._page.loadFinished.connect(self._on_load_finished_page)
+        if has_session_marker(profile_dir):
+            self._logged_in = True
 
         # ── State-poll timer ──────────────────────────────────────────────────
         self._poll_timer = QTimer(self)
@@ -310,22 +435,58 @@ class GVController(QObject):
         self._login_fill_timer.setInterval(1200)
         self._login_fill_timer.timeout.connect(self._try_auto_login)
 
+        self._setup_mode = False
+        self._redirected_to_signin = False
+        self._autofill_paused = False
+        self._email_step_done = False
+        self._vm_count = 0
+        self._active_call = False
+
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def load(self) -> None:
+    def load(self, for_setup: bool = False) -> None:
         """Navigate to Google Voice. Profile auto-logs in if cookies are present."""
-        self._page.load(QUrl(GV_URL))
+        self._setup_mode = for_setup
+        self._load_ok = False
+        if for_setup:
+            self._redirected_to_signin = False
+            self._autofill_paused = False
+            self._email_step_done = False
+            self._last_login_fill_status = ""
+            self._page.load(QUrl(SIGNIN_URL))
+            self._emit_log("Opening Google sign-in…")
+        else:
+            self._page.load(QUrl(GV_URL))
+            self._emit_log("Loading Google Voice…")
         self._login_timer.start()
-        if self._login_email or self._login_password:
-            self._login_fill_timer.start()
-        self._emit_log("Loading Google Voice…")
+        self._schedule_autofill()
+
+    def load_setup_signin(self) -> None:
+        """Open Google sign-in directly (setup wizard)."""
+        self.load(for_setup=True)
 
     def set_login_credentials(self, email: str = "", password: str = "") -> None:
         self._login_email = email
         self._login_password = password
         self._last_login_fill_status = ""
+        self._autofill_paused = False
         if email or password:
+            self._schedule_autofill()
+
+    def _schedule_autofill(self) -> None:
+        if not (self._login_email or self._login_password):
+            return
+        if not self._login_fill_timer.isActive():
             self._login_fill_timer.start()
+
+    def _pause_autofill(self, seconds: float = 0) -> None:
+        self._login_fill_timer.stop()
+        if seconds > 0 and not self._logged_in:
+            QTimer.singleShot(int(seconds * 1000), self._schedule_autofill)
+
+    def _stop_autofill(self) -> None:
+        self._autofill_paused = True
+        self._login_fill_timer.stop()
 
     def start_polling(self) -> None:
         self._poll_timer.start()
@@ -333,15 +494,28 @@ class GVController(QObject):
     def stop_polling(self) -> None:
         self._poll_timer.stop()
         self._ctrl_count = 0
+        self._vm_count = 0
+        self._active_call = False
 
     def dial(self, phone: str) -> None:
         self._emit_log(f"Dialing {phone}…")
+        self._active_call = True
+        self._vm_count = 0
+        self._ctrl_count = 0
         self._set_state("DIALING")
+        self._page.runJavaScript(_JS_FORCE_VISIBLE)
         self._page.runJavaScript(_js_dial(phone))
-        # Start polling after a short ramp-up
-        QTimer.singleShot(4000, self.start_polling)
+        # Poll early and often while headless (DOM still updates)
+        QTimer.singleShot(800, self._poll_once)
+        QTimer.singleShot(1600, self._poll_once)
+        QTimer.singleShot(2400, self.start_polling)
+
+    def _poll_once(self) -> None:
+        if self._active_call:
+            self._poll_state()
 
     def hangup(self) -> None:
+        self._active_call = False
         self._page.runJavaScript(_JS_HANGUP, lambda r: self._emit_log(
             f"Hangup: {r}"))
         self.stop_polling()
@@ -362,7 +536,33 @@ class GVController(QObject):
     def is_logged_in(self) -> bool:
         return self._logged_in
 
+    def is_session_ready(self) -> bool:
+        return self._logged_in or has_session_marker(self.profile_dir)
+
+    def mark_logged_in(self) -> None:
+        """Persist login success for this profile (survives controller recreation)."""
+        self._logged_in = True
+        write_session_marker(self.profile_dir)
+        self._login_timer.stop()
+        self._login_fill_timer.stop()
+        self._stop_autofill()
+        self._emit_log("Google Voice session saved")
+
     # ── Internal ──────────────────────────────────────────────────────────────
+
+    def _on_load_started(self) -> None:
+        self._load_ok = False
+
+    def _on_load_finished_page(self, ok: bool) -> None:
+        self._load_ok = ok
+        self._page.runJavaScript(_JS_FORCE_VISIBLE)
+        if ok:
+            QTimer.singleShot(400, self._try_auto_login)
+            QTimer.singleShot(800, self._check_login)
+            if self._setup_mode:
+                QTimer.singleShot(1200, self._maybe_redirect_signin)
+        else:
+            self._emit_log("Page failed to load — click Reload")
 
     def _grant_permission(self, url, feature) -> None:
         """Auto-grant mic + camera permissions so GV calls work."""
@@ -376,14 +576,13 @@ class GVController(QObject):
 
     def _on_login_check(self, logged_in: bool) -> None:
         if logged_in and not self._logged_in:
-            self._logged_in = True
-            self._login_timer.stop()
-            self._login_fill_timer.stop()
-            self._emit_log("✅ Google account detected — ready")
+            self.mark_logged_in()
+            self._emit_log("Google account detected — ready")
             self.login_detected.emit(self.slot_id)
 
     def _try_auto_login(self) -> None:
-        if self._logged_in or not (self._login_email or self._login_password):
+        if (self._logged_in or self._autofill_paused
+                or not (self._login_email or self._login_password)):
             return
         self._page.runJavaScript(
             _js_autofill_login(self._login_email, self._login_password),
@@ -391,15 +590,74 @@ class GVController(QObject):
         )
 
     def _on_auto_login_result(self, status: str) -> None:
-        if not status or status == self._last_login_fill_status:
+        if not status:
+            return
+        if status == self._last_login_fill_status:
             return
         self._last_login_fill_status = status
-        if status in ("email_submitted", "password_submitted"):
-            self._emit_log("Auto-login submitted saved credentials")
-        elif status == "security_step_required":
-            self._emit_log("Google security step required - finish manually")
+        if status == "not_login_page" and self._setup_mode:
+            self._maybe_redirect_signin()
+            return
+        if status == "email_submitted":
+            self._email_step_done = True
+            self._emit_log("Email submitted — waiting for password step…")
+            self._pause_autofill(3.5)
+        elif status == "password_submitted":
+            self._emit_log("Password submitted — finishing sign-in…")
+            self._pause_autofill(5.0)
+        elif status == "password_filled":
+            self._emit_log("Password filled — click Next if needed")
+            self._pause_autofill(2.0)
+        elif status == "use_password_clicked":
+            self._emit_log("Switched to password sign-in…")
+            self._pause_autofill(2.5)
+        elif status == "welcome_need_password":
+            if self._login_password:
+                self._emit_log("Use password sign-in — trying password option…")
+                self._pause_autofill(2.0)
+            else:
+                self._emit_log("Password required — enter it below and click Apply")
+                self._stop_autofill()
+        elif status in ("passkey_step_paused", "security_step_required"):
+            self._emit_log(
+                "Complete sign-in manually in the browser (passkey / 2FA / CAPTCHA)."
+            )
+            self._stop_autofill()
         elif status in ("password_missing", "email_missing"):
-            self._emit_log(f"Auto-login paused: {status.replace('_', ' ')}")
+            self._emit_log(
+                f"Need saved {'password' if status == 'password_missing' else 'email'} "
+                "— use the field below, then Apply."
+            )
+            self._stop_autofill()
+        elif status == "waiting_for_login_fields" and self._setup_mode:
+            if not self._email_step_done:
+                self._maybe_redirect_signin()
+
+    _JS_NEEDS_SIGNIN = """
+(function(){
+  var url = window.location.href || '';
+  if (/voice\\.google\\.com/i.test(url)) {
+    var acc = document.querySelector(
+      '[aria-label*="Google Account" i], [data-email], img[alt="profile photo"]');
+    if (!acc) return true;
+    return false;
+  }
+  if (!/accounts\\.google\\.com|signin|ServiceLogin/i.test(url)) return true;
+  return false;
+})();
+"""
+
+    def _maybe_redirect_signin(self) -> None:
+        if self._logged_in or self._redirected_to_signin or not self._setup_mode:
+            return
+        self._page.runJavaScript(self._JS_NEEDS_SIGNIN, self._on_needs_signin)
+
+    def _on_needs_signin(self, needs: bool) -> None:
+        if not needs or self._logged_in or self._redirected_to_signin:
+            return
+        self._redirected_to_signin = True
+        self._emit_log("Opening Google sign-in page…")
+        self._page.load(QUrl("https://accounts.google.com/"))
 
     def _poll_state(self) -> None:
         self._page.runJavaScript(_JS_DETECT_STATE, self._on_poll_result)
@@ -407,12 +665,29 @@ class GVController(QObject):
     def _on_poll_result(self, raw: str) -> None:
         state = raw or "IDLE"
 
-        # Debounce answered-controls signal (require 2 consecutive polls)
+        # Debounce voicemail (avoid false positive while ringing)
+        if state == "VOICEMAIL":
+            self._vm_count += 1
+            if self._vm_count < 2:
+                state = self._state if self._state != "IDLE" else "RINGING"
+            else:
+                self._emit_log("Voicemail detected")
+        else:
+            self._vm_count = 0
+
+        # Debounce answered-controls (require 2 consecutive polls)
         if state == "CONNECTED_CTRL":
             self._ctrl_count += 1
             state = "CONNECTED" if self._ctrl_count >= 2 else self._state
         else:
             self._ctrl_count = 0
+
+        if state == "CONNECTED":
+            self._emit_log("Live answer detected — person answered")
+
+        # Promote DIALING → RINGING when in-call UI appears
+        if state == "RINGING" and self._state == "DIALING":
+            self._emit_log("Ringing…")
 
         # Map ENDED back to IDLE after a brief pause
         if state == "ENDED":
@@ -424,7 +699,9 @@ class GVController(QObject):
         self._set_state(state)
 
         # Auto-stop polling once a terminal state is reached
-        if state in ("VOICEMAIL", "IDLE"):
+        if state == "VOICEMAIL":
+            self.stop_polling()
+        elif state == "IDLE" and not self._active_call:
             self.stop_polling()
 
     def _set_state(self, state: str) -> None:

@@ -32,7 +32,15 @@ from src.paths       import (LOGO_PNG, LOGO_JPEG, CONFIG_FILE,
                               CHROME_PROFILES_DIR, LOGS_DIR)
 from src.crm_db      import CRMDatabase
 from src.phone_utils import clean_phone, fmt_e164, fmt_display
-from src.gv_controller import GVController
+from src.gv_controller import (
+    GVController,
+    has_session_marker,
+    write_session_marker,
+)
+from src.ui_theme import (
+    DARK_QSS, LIGHT_QSS, DEFAULT_THEME,
+    status_label, status_color,
+)
 from src.gv_accounts import (
     load_accounts as load_gv_accounts,
     save_accounts as save_gv_accounts,
@@ -51,274 +59,11 @@ APP_NAME     = "INDUS TRANSPORTS LLC — Auto Dialer Pro"
 WHATSAPP_URL = "https://wa.me/923079670503"
 WA_NUMBER    = "+92 307 967 0503"
 
-# ── QSS stylesheets ───────────────────────────────────────────────────────────
-DARK_QSS = """
-QMainWindow, QDialog, QWidget#root {
-    background: #08111f;
-}
-QWidget {
-    background: #08111f;
-    color: #e8eef7;
-    font-family: "Segoe UI", Arial, sans-serif;
-    font-size: 10pt;
-}
-QWidget#header {
-    background: #0b1220;
-    border-bottom: 1px solid #1f2a3d;
-}
-QLabel { color: #e8eef7; background: transparent; }
-QLabel#brandName { color: #22c55e; letter-spacing: 0px; }
-QLabel#headerUser { color: #e8eef7; }
-QLabel#muted  { color: #94a3b8; }
-QLabel#accent { color: #22c55e; }
-QLabel#warn   { color: #fbbf24; }
-QLabel#danger { color: #ef4444; }
-
-QPushButton {
-    background: #111827;
-    color: #93c5fd;
-    border: 1px solid #263244;
-    border-radius: 6px;
-    padding: 8px 16px;
-    font-weight: 600;
-}
-QPushButton:hover  { background: #172033; border-color: #60a5fa; }
-QPushButton:pressed{ background: #0b1220; }
-QPushButton:disabled{ color: #475569; border-color: #1e293b; }
-
-QPushButton#green  { color: #22c55e; border-color: #15803d; background: #0b2a1a; }
-QPushButton#green:hover  { background: #103722; }
-QPushButton#red    { color: #f87171; border-color: #b91c1c; background: #2a0f13; }
-QPushButton#red:hover    { background: #371217; }
-QPushButton#yellow { color: #fbbf24; border-color: #a16207; background: #241a07; }
-QPushButton#yellow:hover { background: #312309; }
-QPushButton#purple { color: #c084fc; border-color: #7e22ce; }
-QPushButton#orange { color: #fb923c; border-color: #c2410c; }
-QPushButton#wa     { color: #25D366; border-color: #15803d; background: #082518; }
-QPushButton#wa:hover     { background: #0b3320; }
-
-QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
-    background: #0f172a;
-    color: #e8eef7;
-    border: 1px solid #263244;
-    border-radius: 4px;
-    padding: 5px 8px;
-    selection-background-color: #2563eb;
-}
-QLineEdit:focus, QTextEdit:focus { border-color: #60a5fa; }
-
-QTableWidget {
-    background: #0b1220;
-    color: #e8eef7;
-    border: 1px solid #1f2a3d;
-    gridline-color: #1f2a3d;
-    alternate-background-color: #0f172a;
-    selection-background-color: #1d4ed8;
-    outline: none;
-}
-QTableWidget::item { padding: 4px 8px; }
-QHeaderView::section {
-    background: #111827;
-    color: #94a3b8;
-    border: none;
-    border-bottom: 1px solid #1f2a3d;
-    padding: 6px 8px;
-    font-weight: 600;
-}
-
-QProgressBar {
-    background: #111827;
-    border: 1px solid #263244;
-    border-radius: 4px;
-    text-align: center;
-    color: #e8eef7;
-}
-QProgressBar::chunk { background: #22c55e; border-radius: 3px; }
-
-QScrollBar:vertical {
-    background: #08111f; width: 8px; border: none;
-}
-QScrollBar::handle:vertical {
-    background: #334155; border-radius: 4px; min-height: 20px;
-}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-
-QTabWidget::pane  { border: 1px solid #1f2a3d; background: #08111f; }
-QTabBar::tab {
-    background: #0b1220; color: #94a3b8;
-    padding: 9px 20px; border: none;
-    border-bottom: 2px solid transparent;
-}
-QTabBar::tab:selected {
-    color: #22c55e;
-    border-bottom: 2px solid #22c55e;
-    background: #111827;
-}
-QTabBar::tab:hover { color: #e8eef7; background: #111827; }
-
-QGroupBox {
-    border: 1px solid #263244;
-    border-radius: 8px;
-    margin-top: 10px;
-    padding-top: 8px;
-    color: #93c5fd;
-    font-weight: 600;
-}
-QGroupBox[connected="true"] {
-    background: #092416;
-    border-color: #22c55e;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    subcontrol-position: top left;
-    padding: 0 6px;
-    left: 10px;
-}
-
-QFrame#hline {
-    background: #1f2a3d;
-    max-height: 1px;
-}
-
-QTextEdit#console {
-    background: #07111f;
-    color: #4ade80;
-    border: 1px solid #1f2a3d;
-}
-QStatusBar {
-    background: #0b1220;
-    color: #94a3b8;
-    border-top: 1px solid #1f2a3d;
-}
-QSplitter::handle { background: #1f2a3d; }
-"""
-
-LIGHT_QSS = """
-QMainWindow, QDialog, QWidget#root {
-    background: #f8fafc;
-}
-QWidget {
-    background: #f8fafc;
-    color: #0f172a;
-    font-family: "Segoe UI", Arial, sans-serif;
-    font-size: 10pt;
-}
-QWidget#header {
-    background: #ffffff;
-    border-bottom: 1px solid #dbe4ef;
-}
-QLabel { color: #0f172a; background: transparent; }
-QLabel#brandName { color: #15803d; letter-spacing: 0px; }
-QLabel#headerUser { color: #0f172a; }
-QLabel#muted  { color: #64748b; }
-QLabel#accent { color: #15803d; }
-QLabel#warn   { color: #b45309; }
-QLabel#danger { color: #dc2626; }
-
-QPushButton {
-    background: #ffffff;
-    color: #2563eb;
-    border: 1px solid #cbd5e1;
-    border-radius: 6px;
-    padding: 8px 16px;
-    font-weight: 600;
-}
-QPushButton:hover  { background: #eff6ff; border-color: #2563eb; }
-QPushButton:pressed{ background: #dbeafe; }
-QPushButton:disabled{ color: #94a3b8; border-color: #e2e8f0; }
-
-QPushButton#green  { color: #15803d; border-color: #86efac; background: #f0fdf4; }
-QPushButton#green:hover  { background: #dcfce7; }
-QPushButton#red    { color: #dc2626; border-color: #fecaca; background: #fef2f2; }
-QPushButton#red:hover    { background: #fee2e2; }
-QPushButton#yellow { color: #b45309; border-color: #fde68a; background: #fffbeb; }
-QPushButton#yellow:hover { background: #fef3c7; }
-QPushButton#purple { color: #7e22ce; border-color: #e9d5ff; background: #faf5ff; }
-QPushButton#orange { color: #c2410c; border-color: #fed7aa; background: #fff7ed; }
-QPushButton#wa     { color: #128C7E; border-color: #bbf7d0; background: #f0fdf4; }
-QPushButton#wa:hover { background: #dcfce7; }
-
-QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
-    background: #ffffff;
-    color: #0f172a;
-    border: 1px solid #cbd5e1;
-    border-radius: 4px;
-    padding: 5px 8px;
-    selection-background-color: #bfdbfe;
-}
-QLineEdit:focus, QTextEdit:focus { border-color: #2563eb; }
-
-QTableWidget {
-    background: #ffffff;
-    color: #0f172a;
-    border: 1px solid #dbe4ef;
-    gridline-color: #e2e8f0;
-    alternate-background-color: #f8fafc;
-    selection-background-color: #dbeafe;
-    outline: none;
-}
-QTableWidget::item { padding: 4px 8px; }
-QHeaderView::section {
-    background: #f1f5f9;
-    color: #475569;
-    border: none;
-    border-bottom: 1px solid #dbe4ef;
-    padding: 6px 8px;
-    font-weight: 600;
-}
-
-QProgressBar {
-    background: #e2e8f0;
-    border: 1px solid #cbd5e1;
-    border-radius: 4px;
-    text-align: center;
-    color: #0f172a;
-}
-QProgressBar::chunk { background: #22c55e; border-radius: 3px; }
-
-QScrollBar:vertical {
-    background: #f8fafc; width: 8px; border: none;
-}
-QScrollBar::handle:vertical {
-    background: #cbd5e1; border-radius: 4px; min-height: 20px;
-}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-
-QTabWidget::pane { border: 1px solid #dbe4ef; background: #f8fafc; }
-QTabBar::tab {
-    background: #f8fafc; color: #64748b;
-    padding: 9px 20px; border: none;
-    border-bottom: 2px solid transparent;
-}
-QTabBar::tab:selected {
-    color: #15803d; border-bottom: 2px solid #15803d;
-    background: #ffffff;
-}
-QTabBar::tab:hover { color: #0f172a; background: #ffffff; }
-
-QGroupBox { border: 1px solid #dbe4ef; border-radius: 8px;
-    margin-top: 10px; padding-top: 8px; color: #2563eb; font-weight: 600; }
-QGroupBox[connected="true"] { background: #ecfdf5; border-color: #22c55e; }
-QGroupBox::title { subcontrol-origin: margin;
-    subcontrol-position: top left; padding: 0 6px; left: 10px; }
-QFrame#hline { background: #dbe4ef; max-height: 1px; }
-QTextEdit#console {
-    background: #ffffff;
-    color: #166534;
-    border: 1px solid #dbe4ef;
-}
-QStatusBar {
-    background: #ffffff;
-    color: #64748b;
-    border-top: 1px solid #dbe4ef;
-}
-QSplitter::handle { background: #dbe4ef; }
-"""
-
 # ── Config ────────────────────────────────────────────────────────────────────
 def _load_cfg() -> dict:
-    defaults = {"theme": "dark", "n_slots": 2, "call_timeout": 60,
-                "cooldown": 3.0, "excel_path": ""}
+    defaults = {"theme": DEFAULT_THEME, "n_slots": 2, "call_timeout": 60,
+                "cooldown": 3.0, "voicemail_hangup_sec": 3,
+                "excel_path": ""}
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE) as f:
@@ -388,56 +133,52 @@ class SlotCard(QGroupBox):
     next_clicked = pyqtSignal(int)
     cut_clicked = pyqtSignal(int)
 
-    STATE_COLORS = {
-        "IDLE":         "#8b949e",
-        "LOADING":      "#58a6ff",
-        "LOGIN_NEEDED": "#ffd166",
-        "DIALING":      "#58a6ff",
-        "RINGING":      "#ffd166",
-        "CONNECTED":    "#00e676",
-        "VOICEMAIL":    "#ff6b35",
-        "ENDED":        "#8b949e",
-        "NO_ANSWER":    "#8b949e",
-        "FAILED":       "#ff4444",
-    }
-
     def __init__(self, slot_id: int, parent=None):
-        super().__init__(f"  Slot {slot_id + 1}", parent)
+        super().__init__(f"Line {slot_id + 1}", parent)
+        self.setObjectName("slotCard")
         self.slot_id = slot_id
         self._build()
 
     def _build(self):
         lay = QVBoxLayout(self)
-        lay.setSpacing(6)
+        lay.setSpacing(10)
 
-        self.lbl_status = _label("● IDLE", bold=True)
-        self.lbl_status.setStyleSheet("color: #8b949e;")
+        self._current_state = "IDLE"
+        self._gv_ready = False
+        self.lbl_status = _label("Setup required", bold=True)
+        self._apply_status_style("SETUP REQUIRED")
         lay.addWidget(self.lbl_status)
 
-        self.lbl_phone = _label("—", "muted")
+        self.lbl_phone = _label("No active number", "muted")
         lay.addWidget(self.lbl_phone)
 
-        self.lbl_dur = _label("Duration: —", "muted")
+        self.lbl_dur = _label("Call time: —", "muted")
         lay.addWidget(self.lbl_dur)
 
         btn_row = QHBoxLayout()
-        self.btn_next = _btn("Next Call", "green")
+        self.btn_next = _btn("Next number", "green")
         self.btn_next.setEnabled(False)
         self.btn_next.clicked.connect(lambda: self.next_clicked.emit(self.slot_id))
         btn_row.addWidget(self.btn_next)
 
-        self.btn_cut = _btn("Cut Call", "red")
+        self.btn_cut = _btn("End call", "red")
         self.btn_cut.setEnabled(False)
         self.btn_cut.clicked.connect(lambda: self.cut_clicked.emit(self.slot_id))
         btn_row.addWidget(self.btn_cut)
         lay.addLayout(btn_row)
 
+    def _apply_status_style(self, key: str) -> None:
+        c = status_color(key)
+        self.lbl_status.setStyleSheet(
+            f"color: {c}; font-weight: 600; font-size: 11pt;")
+
     def update_state(self, state: str, phone: str = "", elapsed: str = ""):
-        color = self.STATE_COLORS.get(state, "#8b949e")
-        self.lbl_status.setText(f"● {state}")
-        self.lbl_status.setStyleSheet(f"color: {color}; font-weight: bold;")
-        self.lbl_phone.setText(phone or "—")
-        self.lbl_dur.setText(f"Duration: {elapsed or '—'}")
+        self._current_state = state
+        self.lbl_status.setText(status_label(state))
+        self._apply_status_style(state)
+        self.lbl_phone.setText(phone if phone else "No active number")
+        self.lbl_dur.setText(
+            f"Call time: {elapsed}" if elapsed else "Call time: —")
         active = state in ("DIALING", "RINGING", "CONNECTED", "VOICEMAIL")
         self.btn_next.setEnabled(active)
         self.btn_cut.setEnabled(active)
@@ -445,6 +186,14 @@ class SlotCard(QGroupBox):
         self.setProperty("connected", state == "CONNECTED")
         self.style().unpolish(self)
         self.style().polish(self)
+
+    def set_gv_login_ready(self, ready: bool) -> None:
+        self._gv_ready = ready
+        if getattr(self, "_current_state", "IDLE") != "IDLE":
+            return
+        key = "READY" if ready else "SETUP REQUIRED"
+        self.lbl_status.setText(status_label(key))
+        self._apply_status_style(key)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -531,50 +280,54 @@ class LoginPage(QWidget):
 
     def __init__(self, db: CRMDatabase, parent=None):
         super().__init__(parent)
+        self.setObjectName("loginPage")
         self.db = db
-        lay = QVBoxLayout(self)
-        lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        outer = QVBoxLayout(self)
+        outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        px = _pixmap(72)
+        card = QFrame()
+        card.setObjectName("loginCard")
+        card.setFixedWidth(420)
+        lay = QVBoxLayout(card)
+        lay.setSpacing(12)
+        lay.setContentsMargins(36, 32, 36, 32)
+
+        px = _pixmap(64)
         if px:
             lbl = QLabel()
             lbl.setPixmap(px)
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lay.addWidget(lbl)
-            lay.addSpacing(8)
+            lay.addSpacing(4)
 
-        lay.addWidget(_label("INDUS TRANSPORTS LLC", bold=True, size=17,
-                              parent=self))
-        lay.addWidget(_label("Auto Dialer Pro  •  Sign In",
-                              "muted", parent=self))
-        lay.addSpacing(24)
+        lay.addWidget(_label("Indus Transports", "brandName", bold=True, size=16))
+        lay.addWidget(_label("Sign in to your dialer account", "muted"))
+        lay.addSpacing(16)
 
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         self.e_email = QLineEdit()
-        self.e_email.setPlaceholderText("Email address")
+        self.e_email.setPlaceholderText("Work email")
+        lay.addWidget(self.e_email)
         self.e_pw = QLineEdit()
         self.e_pw.setEchoMode(QLineEdit.EchoMode.Password)
         self.e_pw.setPlaceholderText("Password")
         self.e_pw.returnPressed.connect(self._login)
-        for w in (self.e_email, self.e_pw):
-            w.setMinimumWidth(300)
-        form.addRow("Email:",    self.e_email)
-        form.addRow("Password:", self.e_pw)
-        lay.addLayout(form)
-        lay.addSpacing(12)
+        lay.addWidget(self.e_pw)
+        lay.addSpacing(8)
 
         self.lbl_err = _label("", "danger")
         lay.addWidget(self.lbl_err, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        btn = _btn("Sign In", "green")
-        btn.setMinimumWidth(240)
+        btn = _btn("Sign in", "primary")
+        btn.setMinimumHeight(42)
         btn.clicked.connect(self._login)
-        lay.addWidget(btn, alignment=Qt.AlignmentFlag.AlignCenter)
-        lay.addSpacing(12)
+        lay.addWidget(btn)
+        lay.addSpacing(8)
 
-        lay.addWidget(_label("Contact your administrator for access", "muted",
-                              parent=self))
+        lay.addWidget(
+            _label("Need access? Contact your administrator.", "muted"),
+            alignment=Qt.AlignmentFlag.AlignCenter,
+        )
+        outer.addWidget(card)
 
     def _login(self):
         user = self.db.authenticate(self.e_email.text().strip(),
@@ -592,30 +345,147 @@ class LoginPage(QWidget):
 class GVSetupDialog(QDialog):
     """Shows the embedded browser so user can log into Google Voice."""
 
-    def __init__(self, controller: GVController, slot_id: int, parent=None):
+    login_succeeded = pyqtSignal()
+
+    def __init__(self, controller: GVController, account_label: str,
+                 profile_dir: str, login_email: str = "",
+                 on_password_saved=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(
-            f"Google Voice Login — Slot {slot_id + 1}")
-        self.setMinimumSize(900, 660)
+        self.setObjectName("gvSetupDialog")
         self.controller = controller
+        self._on_password_saved = on_password_saved
+        self._login_email = login_email
+        self._profile_dir = profile_dir
+        self.setWindowTitle(f"Google Voice — {account_label}")
+        self.setMinimumSize(960, 740)
+        self.resize(980, 760)
 
         lay = QVBoxLayout(self)
+        lay.setSpacing(14)
+        lay.setContentsMargins(20, 18, 20, 18)
 
-        info = QLabel(
-            f"<b>Log in to your Google account below (Slot {slot_id + 1}).</b><br>"
-            "Once logged in, the browser will be hidden. "
-            "Your login is saved permanently — you won't see this again."
+        lay.addWidget(_label(f"Connect {account_label}", "heroTitle"))
+        sub = _label(
+            "Sign in once below. Your session stays on this computer so you can "
+            "dial without signing in again.",
+            "muted",
         )
-        info.setWordWrap(True)
-        lay.addWidget(info)
+        sub.setWordWrap(True)
+        lay.addWidget(sub)
 
-        lay.addWidget(controller.view)
+        cred_row = QHBoxLayout()
+        cred_row.addWidget(_label("Password", "muted"))
+        self.e_password = QLineEdit()
+        self.e_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.e_password.setPlaceholderText("Google account password")
+        if controller._login_password:
+            self.e_password.setText(controller._login_password)
+        cred_row.addWidget(self.e_password, stretch=1)
+        apply_btn = _btn("Apply & sign in", "green")
+        apply_btn.clicked.connect(self._apply_password)
+        cred_row.addWidget(apply_btn)
+        lay.addLayout(cred_row)
 
-        btn_done = _btn("✅  I'm Logged In — Continue", "green")
-        btn_done.clicked.connect(self.accept)
+        if login_email:
+            lay.addWidget(_label(f"Email: {login_email}", "accent"))
+
+        self.load_bar = QProgressBar()
+        self.load_bar.setRange(0, 0)
+        self.load_bar.setTextVisible(False)
+        self.load_bar.setFixedHeight(4)
+        lay.addWidget(self.load_bar)
+
+        self.lbl_status = _label("Preparing sign-in page…", "statusPill")
+        self.lbl_status.setObjectName("statusPill")
+        lay.addWidget(self.lbl_status)
+
+        self.browser_frame = QFrame()
+        self.browser_frame.setObjectName("browserFrame")
+        self.browser_frame.setMinimumHeight(420)
+        flay = QVBoxLayout(self.browser_frame)
+        flay.setContentsMargins(0, 0, 0, 0)
+        flay.addWidget(controller.view)
+        lay.addWidget(self.browser_frame, stretch=1)
+
+        btn_row = QHBoxLayout()
+        reload_btn = _btn("Reload", "")
+        reload_btn.clicked.connect(self._reload_signin)
+        open_btn = _btn("Profile folder", "")
+        open_btn.clicked.connect(self._open_profile)
+        btn_row.addWidget(reload_btn)
+        btn_row.addWidget(open_btn)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+
+        btn_done = _btn("I'm signed in — continue", "primary")
+        btn_done.clicked.connect(self._confirm_login)
         lay.addWidget(btn_done)
 
-        controller.load()
+        def on_log(_sid: int, msg: str) -> None:
+            self.lbl_status.setText(msg)
+            if "failed" not in msg.lower():
+                self.load_bar.setRange(0, 1)
+                self.load_bar.setValue(1)
+
+        def on_login(_sid: int) -> None:
+            self.controller.mark_logged_in()
+            self.lbl_status.setText("Signed in — saving session…")
+            self.login_succeeded.emit()
+            QTimer.singleShot(700, self.accept)
+
+        controller.log_message.connect(on_log)
+        controller.login_detected.connect(on_login)
+        controller._page.loadProgress.connect(self._on_load_progress)
+
+        QTimer.singleShot(50, self._start_signin)
+
+    def _start_signin(self) -> None:
+        self.load_bar.setRange(0, 0)
+        if self.controller._login_password:
+            self.controller.load(for_setup=True)
+        else:
+            self.lbl_status.setText(
+                "Enter password above, then click Apply & sign in.")
+
+    def _reload_signin(self) -> None:
+        self.load_bar.setRange(0, 0)
+        self.lbl_status.setText("Reloading sign-in page…")
+        self.controller.load(for_setup=True)
+
+    def _open_profile(self) -> None:
+        os.makedirs(self._profile_dir, exist_ok=True)
+        os.startfile(self._profile_dir)
+
+    def _on_load_progress(self, pct: int) -> None:
+        if pct >= 100:
+            self.load_bar.setRange(0, 1)
+            self.load_bar.setValue(1)
+            self.lbl_status.setText("Complete sign-in in the window below")
+
+    def _apply_password(self) -> None:
+        pw = self.e_password.text().strip()
+        if not pw:
+            self.lbl_status.setText("Enter your Google password first.")
+            return
+        if self._on_password_saved:
+            self._on_password_saved(pw)
+        self.controller.set_login_credentials(
+            self._login_email or self.controller._login_email, pw)
+        self.controller._autofill_paused = False
+        self.controller._email_step_done = False
+        self.controller._last_login_fill_status = ""
+        self.load_bar.setRange(0, 0)
+        self.lbl_status.setText("Signing in automatically…")
+        self.controller.load(for_setup=True)
+
+    def _confirm_login(self) -> None:
+        self.controller.mark_logged_in()
+        self.accept()
+
+    def accept(self) -> None:
+        if not self.controller.is_session_ready():
+            self.controller.mark_logged_in()
+        super().accept()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -683,9 +553,10 @@ class MainWindow(QMainWindow):
         self.user = user
         self.cfg  = cfg
 
-        self.setWindowTitle(APP_NAME)
+        self.setWindowTitle("Indus Transports — Auto Dialer")
         self.setWindowIcon(_icon())
-        self.resize(1200, 860)
+        self.resize(1280, 820)
+        self.setMinimumSize(1024, 680)
 
         # ── Dialer state ──────────────────────────────────────────────────────
         self._controllers: list[GVController] = []
@@ -728,28 +599,90 @@ class MainWindow(QMainWindow):
         self._browser_layout = QHBoxLayout(self._browser_host)
         self._browser_layout.setContentsMargins(0, 0, 0, 0)
 
+    def _show_browser_for_setup(self, view: QWebEngineView) -> None:
+        """Expand embedded browser for visible login in GVSetupDialog."""
+        if view.parent() is self._browser_host:
+            self._browser_layout.removeWidget(view)
+        view.setParent(None)
+        max_dim = 16777215
+        view.setMinimumSize(800, 480)
+        view.setMaximumSize(max_dim, max_dim)
+        view.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        view.show()
+
+    def _hide_browser_after_setup(self, view: QWebEngineView) -> None:
+        """Return embedded browser to hidden 1×1 host after login setup."""
+        view.setParent(self._browser_host)
+        view.setMinimumSize(0, 0)
+        view.setMaximumSize(1, 1)
+        view.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self._browser_layout.addWidget(view)
+
+    def _refresh_slot_login_badges(self) -> None:
+        if not hasattr(self, "_slot_cards"):
+            return
+        for ctrl in self._controllers:
+            sid = ctrl.slot_id
+            if sid in self._slot_cards:
+                self._slot_cards[sid].set_gv_login_ready(ctrl.is_session_ready())
+
+    def _account_session_ready(self, acct: dict) -> bool:
+        target = gv_profile_dir(acct["profile"])
+        if has_session_marker(target):
+            return True
+        for ctrl in self._controllers:
+            if os.path.abspath(ctrl.profile_dir) == os.path.abspath(target):
+                if ctrl.is_session_ready():
+                    return True
+                ctrl._check_login()
+        return has_session_marker(target)
+
+    def _dialing_login_ok(self) -> tuple[bool, str]:
+        if not self._gv_accounts:
+            return False, (
+                "Add at least one Google Voice account in Settings, then use "
+                "Login / Setup Selected.")
+        n = self.spin_slots.value()
+        missing: list[str] = []
+        for i in range(n):
+            acct = self._slot_account(i)
+            if not acct:
+                continue
+            if not self._account_session_ready(acct):
+                missing.append(acct.get("name") or acct.get("email", f"Slot {i+1}"))
+        if missing:
+            return False, (
+                "Google Voice is not ready for:\n• "
+                + "\n• ".join(missing)
+                + "\n\nOpen Settings → Login / Setup Selected and complete sign-in once.")
+        return True, ""
+
     # ── Header ────────────────────────────────────────────────────────────────
 
     def _build_header(self):
         hdr = QWidget()
-        hdr.setObjectName("header")
-        hdr.setFixedHeight(66)
+        hdr.setObjectName("appHeader")
+        hdr.setFixedHeight(76)
         h = QHBoxLayout(hdr)
-        h.setContentsMargins(16, 8, 16, 8)
+        h.setContentsMargins(20, 10, 20, 10)
 
         # Logo + name
         left = QHBoxLayout()
-        px = _pixmap(48)
+        px = _pixmap(52)
         if px:
             lbl_logo = QLabel()
             lbl_logo.setPixmap(px)
             lbl_logo.setStyleSheet("background: transparent;")
             left.addWidget(lbl_logo)
-            left.addSpacing(10)
+            left.addSpacing(12)
         col = QVBoxLayout()
-        name_lbl = _label("INDUS TRANSPORTS LLC", bold=True, size=13)
+        col.setSpacing(2)
+        name_lbl = _label("INDUS TRANSPORTS", bold=True, size=14)
         name_lbl.setObjectName("brandName")
-        sub_lbl  = _label("Auto Dialer Pro  •  Google Voice", "muted")
+        sub_lbl = _label("Auto Dialer Pro", "brandTagline")
+        sub_lbl.setObjectName("brandTagline")
         col.addWidget(name_lbl)
         col.addWidget(sub_lbl)
         left.addLayout(col)
@@ -761,36 +694,38 @@ class MainWindow(QMainWindow):
         right.setSpacing(10)
 
         # User badge
-        role_color = "#ffd166" if self.user["role"] == "admin" else "#58a6ff"
+        role_name = "Administrator" if self.user["role"] == "admin" else "Agent"
         user_lbl = QLabel(
-            f'👤 <b>{self.user["name"]}</b>  '
-            f'<span style="color:{role_color};">[{self.user["role"].upper()}]</span>'
+            f'<span style="color:#1e293b;"><b>{self.user["name"]}</b></span>'
+            f' &nbsp;·&nbsp; <span style="color:#64748b;">{role_name}</span>'
         )
         user_lbl.setObjectName("headerUser")
         right.addWidget(user_lbl)
 
-        # Divider
-        div = QFrame(); div.setFrameShape(QFrame.Shape.VLine)
+        div = QFrame()
+        div.setFrameShape(QFrame.Shape.VLine)
         right.addWidget(div)
 
-        # WhatsApp
-        wa_btn = _btn(f"💬  {WA_NUMBER}", "wa")
+        wa_btn = _btn("Support", "wa")
         import webbrowser as _wb
+        wa_btn.setToolTip(WA_NUMBER)
         wa_btn.clicked.connect(lambda: _wb.open(WHATSAPP_URL))
         right.addWidget(wa_btn)
 
-        # Divider
-        div2 = QFrame(); div2.setFrameShape(QFrame.Shape.VLine)
+        div2 = QFrame()
+        div2.setFrameShape(QFrame.Shape.VLine)
         right.addWidget(div2)
 
-        # Theme toggle
-        self._theme_btn = _btn("☾ Dark", "yellow")
-        self._theme_btn.setFixedWidth(90)
+        self._theme_btn = _btn("Dark mode", "ghost")
+        self._theme_btn.setFixedWidth(92)
         self._theme_btn.clicked.connect(self._toggle_theme)
+        if self.cfg.get("theme", DEFAULT_THEME) == "light":
+            self._theme_btn.setText("Dark mode")
+        else:
+            self._theme_btn.setText("Light mode")
         right.addWidget(self._theme_btn)
 
-        # Logout
-        logout_btn = _btn("⏻ Logout", "red")
+        logout_btn = _btn("Sign out", "ghost")
         logout_btn.clicked.connect(self._logout)
         right.addWidget(logout_btn)
 
@@ -818,15 +753,15 @@ class MainWindow(QMainWindow):
         self.tab_crm    = QWidget()
         self.tab_settings = QWidget()
 
-        self.tabs.addTab(self.tab_dialer,   "  🚀  Dialer  ")
-        self.tabs.addTab(self.tab_live,     "  📞  Live Calls  ")
-        self.tabs.addTab(self.tab_logs,     "  📋  Call Logs  ")
-        self.tabs.addTab(self.tab_crm,      "  🏢  CRM  ")
-        self.tabs.addTab(self.tab_settings, "  ⚙️  Settings  ")
+        self.tabs.addTab(self.tab_dialer,   "  Dialer  ")
+        self.tabs.addTab(self.tab_live,     "  Live Calls  ")
+        self.tabs.addTab(self.tab_logs,     "  Call Logs  ")
+        self.tabs.addTab(self.tab_crm,      "  CRM  ")
+        self.tabs.addTab(self.tab_settings, "  Settings  ")
 
         if self.user["role"] == "admin":
             self.tab_admin = QWidget()
-            self.tabs.addTab(self.tab_admin, "  👑  Admin  ")
+            self.tabs.addTab(self.tab_admin, "  Administration  ")
             self._build_admin_tab()
 
         self._main_vlay.addWidget(self.tabs)
@@ -838,7 +773,7 @@ class MainWindow(QMainWindow):
         self._build_settings_tab()
 
     def _build_status_bar(self):
-        self.statusBar().showMessage("● Ready")
+        self.statusBar().showMessage("Ready")
 
     # ══════════════════════════════════════════════════════════════════════════
     #  DIALER TAB
@@ -850,24 +785,27 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(16, 14, 16, 14)
 
         # File picker
-        grp_file = QGroupBox("  📂  Phone List (Excel)")
+        grp_file = QGroupBox("Contact list")
         flay = QHBoxLayout(grp_file)
         self.excel_input = QLineEdit(self.cfg.get("excel_path", ""))
-        self.excel_input.setPlaceholderText("Select Excel file with phone numbers…")
+        self.excel_input.setPlaceholderText("Choose an Excel file with phone numbers")
         self.excel_input.setReadOnly(True)
         flay.addWidget(self.excel_input)
-        browse_btn = _btn("📂  Browse")
+        browse_btn = _btn("Browse…", "secondary")
         browse_btn.clicked.connect(self._browse)
         flay.addWidget(browse_btn)
-        load_btn = _btn("⬇  Load Numbers", "green")
+        load_btn = _btn("Load contacts", "green")
         load_btn.clicked.connect(self._load_numbers)
         flay.addWidget(load_btn)
+        test_btn = _btn("Sample list", "secondary")
+        test_btn.setToolTip("Load the built-in test contact list")
+        test_btn.clicked.connect(self._load_test_numbers)
+        flay.addWidget(test_btn)
         lay.addWidget(grp_file)
 
-        # Settings row
-        grp_settings = QGroupBox("  ⚙️  Call Settings")
+        grp_settings = QGroupBox("Dialing options")
         slay = QHBoxLayout(grp_settings)
-        slay.addWidget(QLabel("Simultaneous Slots:"))
+        slay.addWidget(QLabel("Lines at once:"))
         self.spin_slots = QSpinBox()
         self.spin_slots.setRange(1, 5)
         self.spin_slots.setValue(self.cfg.get("n_slots", 2))
@@ -885,11 +823,17 @@ class MainWindow(QMainWindow):
         self.spin_cooldown.setSingleStep(0.5)
         self.spin_cooldown.setValue(self.cfg.get("cooldown", 3.0))
         slay.addWidget(self.spin_cooldown)
+        slay.addSpacing(20)
+        slay.addWidget(QLabel("Voicemail hangup (sec):"))
+        self.spin_vm_hangup = QSpinBox()
+        self.spin_vm_hangup.setRange(1, 15)
+        self.spin_vm_hangup.setValue(int(self.cfg.get("voicemail_hangup_sec", 3)))
+        slay.addWidget(self.spin_vm_hangup)
         slay.addStretch()
         lay.addWidget(grp_settings)
 
         # Progress
-        grp_prog = QGroupBox("  📊  Progress")
+        grp_prog = QGroupBox("Campaign progress")
         play = QVBoxLayout(grp_prog)
         stat_row = QHBoxLayout()
         self.lbl_total   = _label("Total: —",     bold=True)
@@ -908,10 +852,12 @@ class MainWindow(QMainWindow):
 
         # Control buttons
         btn_row = QHBoxLayout()
-        self.btn_start = _btn("▶  Start Power Dial", "green")
+        self.btn_start = _btn("Start dialing", "primary")
         self.btn_start.setEnabled(False)
+        self.btn_start.setMinimumHeight(44)
         self.btn_start.clicked.connect(self._start_dialing)
-        self.btn_stop  = _btn("⏹  Stop All", "red")
+        self.btn_stop  = _btn("Stop", "red")
+        self.btn_stop.setMinimumHeight(44)
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self._stop_dialing)
         btn_row.addWidget(self.btn_start)
@@ -920,12 +866,12 @@ class MainWindow(QMainWindow):
         lay.addLayout(btn_row)
 
         # Activity log
-        grp_log = QGroupBox("  🖥️  Activity Log")
+        grp_log = QGroupBox("Activity")
         llay = QVBoxLayout(grp_log)
         self.console = QTextEdit()
         self.console.setObjectName("console")
         self.console.setReadOnly(True)
-        self.console.setFont(QFont("Consolas", 9))
+        self.console.setMaximumHeight(140)
         llay.addWidget(self.console)
         lay.addWidget(grp_log, stretch=1)
 
@@ -939,9 +885,9 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(16, 14, 16, 14)
 
         info = _label(
-            "Google Voice runs silently in the background — the agent only sees this panel.\n"
-            "When a call connects, the slot card turns green. Use Next Call "
-            "to hang up and advance, or Cut Call to hang up the current call.",
+            "Your calls run through Google Voice in the background. "
+            "Each line shows live status. When someone answers, the card highlights "
+            "and you can talk, then choose Next number or End call.",
             "muted"
         )
         info.setWordWrap(True)
@@ -959,9 +905,9 @@ class MainWindow(QMainWindow):
         # Bottom controls
         lay.addWidget(_hline())
         brow = QHBoxLayout()
-        btn_start2 = _btn("▶  Start Power Dial", "green")
+        btn_start2 = _btn("Start dialing", "primary")
         btn_start2.clicked.connect(self._start_dialing)
-        btn_stop2  = _btn("⏹  Stop All", "red")
+        btn_stop2  = _btn("Stop", "red")
         btn_stop2.clicked.connect(self._stop_dialing)
         brow.addWidget(btn_start2)
         brow.addWidget(btn_stop2)
@@ -1098,28 +1044,23 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(16, 14, 16, 14)
 
         # Browser profiles
-        grp_b = QGroupBox("  🌐  Embedded Browser Profiles")
+        grp_b = QGroupBox("Voice connection profiles")
         blay = QVBoxLayout(grp_b)
         blay.addWidget(QLabel(
-            f"Profile storage:  {CHROME_PROFILES_DIR}\n\n"
-            "Each dialer slot uses its own profile directory (slot_0, slot_1 …)\n"
-            "storing a separate Google Voice login session.\n\n"
-            "On first launch a setup dialog will open for each slot so you can\n"
-            "log into a different Google Voice account per slot.\n"
-            "After that, profiles persist and login is automatic."
+            "Each Google Voice account keeps its own secure sign-in on this computer.\n"
+            "Use Connect account to sign in once; the app remembers your session for dialing."
         ))
-        open_btn = _btn("📂  Open Profiles Folder")
+        open_btn = _btn("Open storage folder", "secondary")
         open_btn.clicked.connect(lambda: os.startfile(CHROME_PROFILES_DIR))
         blay.addWidget(open_btn)
         lay.addWidget(grp_b)
 
         # Google Voice accounts
-        grp_a = QGroupBox("  Google Voice Accounts")
+        grp_a = QGroupBox("Google Voice accounts")
         alay = QVBoxLayout(grp_a)
         alay.addWidget(QLabel(
-            "Add each Google Voice account once. The app opens a dedicated "
-            "profile for manual login, then reuses that saved session for "
-            "automatic login on future runs. Passwords stay in ignored local data."
+            "Link each Google Voice line your team uses. Passwords are stored only "
+            "on this PC to automate sign-in."
         ))
         self.gv_accounts_table = QTableWidget(0, 5)
         self.gv_accounts_table.setHorizontalHeaderLabels(
@@ -1134,13 +1075,13 @@ class MainWindow(QMainWindow):
 
         acct_buttons = QHBoxLayout()
         for txt, fn, nm in [
-            ("+ Add Account", self._gv_add_account, "green"),
-            ("Login / Setup Selected", self._gv_setup_selected, "yellow"),
-            ("Move Up", self._gv_move_up, ""),
-            ("Move Down", self._gv_move_down, ""),
-            ("Duplicate", self._gv_duplicate_selected, ""),
-            ("Remove Selected", self._gv_remove_selected, "red"),
-            ("Refresh", self._refresh_gv_accounts, ""),
+            ("Add account", self._gv_add_account, "green"),
+            ("Connect account", self._gv_setup_selected, "primary"),
+            ("Move up", self._gv_move_up, "secondary"),
+            ("Move down", self._gv_move_down, "secondary"),
+            ("Duplicate", self._gv_duplicate_selected, "secondary"),
+            ("Remove", self._gv_remove_selected, "red"),
+            ("Refresh", self._refresh_gv_accounts, "secondary"),
         ]:
             b = _btn(txt, nm)
             b.clicked.connect(fn)
@@ -1151,26 +1092,26 @@ class MainWindow(QMainWindow):
         self._refresh_gv_accounts()
 
         # Appearance
-        grp_t = QGroupBox("  🎨  Theme")
+        grp_t = QGroupBox("Appearance")
         tlay = QHBoxLayout(grp_t)
-        dark_btn  = _btn("☾  Dark Mode",  "")
-        light_btn = _btn("☀  Light Mode", "yellow")
+        dark_btn = _btn("Dark", "secondary")
+        light_btn = _btn("Light", "secondary")
         dark_btn.clicked.connect(lambda: self._set_theme("dark"))
         light_btn.clicked.connect(lambda: self._set_theme("light"))
-        tlay.addWidget(dark_btn); tlay.addWidget(light_btn)
-        tlay.addWidget(QLabel("  (restart app to fully apply)"))
+        tlay.addWidget(dark_btn)
+        tlay.addWidget(light_btn)
+        tlay.addWidget(QLabel("Changes apply immediately."))
         tlay.addStretch()
         lay.addWidget(grp_t)
 
-        # Save defaults
-        grp_d = QGroupBox("  ⚙️  Defaults")
+        grp_d = QGroupBox("General")
         dlay = QHBoxLayout(grp_d)
-        dlay.addWidget(QLabel("Default slots:"))
+        dlay.addWidget(QLabel("Default lines:"))
         self.settings_slots = QSpinBox()
         self.settings_slots.setRange(1, 5)
         self.settings_slots.setValue(self.cfg.get("n_slots", 2))
         dlay.addWidget(self.settings_slots)
-        save_btn = _btn("💾  Save", "green")
+        save_btn = _btn("Save settings", "green")
         save_btn.clicked.connect(self._save_settings)
         dlay.addWidget(save_btn)
         dlay.addStretch()
@@ -1256,7 +1197,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_slot_cards"):
             return
         for sid, card in self._slot_cards.items():
-            card.setTitle(f"  Slot {sid + 1} - {self._slot_label(sid)}")
+            card.setTitle(f"  {self._slot_label(sid)}")
 
     def _gv_add_account(self):
         from PyQt6.QtWidgets import QInputDialog
@@ -1395,19 +1336,55 @@ class MainWindow(QMainWindow):
                 acct.get("password", ""),
             )
 
-        dlg = GVSetupDialog(ctrl, idx, self)
-        dlg.setWindowTitle(f"Google Voice Login - {acct.get('name', acct['email'])}")
+        acct_label = acct.get("name") or acct.get("email", "Account")
+
+        def _save_password(pw: str) -> None:
+            self._gv_accounts[idx]["password"] = pw
+            save_gv_accounts(self._gv_accounts)
+            acct["password"] = pw
+            self._refresh_gv_accounts()
+            ctrl.set_login_credentials(acct.get("email", ""), pw)
+
+        self._show_browser_for_setup(ctrl.view)
+        dlg = GVSetupDialog(
+            ctrl,
+            acct_label,
+            target_dir,
+            login_email=acct.get("email", ""),
+            on_password_saved=_save_password,
+            parent=self,
+        )
         dlg.exec()
+
+        if ctrl.is_session_ready() or has_session_marker(target_dir):
+            write_session_marker(target_dir)
 
         if created_temp:
             ctrl.view.setParent(None)
             ctrl.view.deleteLater()
         else:
-            ctrl.view.setParent(self._browser_host)
-            ctrl.view.setMaximumSize(1, 1)
-            self._browser_layout.addWidget(ctrl.view)
+            self._hide_browser_after_setup(ctrl.view)
 
+        if not self._running:
+            self._init_controllers(self.spin_slots.value())
+        else:
+            for c in self._controllers:
+                if os.path.abspath(c.profile_dir) == os.path.abspath(target_dir):
+                    c.mark_logged_in()
+                    c.load()
+
+        self._refresh_slot_login_badges()
         self._log(f"Login setup checked for {acct.get('name', acct['email'])}")
+
+        if has_session_marker(target_dir) or ctrl.is_session_ready():
+            QMessageBox.information(
+                self,
+                "Ready to dial",
+                f"{acct_label} is connected to Google Voice.\n\n"
+                "You can start power dialing — no need to sign in again.",
+            )
+            if hasattr(self, "tabs"):
+                self.tabs.setCurrentWidget(self.tab_live)
 
     # ══════════════════════════════════════════════════════════════════════════
     #  CONTROLLER INIT
@@ -1443,7 +1420,12 @@ class MainWindow(QMainWindow):
             ctrl.view.setMaximumSize(1, 1)   # hidden but alive
             self._browser_layout.addWidget(ctrl.view)
             self._controllers.append(ctrl)
-            ctrl.load()   # load GV; if logged in already → no user action needed
+            ctrl.load()
+            if has_session_marker(profile_dir):
+                ctrl.mark_logged_in()
+            else:
+                QTimer.singleShot(2000, ctrl._check_login)
+        self._refresh_slot_login_badges()
 
     # ══════════════════════════════════════════════════════════════════════════
     #  DIALING LOGIC
@@ -1457,6 +1439,21 @@ class MainWindow(QMainWindow):
             self.excel_input.setText(path)
             self.cfg["excel_path"] = path
             _save_cfg(self.cfg)
+
+    def _load_test_numbers(self):
+        """Load built-in owner test list (phones_test.xlsx in project root)."""
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "phones_test.xlsx")
+        if not os.path.exists(path):
+            QMessageBox.warning(
+                self, "Test List Missing",
+                f"Run once:\n  python scripts/prepare_test_dial.py\n\n"
+                f"Expected file:\n{path}")
+            return
+        self.excel_input.setText(path)
+        self.cfg["excel_path"] = path.replace("\\", "/")
+        _save_cfg(self.cfg)
+        self._load_numbers()
 
     def _load_numbers(self):
         path = self.excel_input.text().strip()
@@ -1522,7 +1519,8 @@ class MainWindow(QMainWindow):
         self.progress.setMaximum(total)
         self.progress.setValue(done)
 
-        self._log(f"✅ Loaded {len(valid)} numbers  |  Done: {done}  |  Invalid: {invalid}")
+        self._log(
+            f"Loaded {len(valid)} contacts (completed: {done}, invalid: {invalid})")
         self.btn_start.setEnabled(True)
 
     def _start_dialing(self):
@@ -1530,11 +1528,17 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Contacts", "Load numbers first.")
             return
 
+        ok, msg = self._dialing_login_ok()
+        if not ok:
+            QMessageBox.warning(self, "Google Voice Not Ready", msg)
+            return
+
         n = self.spin_slots.value()
         self.cfg.update({
             "n_slots": n,
             "call_timeout": self.spin_timeout.value(),
             "cooldown":     self.spin_cooldown.value(),
+            "voicemail_hangup_sec": self.spin_vm_hangup.value(),
         })
         _save_cfg(self.cfg)
 
@@ -1547,8 +1551,8 @@ class MainWindow(QMainWindow):
         self._contact_idx  = 0
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
-        self.statusBar().showMessage("● Power Dialing active…")
-        self._log(f"⚡ Power Dial started — {n} slots")
+        self.statusBar().showMessage("Dialing in progress…")
+        self._log(f"Dialing started — {n} line(s) active")
 
         self._dial_timer.start()
         self._elapsed_timer.start()
@@ -1566,8 +1570,8 @@ class MainWindow(QMainWindow):
                 pass
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
-        self.statusBar().showMessage("● Stopped")
-        self._log("⛔ Dialer stopped")
+        self.statusBar().showMessage("Dialing stopped")
+        self._log("Dialing stopped")
 
     def _assign_pending_calls(self):
         """Called by QTimer — assign the next number to each idle slot."""
@@ -1627,6 +1631,18 @@ class MainWindow(QMainWindow):
         if self._running:
             QTimer.singleShot(250, self._assign_pending_calls)
 
+    def _voicemail_hangup_and_next(self, slot_id: int) -> None:
+        """Hang up voicemail and advance the power dialer queue."""
+        ctrl = self._get_ctrl(slot_id)
+        if ctrl and ctrl.current_state == "VOICEMAIL":
+            ctrl.hangup()
+        self._slot_phone.pop(slot_id, None)
+        self._slot_start.pop(slot_id, None)
+        self._update_card(slot_id, "IDLE", "")
+        self._log(f"[Slot {slot_id}] Voicemail handled — next number")
+        if self._running:
+            QTimer.singleShot(300, self._assign_pending_calls)
+
     def _timeout_call(self, slot_id: int, phone: str, started_at: float):
         """Auto-cut an unanswered call once the configured timeout expires."""
         ctrl = self._get_ctrl(slot_id)
@@ -1646,8 +1662,8 @@ class MainWindow(QMainWindow):
         self._running = False
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
-        self.statusBar().showMessage("● All contacts dialed")
-        self._log("🎯 All contacts dialed!")
+        self.statusBar().showMessage("Campaign complete")
+        self._log("All contacts in this list have been dialed.")
         QMessageBox.information(self, "Done", "All contacts have been dialed!")
 
     # ── Slot state handling ───────────────────────────────────────────────────
@@ -1660,20 +1676,19 @@ class MainWindow(QMainWindow):
         self._log(f"[Slot {slot_id}] → {state}  {disp}")
 
         if state == "CONNECTED":
-            self.statusBar().showMessage(f"● CONNECTED  Slot {slot_id + 1}: {disp}")
-            QMessageBox.information(
-                self, "📞  CALL CONNECTED",
-                f"Slot {slot_id + 1}  —  {disp}\n\n"
-                "Google Voice is connected in the background.\n"
-                "Your microphone and speakers are active now.\n\n"
-                "Talk to the contact, then use Next Call or Cut Call."
-            )
+            self.statusBar().showMessage(
+                f"Live call — Line {slot_id + 1}: {disp}")
+            self.tabs.setCurrentWidget(self.tab_live)
         elif state == "VOICEMAIL":
-            self._log(f"[Slot {slot_id}] 📭 Voicemail — auto-hanging up in 2s")
+            vm_sec = int(self.cfg.get("voicemail_hangup_sec", 3))
+            self._log(
+                f"[Slot {slot_id}] 📭 Voicemail — auto-hangup in {vm_sec}s, then next number")
             self.db.log_call(self.user["id"], phone, "VOICEMAIL", slot_id=slot_id)
-            QTimer.singleShot(2000, lambda: self._get_ctrl(slot_id) and
-                              self._get_ctrl(slot_id).hangup())
             self._refresh_logs()
+            QTimer.singleShot(
+                vm_sec * 1000,
+                lambda sid=slot_id: self._voicemail_hangup_and_next(sid),
+            )
         elif state in ("ENDED", "IDLE", "NO_ANSWER"):
             if state != "IDLE":
                 self.db.log_call(self.user["id"], phone,
@@ -1682,8 +1697,12 @@ class MainWindow(QMainWindow):
                 self._refresh_logs()
 
     def _on_slot_login(self, slot_id: int):
-        self._log(f"[Slot {slot_id}] ✅ Google account logged in")
+        ctrl = self._get_ctrl(slot_id)
+        if ctrl:
+            ctrl.mark_logged_in()
+        self._log(f"[Slot {slot_id}] Google Voice ready")
         self._update_card(slot_id, "IDLE", "")
+        self._refresh_slot_login_badges()
 
     def _on_slot_log(self, slot_id: int, msg: str):
         self._log(f"[Slot {slot_id}] {msg}")
@@ -1973,7 +1992,8 @@ class MainWindow(QMainWindow):
         _save_cfg(self.cfg)
         QApplication.instance().setStyleSheet(
             DARK_QSS if name == "dark" else LIGHT_QSS)
-        self._theme_btn.setText("☀ Light" if name == "dark" else "☾ Dark")
+        self._theme_btn.setText(
+            "Light mode" if name == "dark" else "Dark mode")
 
     def _save_settings(self):
         self.cfg["n_slots"] = self.settings_slots.value()
@@ -2016,7 +2036,7 @@ class DialerApp:
         self._stack.setWindowIcon(_icon())
         self._stack.resize(1000, 680)
 
-        theme = self.cfg.get("theme", "dark")
+        theme = self.cfg.get("theme", DEFAULT_THEME)
         QApplication.instance().setStyleSheet(
             DARK_QSS if theme == "dark" else LIGHT_QSS)
 
@@ -2065,9 +2085,11 @@ def _now() -> float:
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    # Required before QApplication for WebEngine on some systems
-    os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS",
-                          "--disable-logging --log-level=3")
+    # WebEngine: disable GPU on Windows to avoid blank white login pages
+    _we_flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+    if "--disable-gpu" not in _we_flags:
+        _we_flags = f"{_we_flags} --disable-gpu".strip()
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = _we_flags or "--disable-gpu"
     os.environ.setdefault("QT_LOGGING_RULES",
                           "*.debug=false;qt.webenginecontext*=false")
 
