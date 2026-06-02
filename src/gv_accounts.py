@@ -9,9 +9,20 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from typing import Any
 
 from src.paths import DATA_DIR, CHROME_PROFILES_DIR
+
+SESSION_MARKER = ".gv_session_ok"
+
+
+def session_marker_path(profile_dir_path: str) -> str:
+    return os.path.join(profile_dir_path, SESSION_MARKER)
+
+
+def has_session_marker(profile_dir_path: str) -> bool:
+    return os.path.isfile(session_marker_path(profile_dir_path))
 
 
 GV_ACCOUNTS_FILE = os.path.join(DATA_DIR, "gv_accounts.json")
@@ -81,3 +92,26 @@ def save_accounts(accounts: list[dict[str, Any]]) -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(GV_ACCOUNTS_FILE, "w", encoding="utf-8") as f:
         json.dump(accounts, f, indent=2)
+
+
+def clone_profile_folder(src_profile: str, dst_profile: str) -> bool:
+    """
+    Copy a logged-in browser profile so duplicates keep the same Google session.
+    """
+    src = profile_dir(src_profile)
+    dst = profile_dir(dst_profile)
+    if not os.path.isdir(src):
+        return False
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if os.path.isdir(dst):
+        shutil.rmtree(dst, ignore_errors=True)
+    try:
+        shutil.copytree(
+            src, dst,
+            ignore=shutil.ignore_patterns("*.lock", "LOCK", "LOCKFILE"),
+        )
+        if os.path.isfile(session_marker_path(src)):
+            open(session_marker_path(dst), "w", encoding="utf-8").close()
+        return True
+    except Exception:
+        return False

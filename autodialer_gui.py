@@ -41,11 +41,14 @@ from src.ui_theme import (
     DARK_QSS, LIGHT_QSS, DEFAULT_THEME,
     status_label, status_color,
 )
+from src.client_deploy import export_client_package, is_client_deployment
 from src.gv_accounts import (
     load_accounts as load_gv_accounts,
     save_accounts as save_gv_accounts,
     make_profile_name,
     profile_dir as gv_profile_dir,
+    clone_profile_folder,
+    has_session_marker as gv_has_session_marker,
 )
 
 try:
@@ -61,9 +64,15 @@ WA_NUMBER    = "+92 307 967 0503"
 
 # ── Config ────────────────────────────────────────────────────────────────────
 def _load_cfg() -> dict:
-    defaults = {"theme": DEFAULT_THEME, "n_slots": 2, "call_timeout": 60,
-                "cooldown": 3.0, "voicemail_hangup_sec": 3,
-                "excel_path": ""}
+    defaults = {
+        "theme": DEFAULT_THEME,
+        "n_slots": 2,
+        "call_timeout": 60,
+        "cooldown": 3.0,
+        "voicemail_hangup_sec": 3,
+        "excel_path": "",
+        "deployment_mode": "admin",
+    }
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE) as f:
@@ -132,6 +141,7 @@ def _hline() -> QFrame:
 class SlotCard(QGroupBox):
     next_clicked = pyqtSignal(int)
     cut_clicked = pyqtSignal(int)
+    listen_clicked = pyqtSignal(int)
 
     def __init__(self, slot_id: int, parent=None):
         super().__init__(f"Line {slot_id + 1}", parent)
@@ -165,6 +175,13 @@ class SlotCard(QGroupBox):
         self.btn_cut.setEnabled(False)
         self.btn_cut.clicked.connect(lambda: self.cut_clicked.emit(self.slot_id))
         btn_row.addWidget(self.btn_cut)
+
+        self.btn_listen = _btn("Listen", "secondary")
+        self.btn_listen.setToolTip(
+            "Open this line's audio monitor (hear the call through your speakers)")
+        self.btn_listen.clicked.connect(
+            lambda: self.listen_clicked.emit(self.slot_id))
+        btn_row.addWidget(self.btn_listen)
         lay.addLayout(btn_row)
 
     def _apply_status_style(self, key: str) -> None:
@@ -275,13 +292,35 @@ class AdminSetupPage(QWidget):
 #  LOGIN PAGE
 # ══════════════════════════════════════════════════════════════════════════════
 
+class ClientNotConfiguredPage(QWidget):
+    """Shown on client PCs that were not prepared with an agent account."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(_label("Workstation not configured", "heroTitle"))
+        msg = _label(
+            "This copy of the dialer is set up for agents only, but no user "
+            "account was found.\n\n"
+            "Your administrator must export a client package from their "
+            "computer (Administration → Export client package) and copy "
+            "the logs and data folders onto this PC.",
+            "muted",
+        )
+        msg.setWordWrap(True)
+        msg.setMaximumWidth(480)
+        lay.addWidget(msg)
+
+
 class LoginPage(QWidget):
     login_success = pyqtSignal(dict)
 
-    def __init__(self, db: CRMDatabase, parent=None):
+    def __init__(self, db: CRMDatabase, client_mode: bool = False, parent=None):
         super().__init__(parent)
         self.setObjectName("loginPage")
         self.db = db
+        self._client_mode = client_mode
         outer = QVBoxLayout(self)
         outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -301,7 +340,10 @@ class LoginPage(QWidget):
             lay.addSpacing(4)
 
         lay.addWidget(_label("Indus Transports", "brandName", bold=True, size=16))
-        lay.addWidget(_label("Sign in to your dialer account", "muted"))
+        if client_mode:
+            lay.addWidget(_label("Agent sign-in", "accent"))
+        else:
+            lay.addWidget(_label("Sign in to your dialer account", "muted"))
         lay.addSpacing(16)
 
         self.e_email = QLineEdit()
@@ -332,10 +374,15 @@ class LoginPage(QWidget):
     def _login(self):
         user = self.db.authenticate(self.e_email.text().strip(),
                                     self.e_pw.text())
-        if user:
-            self.login_success.emit(user)
-        else:
+        if not user:
             self.lbl_err.setText("Incorrect email or password.")
+            return
+        if self._client_mode and user.get("role") == "admin":
+            self.lbl_err.setText(
+                "This PC is for agents only. Use the agent login your "
+                "administrator gave you.")
+            return
+        self.login_success.emit(user)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -489,52 +536,183 @@ class GVSetupDialog(QDialog):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CREATE USER DIALOG
+#  ADD GOOGLE VOICE ACCOUNT DIALOG
+# ══════════════════════════════════════════════════════════════════════════════
+
+class AddGVAccountDialog(QDialog):
+    """Single form: label, email, password — used for client-ready account setup."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add Google Voice account")
+        self.setMinimumWidth(440)
+        lay = QVBoxLayout(self)
+        lay.setSpacing(12)
+
+        lay.addWidget(_label("Add a voice line", "heroTitle"))
+        lay.addWidget(_label(
+            "Password is stored only on this computer and used to sign in "
+            "automatically in the background.",
+            "muted",
+        ))
+
+        form = QFormLayout()
+        form.setSpacing(10)
+        self.e_name = QLineEdit()
+        self.e_name.setPlaceholderText("e.g. Sales line 1")
+        self.e_email = QLineEdit()
+        self.e_email.setPlaceholderText("name@gmail.com")
+        self.e_pw = QLineEdit()
+        self.e_pw.setEchoMode(QLineEdit.EchoMode.Password)
+        self.e_pw.setPlaceholderText("Google account password")
+        self.e_notes = QLineEdit()
+        self.e_notes.setPlaceholderText("Optional")
+        form.addRow("Display name:", self.e_name)
+        form.addRow("Google email:", self.e_email)
+        form.addRow("Password:", self.e_pw)
+        form.addRow("Notes:", self.e_notes)
+        lay.addLayout(form)
+
+        self.chk_auto = QComboBox()
+        self.chk_auto.addItems([
+            "Sign in automatically in background (recommended)",
+            "I will connect manually later",
+        ])
+        lay.addWidget(self.chk_auto)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        cancel = _btn("Cancel", "secondary")
+        cancel.clicked.connect(self.reject)
+        ok = _btn("Add account", "primary")
+        ok.clicked.connect(self._validate)
+        row.addWidget(cancel)
+        row.addWidget(ok)
+        lay.addLayout(row)
+
+    def _validate(self) -> None:
+        if not self.e_name.text().strip() or not self.e_email.text().strip():
+            QMessageBox.warning(self, "Required fields",
+                                "Display name and Google email are required.")
+            return
+        if self.auto_login() and not self.e_pw.text().strip():
+            QMessageBox.warning(self, "Password required",
+                                "Enter the Google password for automatic sign-in.")
+            return
+        self.accept()
+
+    def auto_login(self) -> bool:
+        return self.chk_auto.currentIndex() == 0
+
+    def account_data(self) -> dict:
+        return {
+            "name": self.e_name.text().strip(),
+            "email": self.e_email.text().strip().lower(),
+            "password": self.e_pw.text(),
+            "notes": self.e_notes.text().strip(),
+        }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SLOT MONITOR (listen to line audio)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class SlotMonitorDialog(QDialog):
+    """Shows the Google Voice browser for one line so the user can hear the call."""
+
+    def __init__(self, controller: GVController, line_label: str,
+                 main_window: "MainWindow", parent=None):
+        super().__init__(parent)
+        self.controller = controller
+        self._main = main_window
+        self.setWindowTitle(f"Listen — {line_label}")
+        self.setMinimumSize(720, 520)
+        lay = QVBoxLayout(self)
+        lay.addWidget(_label(
+            "You will hear this line through your computer speakers. "
+            "Close this window when finished; dialing continues in the background.",
+            "muted",
+        ))
+        frame = QFrame()
+        frame.setObjectName("browserFrame")
+        frame.setMinimumHeight(400)
+        fl = QVBoxLayout(frame)
+        fl.setContentsMargins(0, 0, 0, 0)
+        main_window._show_browser_for_setup(controller.view)
+        fl.addWidget(controller.view)
+        lay.addWidget(frame, stretch=1)
+        close_btn = _btn("Close monitor", "primary")
+        close_btn.clicked.connect(self.accept)
+        lay.addWidget(close_btn)
+
+    def closeEvent(self, event) -> None:
+        self._main._hide_browser_after_setup(self.controller.view)
+        super().closeEvent(event)
+
+    def accept(self) -> None:
+        self._main._hide_browser_after_setup(self.controller.view)
+        super().accept()
+
+    def reject(self) -> None:
+        self._main._hide_browser_after_setup(self.controller.view)
+        super().reject()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CREATE USER DIALOG (client accounts — agent role only)
 # ══════════════════════════════════════════════════════════════════════════════
 
 class CreateUserDialog(QDialog):
     def __init__(self, db: CRMDatabase, parent=None):
         super().__init__(parent)
         self.db = db
-        self.setWindowTitle("Create User Account")
-        self.setMinimumWidth(380)
+        self.setWindowTitle("Add client user")
+        self.setMinimumWidth(420)
         lay = QVBoxLayout(self)
 
+        lay.addWidget(_label("New dialer user", "heroTitle"))
+        lay.addWidget(_label(
+            "Creates a standard user account for your client. "
+            "They cannot change Google Voice settings or manage other users.",
+            "muted",
+        ))
+        lay.addSpacing(8)
+
         form = QFormLayout()
-        self.e_name  = QLineEdit(); self.e_name.setPlaceholderText("Full name")
-        self.e_email = QLineEdit(); self.e_email.setPlaceholderText("user@company.com")
-        self.e_pw    = QLineEdit(); self.e_pw.setEchoMode(QLineEdit.EchoMode.Password)
-        self.e_pw.setPlaceholderText("Min. 8 characters")
-        self.role_combo = QComboBox()
-        self.role_combo.addItems(["agent", "admin"])
-        form.addRow("Name:",     self.e_name)
-        form.addRow("Email:",    self.e_email)
+        self.e_name = QLineEdit()
+        self.e_name.setPlaceholderText("Client or agent name")
+        self.e_email = QLineEdit()
+        self.e_email.setPlaceholderText("client@company.com")
+        self.e_pw = QLineEdit()
+        self.e_pw.setEchoMode(QLineEdit.EchoMode.Password)
+        self.e_pw.setPlaceholderText("At least 8 characters")
+        form.addRow("Name:", self.e_name)
+        form.addRow("Email:", self.e_email)
         form.addRow("Password:", self.e_pw)
-        form.addRow("Role:",     self.role_combo)
         lay.addLayout(form)
         lay.addSpacing(12)
 
-        btn = _btn("Create User", "green")
+        btn = _btn("Create user", "primary")
         btn.clicked.connect(self._create)
         lay.addWidget(btn)
 
     def _create(self):
-        name  = self.e_name.text().strip()
+        name = self.e_name.text().strip()
         email = self.e_email.text().strip()
-        pw    = self.e_pw.text()
-        role  = self.role_combo.currentText()
+        pw = self.e_pw.text()
         if not all([name, email, pw]):
-            QMessageBox.warning(self, "Error", "All fields required.")
+            QMessageBox.warning(self, "Missing fields", "All fields are required.")
             return
         if len(pw) < 8:
-            QMessageBox.warning(self, "Error", "Password must be 8+ characters.")
+            QMessageBox.warning(self, "Password", "Use at least 8 characters.")
             return
         try:
-            self.db.create_user(email, name, pw, role=role)
+            self.db.create_user(email, name, pw, role="agent")
             QMessageBox.information(
-                self, "Created",
-                f"User {email} created.\nRole: {role}\n\n"
-                f"They can log in with:\n  Email: {email}\n  Password: (as set)"
+                self, "User created",
+                f"{name} can sign in with:\n\nEmail: {email}\n"
+                "Password: (the one you just set)\n\n"
+                "They will see Dialer, Live Calls, Logs, and CRM only.",
             )
             self.accept()
         except Exception as e:
@@ -552,6 +730,7 @@ class MainWindow(QMainWindow):
         self.db   = db
         self.user = user
         self.cfg  = cfg
+        self._client_workstation = is_client_deployment(cfg)
 
         self.setWindowTitle("Indus Transports — Auto Dialer")
         self.setWindowIcon(_icon())
@@ -567,6 +746,7 @@ class MainWindow(QMainWindow):
         self._slot_phone:  dict[int, str]   = {}
         self._all_logs:    list = []
         self._gv_accounts: list[dict] = load_gv_accounts()
+        self._headless_login_queue: list[dict] = []
 
         # ── Timers ────────────────────────────────────────────────────────────
         self._dial_timer   = QTimer(self)    # fires to assign next number to free slot
@@ -576,6 +756,10 @@ class MainWindow(QMainWindow):
         self._elapsed_timer = QTimer(self)   # updates elapsed display on slot cards
         self._elapsed_timer.setInterval(1000)
         self._elapsed_timer.timeout.connect(self._tick_elapsed)
+
+        self._headless_timer = QTimer(self)
+        self._headless_timer.setInterval(2000)
+        self._headless_timer.timeout.connect(self._tick_headless_logins)
 
         # ── Build UI ──────────────────────────────────────────────────────────
         self._build_hidden_browser_container()
@@ -628,22 +812,114 @@ class MainWindow(QMainWindow):
             if sid in self._slot_cards:
                 self._slot_cards[sid].set_gv_login_ready(ctrl.is_session_ready())
 
-    def _account_session_ready(self, acct: dict) -> bool:
-        target = gv_profile_dir(acct["profile"])
-        if has_session_marker(target):
-            return True
+    def _controller_for_profile(self, profile_name: str) -> GVController | None:
+        target = gv_profile_dir(profile_name)
         for ctrl in self._controllers:
             if os.path.abspath(ctrl.profile_dir) == os.path.abspath(target):
-                if ctrl.is_session_ready():
-                    return True
+                return ctrl
+        return None
+
+    def _account_session_ready(self, acct: dict) -> bool:
+        target = gv_profile_dir(acct["profile"])
+        if gv_has_session_marker(target):
+            return True
+        ctrl = self._controller_for_profile(acct["profile"])
+        if ctrl and ctrl.is_session_ready():
+            return True
+        if ctrl:
+            ctrl._check_login()
+        return gv_has_session_marker(target)
+
+    def _ensure_profile_controller(self, acct: dict) -> GVController | None:
+        ctrl = self._controller_for_profile(acct["profile"])
+        if ctrl:
+            return ctrl
+        slot_id = len(self._controllers)
+        ctrl = GVController(
+            slot_id,
+            gv_profile_dir(acct["profile"]),
+            parent=self,
+            profile_key=acct["profile"],
+            login_email=acct.get("email", ""),
+            login_password=acct.get("password", ""),
+        )
+        ctrl.state_changed.connect(self._on_slot_state)
+        ctrl.login_detected.connect(self._on_slot_login)
+        ctrl.log_message.connect(self._on_slot_log)
+        ctrl.view.setParent(self._browser_host)
+        ctrl.view.setMaximumSize(1, 1)
+        self._browser_layout.addWidget(ctrl.view)
+        self._controllers.append(ctrl)
+        if gv_has_session_marker(ctrl.profile_dir):
+            ctrl.mark_logged_in()
+        return ctrl
+
+    def _start_headless_login(self, acct: dict) -> None:
+        """Background Google sign-in using saved password (no setup window)."""
+        if not acct.get("password"):
+            return
+        ctrl = self._ensure_profile_controller(acct)
+        if not ctrl:
+            return
+        ctrl.set_login_credentials(acct.get("email", ""), acct.get("password", ""))
+        if ctrl.is_session_ready():
+            self._refresh_slot_login_badges()
+            return
+        ctrl.load()
+        self._headless_login_queue = [
+            j for j in self._headless_login_queue
+            if j.get("profile") != acct["profile"]
+        ]
+        self._headless_login_queue.append({
+            "profile": acct["profile"],
+            "name": acct.get("name", ""),
+            "attempts": 0,
+        })
+        self._headless_timer.start()
+        self._log(f"Signing in {acct.get('name', 'account')} in the background…")
+
+    def _tick_headless_logins(self) -> None:
+        pending: list[dict] = []
+        for job in self._headless_login_queue:
+            ctrl = self._controller_for_profile(job["profile"])
+            job["attempts"] = job.get("attempts", 0) + 1
+            target = gv_profile_dir(job["profile"])
+            if gv_has_session_marker(target) or (ctrl and ctrl.is_session_ready()):
+                if ctrl:
+                    ctrl.mark_logged_in()
+                self._log(f"{job.get('name', 'Account')} is ready to dial")
+                continue
+            if job["attempts"] > 45:
+                self._log(
+                    f"{job.get('name', 'Account')}: automatic sign-in incomplete — "
+                    "use Settings → Connect account")
+                continue
+            if ctrl:
                 ctrl._check_login()
-        return has_session_marker(target)
+                if job["attempts"] % 3 == 0:
+                    ctrl._try_auto_login()
+            pending.append(job)
+        self._headless_login_queue = pending
+        if not pending:
+            self._headless_timer.stop()
+        self._refresh_slot_login_badges()
+
+    def _open_slot_monitor(self, slot_id: int) -> None:
+        ctrl = self._get_ctrl(slot_id)
+        if not ctrl:
+            QMessageBox.information(
+                self, "No line",
+                "This dialing line is not active yet.")
+            return
+        label = self._slot_label(slot_id)
+        dlg = SlotMonitorDialog(ctrl, label, self, self)
+        dlg.exec()
 
     def _dialing_login_ok(self) -> tuple[bool, str]:
         if not self._gv_accounts:
             return False, (
-                "Add at least one Google Voice account in Settings, then use "
-                "Login / Setup Selected.")
+                "Add at least one Google Voice account in Settings, then "
+                "use Connect account.")
         n = self.spin_slots.value()
         missing: list[str] = []
         for i in range(n):
@@ -656,7 +932,7 @@ class MainWindow(QMainWindow):
             return False, (
                 "Google Voice is not ready for:\n• "
                 + "\n• ".join(missing)
-                + "\n\nOpen Settings → Login / Setup Selected and complete sign-in once.")
+                + "\n\nOpen Settings → Connect account and complete sign-in once.")
         return True, ""
 
     # ── Header ────────────────────────────────────────────────────────────────
@@ -759,7 +1035,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.tab_crm,      "  CRM  ")
         self.tabs.addTab(self.tab_settings, "  Settings  ")
 
-        if self.user["role"] == "admin":
+        if self.user["role"] == "admin" and not self._client_workstation:
             self.tab_admin = QWidget()
             self.tabs.addTab(self.tab_admin, "  Administration  ")
             self._build_admin_tab()
@@ -923,9 +1199,10 @@ class MainWindow(QMainWindow):
         self._slot_cards: dict[int, SlotCard] = {}
         for i in range(n):
             card = SlotCard(i)
-            card.setTitle(f"  Slot {i + 1} - {self._slot_label(i)}")
+            card.setTitle(f"  {self._slot_label(i)}")
             card.next_clicked.connect(self._next_call)
             card.cut_clicked.connect(self._cut_call)
+            card.listen_clicked.connect(self._open_slot_monitor)
             self._cards_layout.addWidget(card)
             self._slot_cards[i] = card
         self._cards_layout.addStretch()
@@ -1043,7 +1320,10 @@ class MainWindow(QMainWindow):
         lay.setSpacing(12)
         lay.setContentsMargins(16, 14, 16, 14)
 
-        # Browser profiles
+        if self.user["role"] != "admin" or self._client_workstation:
+            self._build_settings_agent(lay)
+            return
+
         grp_b = QGroupBox("Voice connection profiles")
         blay = QVBoxLayout(grp_b)
         blay.addWidget(QLabel(
@@ -1118,6 +1398,28 @@ class MainWindow(QMainWindow):
         lay.addWidget(grp_d)
         lay.addStretch()
 
+    def _build_settings_agent(self, lay: QVBoxLayout) -> None:
+        grp = QGroupBox("Your account")
+        gl = QVBoxLayout(grp)
+        gl.addWidget(QLabel(
+            "Google Voice lines are configured by your administrator.\n"
+            "Use the Dialer and Live Calls tabs to work. "
+            "Click Listen on a line to hear the call through your speakers."
+        ))
+        lay.addWidget(grp)
+
+        grp_t = QGroupBox("Appearance")
+        tlay = QHBoxLayout(grp_t)
+        btn_light = _btn("Light", "secondary")
+        btn_light.clicked.connect(lambda: self._set_theme("light"))
+        btn_dark = _btn("Dark", "secondary")
+        btn_dark.clicked.connect(lambda: self._set_theme("dark"))
+        tlay.addWidget(btn_light)
+        tlay.addWidget(btn_dark)
+        tlay.addStretch()
+        lay.addWidget(grp_t)
+        lay.addStretch()
+
     # ══════════════════════════════════════════════════════════════════════════
     #  ADMIN TAB
     # ══════════════════════════════════════════════════════════════════════════
@@ -1131,11 +1433,11 @@ class MainWindow(QMainWindow):
         top.addWidget(_label("User Management", bold=True, size=12))
         top.addStretch()
         for txt, fn, nm in [
-            ("+ Create User",     self._admin_create,         "green"),
-            ("🔑  Reset Password", self._admin_reset_pw,       "yellow"),
-            ("🚫  Toggle Active",  self._admin_toggle_active,  "orange"),
-            ("🗑  Delete User",    self._admin_delete,         "red"),
-            ("🔄  Refresh",        self._admin_refresh,        ""),
+            ("Add user", self._admin_create, "green"),
+            ("Reset password", self._admin_reset_pw, "secondary"),
+            ("Activate / deactivate", self._admin_toggle_active, "secondary"),
+            ("Delete user", self._admin_delete, "red"),
+            ("Refresh", self._admin_refresh, "secondary"),
         ]:
             b = _btn(txt, nm); b.clicked.connect(fn); top.addWidget(b)
         lay.addLayout(top)
@@ -1150,6 +1452,63 @@ class MainWindow(QMainWindow):
         self.admin_table.verticalHeader().setVisible(False)
         lay.addWidget(self.admin_table, stretch=1)
         self._admin_refresh()
+
+        lay.addWidget(_hline())
+        grp_client = QGroupBox("Client workstation install")
+        gl = QVBoxLayout(grp_client)
+        gl.addWidget(QLabel(
+            "Use this on YOUR computer to build a folder for the client's PC. "
+            "The client will only see agent sign-in — no administrator setup."
+        ))
+        export_btn = _btn("Export client package…", "primary")
+        export_btn.clicked.connect(self._export_client_package)
+        gl.addWidget(export_btn)
+        lay.addWidget(grp_client)
+
+    def _export_client_package(self):
+        from PyQt6.QtWidgets import QInputDialog
+
+        name, ok = QInputDialog.getText(
+            self, "Client name", "Client / agent full name:")
+        if not ok or not name.strip():
+            return
+        email, ok = QInputDialog.getText(
+            self, "Client email", "Login email for the client:")
+        if not ok or not email.strip():
+            return
+        pw, ok = QInputDialog.getText(
+            self, "Client password",
+            "Password the client will use to sign in:",
+            QLineEdit.EchoMode.Password,
+        )
+        if not ok or not pw.strip():
+            return
+        if len(pw) < 8:
+            QMessageBox.warning(self, "Password", "Use at least 8 characters.")
+            return
+
+        out = QFileDialog.getExistingDirectory(
+            self, "Save client package to folder (e.g. Desktop)")
+        if not out:
+            return
+
+        try:
+            pkg = export_client_package(
+                out, name.strip(), email.strip(), pw, self.cfg,
+                copy_voice_profiles=True,
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Export failed", str(e))
+            return
+
+        QMessageBox.information(
+            self, "Client package ready",
+            f"Created:\n{pkg}\n\n"
+            "1. Install the Auto Dialer app on the client PC\n"
+            "2. Copy everything inside that folder into the app folder\n"
+            "3. Give the client ONLY their email and password\n\n"
+            f"Details are in CLIENT_SETUP.txt",
+        )
 
     # ══════════════════════════════════════════════════════════════════════════
     #  GOOGLE VOICE ACCOUNTS
@@ -1200,47 +1559,41 @@ class MainWindow(QMainWindow):
             card.setTitle(f"  {self._slot_label(sid)}")
 
     def _gv_add_account(self):
-        from PyQt6.QtWidgets import QInputDialog
-
-        name, ok = QInputDialog.getText(self, "Add Google Voice Account",
-                                        "Name / label:")
-        if not ok or not name.strip():
+        if self.user["role"] != "admin":
+            QMessageBox.information(
+                self, "Administrator only",
+                "Only an administrator can add Google Voice accounts.")
             return
-        email, ok = QInputDialog.getText(self, "Add Google Voice Account",
-                                         "Google Voice email:")
-        if not ok or not email.strip():
+        dlg = AddGVAccountDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        password, ok = QInputDialog.getText(
-            self, "Add Google Voice Account",
-            "Google password (saved only in local ignored data/gv_accounts.json):",
-            QLineEdit.EchoMode.Password,
-        )
-        if not ok:
-            return
-        notes, _ = QInputDialog.getText(self, "Add Google Voice Account",
-                                        "Notes (optional):")
-
+        data = dlg.account_data()
         existing = {a.get("profile", "") for a in self._gv_accounts}
         acct = {
-            "name": name.strip(),
-            "email": email.strip().lower(),
-            "password": password,
-            "profile": make_profile_name(name, email, existing),
-            "notes": notes.strip(),
+            "name": data["name"],
+            "email": data["email"],
+            "password": data["password"],
+            "profile": make_profile_name(data["name"], data["email"], existing),
+            "notes": data["notes"],
         }
         self._gv_accounts.append(acct)
         save_gv_accounts(self._gv_accounts)
         self._refresh_gv_accounts()
-        self._log(f"Google Voice account added: {acct['name']}")
+        self._log(f"Voice account added: {acct['name']}")
 
         if not self._running:
-            self._init_controllers(self.spin_slots.value())
+            n = max(self.spin_slots.value(), len(self._gv_accounts))
+            self._init_controllers(n)
 
-        if QMessageBox.question(
-            self, "Setup Login",
-            "Open this account now so you can log in to Google Voice?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        ) == QMessageBox.StandardButton.Yes:
+        if dlg.auto_login() and acct.get("password"):
+            self._start_headless_login(acct)
+            QMessageBox.information(
+                self, "Signing in",
+                f"{acct['name']} is signing in automatically.\n\n"
+                "If Google asks for verification, open Settings → Connect account. "
+                "Otherwise wait a minute and check Live Calls for Ready status.",
+            )
+        else:
             self.gv_accounts_table.selectRow(len(self._gv_accounts) - 1)
             self._gv_setup_selected()
 
@@ -1271,19 +1624,34 @@ class MainWindow(QMainWindow):
     def _gv_duplicate_selected(self):
         idx = self._selected_gv_account_index()
         if idx < 0:
-            QMessageBox.warning(self, "Select Account", "Select an account first.")
+            QMessageBox.warning(self, "Select account", "Select an account first.")
             return
         src = self._gv_accounts[idx]
         existing = {a.get("profile", "") for a in self._gv_accounts}
         copy = dict(src)
-        copy["name"] = f"{src.get('name', 'Account')} Copy"
+        copy["name"] = f"{src.get('name', 'Account')} (copy)"
         copy["profile"] = make_profile_name(copy["name"], src.get("email", ""), existing)
+        src_dir = gv_profile_dir(src["profile"])
+        dst_dir = gv_profile_dir(copy["profile"])
+        if os.path.isdir(src_dir):
+            if clone_profile_folder(src["profile"], copy["profile"]):
+                self._log(
+                    f"Copied signed-in session from {src.get('name')} — no login needed")
+            else:
+                self._log("Could not copy session — connect the new copy manually")
         self._gv_accounts.insert(idx + 1, copy)
         save_gv_accounts(self._gv_accounts)
         self._refresh_gv_accounts()
         self.gv_accounts_table.selectRow(idx + 1)
         if not self._running:
             self._init_controllers(self.spin_slots.value())
+        else:
+            self._refresh_slot_login_badges()
+        if gv_has_session_marker(dst_dir):
+            QMessageBox.information(
+                self, "Account duplicated",
+                f"{copy['name']} reuses the same Google sign-in — ready to dial.",
+            )
 
     def _gv_remove_selected(self):
         idx = self._selected_gv_account_index()
@@ -1305,9 +1673,14 @@ class MainWindow(QMainWindow):
             self._init_controllers(self.spin_slots.value())
 
     def _gv_setup_selected(self):
+        if self.user["role"] != "admin":
+            QMessageBox.information(
+                self, "Administrator only",
+                "Only an administrator can connect Google Voice accounts.")
+            return
         idx = self._selected_gv_account_index()
         if idx < 0:
-            QMessageBox.warning(self, "Select Account", "Select an account first.")
+            QMessageBox.warning(self, "Select account", "Select an account first.")
             return
         acct = self._gv_accounts[idx]
         target_dir = gv_profile_dir(acct["profile"])
@@ -2030,6 +2403,7 @@ class DialerApp:
     def __init__(self):
         self.db  = CRMDatabase()
         self.cfg = _load_cfg()
+        self._client_mode = is_client_deployment(self.cfg)
         self._main_win: MainWindow | None = None
         self._stack = QStackedWidget()
         self._stack.setWindowTitle(APP_NAME)
@@ -2040,12 +2414,21 @@ class DialerApp:
         QApplication.instance().setStyleSheet(
             DARK_QSS if theme == "dark" else LIGHT_QSS)
 
+        self._route_startup()
+
+        self._stack.show()
+
+    def _route_startup(self) -> None:
+        if self._client_mode:
+            if not self.db.has_any_user():
+                self._show_client_not_configured()
+            else:
+                self._show_login()
+            return
         if self.db.needs_admin_setup():
             self._show_admin_setup()
         else:
             self._show_login()
-
-        self._stack.show()
 
     def _show_admin_setup(self):
         page = AdminSetupPage(self.db)
@@ -2053,8 +2436,13 @@ class DialerApp:
         self._stack.addWidget(page)
         self._stack.setCurrentWidget(page)
 
+    def _show_client_not_configured(self):
+        page = ClientNotConfiguredPage()
+        self._stack.addWidget(page)
+        self._stack.setCurrentWidget(page)
+
     def _show_login(self):
-        page = LoginPage(self.db)
+        page = LoginPage(self.db, client_mode=self._client_mode)
         page.login_success.connect(self._on_login)
         self._stack.addWidget(page)
         self._stack.setCurrentWidget(page)

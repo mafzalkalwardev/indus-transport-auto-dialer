@@ -24,7 +24,12 @@ from PyQt6.QtWebEngineWidgets import QWebEngineView
 
 GV_URL       = "https://voice.google.com"
 GV_CALLS_URL = "https://voice.google.com/u/0/calls"
-SESSION_MARKER = ".gv_session_ok"
+from src.gv_accounts import (
+    SESSION_MARKER,
+    has_session_marker,
+    session_marker_path,
+)
+
 SIGNIN_URL = (
     "https://accounts.google.com/signin/v2/identifier"
     f"?continue={quote(GV_URL, safe='')}&flowName=GlifWebSignIn"
@@ -68,18 +73,11 @@ _JS_CHECK_LOGIN = """
 """
 
 
-def session_marker_path(profile_dir: str) -> str:
-    return os.path.join(profile_dir, SESSION_MARKER)
-
-
 def write_session_marker(profile_dir: str) -> None:
     os.makedirs(profile_dir, exist_ok=True)
     with open(session_marker_path(profile_dir), "w", encoding="utf-8") as f:
         f.write(datetime.now().isoformat())
 
-
-def has_session_marker(profile_dir: str) -> bool:
-    return os.path.isfile(session_marker_path(profile_dir))
 
 _JS_DETECT_STATE = r"""
 (function(){

@@ -94,6 +94,11 @@ class CRMDatabase:
             row = c.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()
             return row[0] == 0
 
+    def has_any_user(self) -> bool:
+        with self._conn() as c:
+            row = c.execute("SELECT COUNT(*) FROM users").fetchone()
+            return row[0] > 0
+
     def create_admin(self, email: str, name: str, password: str) -> dict:
         pw_hash = _hash_password(password)
         with self._conn() as c:
