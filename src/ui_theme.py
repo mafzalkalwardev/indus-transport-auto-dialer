@@ -12,6 +12,7 @@ STATUS_LABELS = {
     "ENDED": "Call ended",
     "NO_ANSWER": "No answer",
     "FAILED": "Call failed",
+    "RECOVERING": "Recovering line",
     "READY": "Ready",
     "SETUP REQUIRED": "Setup required",
 }
@@ -28,6 +29,7 @@ STATUS_COLORS = {
     "ENDED": "#64748b",
     "NO_ANSWER": "#64748b",
     "FAILED": "#dc2626",
+    "RECOVERING": "#7c3aed",
     "READY": "#15803d",
     "SETUP REQUIRED": "#b45309",
 }
@@ -251,6 +253,11 @@ QGroupBox#slotCard {
     border: 1px solid #d8dee9;
     border-radius: 14px;
     padding: 14px;
+    margin-top: 4px;
+}
+QGroupBox#slotCard QPushButton {
+    padding: 8px 12px;
+    min-height: 34px;
 }
 
 QFrame#browserFrame {
@@ -370,7 +377,34 @@ QTextEdit#console {
     background-color: #232f42;
     color: #cbd5e1;
     border: 1px solid #364357;
-    font-family: "Segoe UI", Arial, sans-serif;
+    border-radius: 8px;
+}
+QGroupBox#slotCard {
+    background-color: #232f42;
+    border: 1px solid #364357;
+    border-radius: 14px;
+    padding: 14px;
+}
+QGroupBox#slotCard QPushButton {
+    padding: 8px 12px;
+    min-height: 34px;
+}
+QGroupBox#slotCard QPushButton#red {
+    background-color: #450a0a;
+    color: #fecaca;
+    border: 1px solid #991b1b;
+}
+QGroupBox#slotCard QPushButton#red:hover {
+    background-color: #7f1d1d;
+}
+QGroupBox#slotCard QPushButton#secondary {
+    background-color: #2a3649;
+    color: #e2e8f0;
+    border: 1px solid #475569;
+}
+QPushButton#ghost {
+    color: #cbd5e1;
+    min-width: 100px;
 }
 QStatusBar {
     background: #232f42;

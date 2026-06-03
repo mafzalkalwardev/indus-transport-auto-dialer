@@ -117,6 +117,18 @@ Passwords are stored only in `data/gv_accounts.json` on this PC (not committed t
 
 On **Live Calls**, click **Listen** on any line. A monitor window opens the Google Voice view for that line so audio plays through your computer. Close the monitor when done; dialing continues in the background.
 
+## Reliability (watchdog, retries, logging)
+
+For long campaigns (many numbers, several lines):
+
+- **Watchdog** — restarts a stuck or high-memory line automatically (`logs/dialer.log`).
+- **Retries** — failed dials retry up to 3 times (5s / 15s / 45s backoff) before **FAILED** in logs.
+- **Memory** — HTTP cache cleared when starting/stopping a campaign; lines recycled after ~75 calls or high WebEngine RAM.
+
+Tune in `dialer_config.json` — see [docs/RUNBOOK.md](docs/RUNBOOK.md).
+
+Load testing: [docs/LOAD_TEST.md](docs/LOAD_TEST.md) and `python scripts/generate_load_test_list.py`.
+
 ## How call detection works
 
 The app reads the Google Voice web page (not AI audio). Each ~600ms:
@@ -149,6 +161,10 @@ Output: `dist/IndusTransports_AutoDialer.exe`
 | `data/gv_accounts.json` | Voice line emails/passwords |
 | `chrome_profiles/` | Google sign-in sessions |
 | `logs/crm.sqlite3` | Users, CRM, call history |
+
+## Operations runbook
+
+Full troubleshooting: **[docs/RUNBOOK.md](docs/RUNBOOK.md)** (stuck slots, client install, GV login, config keys).
 
 ## Troubleshooting
 

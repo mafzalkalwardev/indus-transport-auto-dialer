@@ -4,5 +4,18 @@
   "n_slots": 1,
   "call_timeout": 45,
   "cooldown": 2.0,
-  "voicemail_hangup_sec": 4
+  "voicemail_hangup_sec": 4,
+  "deployment_mode": "admin",
+  "max_retries": 3,
+  "retry_backoff_sec": [
+    5,
+    15,
+    45
+  ],
+  "watchdog_heartbeat_timeout_sec": 45,
+  "watchdog_stuck_state_sec": 90,
+  "slot_memory_limit_mb": 700,
+  "slot_recycle_after_calls": 75,
+  "watchdog_check_interval_sec": 5,
+  "dial_stagger_sec": 0.8
 }

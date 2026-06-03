@@ -9,11 +9,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import uuid
 from datetime import datetime
 from typing import Callable, Optional
 from urllib.parse import quote
 
-from PyQt6.QtCore import QObject, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWebEngineCore import (
     QWebEnginePage,
@@ -35,7 +36,7 @@ SIGNIN_URL = (
     f"?continue={quote(GV_URL, safe='')}&flowName=GlifWebSignIn"
 )
 
-POLL_MS = 600   # state-detection poll interval (active calls)
+POLL_MS = 1000   # state-detection poll interval (active calls)
 
 _JS_FORCE_VISIBLE = """
 (function(){
@@ -43,6 +44,16 @@ _JS_FORCE_VISIBLE = """
     Object.defineProperty(document, 'hidden', {get: function(){ return false; }, configurable: true});
     Object.defineProperty(document, 'visibilityState', {get: function(){ return 'visible'; }, configurable: true});
     document.dispatchEvent(new Event('visibilitychange'));
+    window.dispatchEvent(new Event('resize'));
+  } catch(e) {}
+})();
+"""
+
+_JS_REFRESH_LAYOUT = """
+(function(){
+  try {
+    window.dispatchEvent(new Event('resize'));
+    document.body && document.body.offsetHeight;
   } catch(e) {}
 })();
 """
@@ -363,6 +374,7 @@ class GVController(QObject):
     state_changed    = pyqtSignal(int, str)   # (slot_id, state)
     login_detected   = pyqtSignal(int)         # slot_id
     log_message      = pyqtSignal(int, str)    # (slot_id, msg)
+    heartbeat        = pyqtSignal(int)         # slot_id — poll / page alive
 
     def __init__(self, slot_id: int, profile_dir: str, parent: QObject = None,
                  profile_key: str = "", login_email: str = "",
@@ -384,7 +396,8 @@ class GVController(QObject):
 
         key = profile_key or f"slot_{slot_id}"
         key = re.sub(r"[^a-zA-Z0-9_]+", "_", key).strip("_") or f"slot_{slot_id}"
-        self._profile = QWebEngineProfile(f"gv_{key}")
+        # Unique in-process name; cookies/session live in profile_dir on disk.
+        self._profile = QWebEngineProfile(f"gv_{key}_{uuid.uuid4().hex[:8]}")
         self._profile.setPersistentStoragePath(profile_dir)
         self._profile.setCachePath(cache_dir)
         self._profile.setPersistentCookiesPolicy(
@@ -439,11 +452,72 @@ class GVController(QObject):
         self._email_step_done = False
         self._vm_count = 0
         self._active_call = False
+        self._dial_stuck_timer: QTimer | None = None
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    def clear_http_cache(self) -> None:
+        """Reduce WebEngine disk/memory pressure between long campaigns."""
+        if getattr(self, "_page", None) is None:
+            return
+        try:
+            self._profile.clearHttpCache()
+        except Exception:
+            pass
+
+    def shutdown(self) -> None:
+        """
+        Stop timers and destroy page before view/profile so Qt does not warn:
+        'Release of profile requested but WebEnginePage still not deleted'.
+        """
+        self._poll_timer.stop()
+        self._login_timer.stop()
+        self._login_fill_timer.stop()
+        if self._dial_stuck_timer is not None:
+            self._dial_stuck_timer.stop()
+            self._dial_stuck_timer = None
+        self._active_call = False
+
+        page = getattr(self, "_page", None)
+        view = getattr(self, "view", None)
+        if view is not None:
+            try:
+                view.setPage(None)
+            except Exception:
+                pass
+        if page is not None:
+            page.deleteLater()
+            self._page = None  # type: ignore[assignment]
+        if view is not None:
+            view.deleteLater()
+            self.view = None  # type: ignore[assignment]
+
+    def _page_alive(self) -> bool:
+        return getattr(self, "_page", None) is not None
+
+    def _pulse_heartbeat(self) -> None:
+        self.heartbeat.emit(self.slot_id)
+
+    def prepare_for_visible_display(self) -> None:
+        """
+        After reparenting from the 1×1 hidden host, force WebEngine to repaint
+        and tell Google Voice the tab is visible (needed for audio + UI).
+        """
+        if not self._page_alive():
+            return
+        self.view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
+        self.view.show()
+        self.view.updateGeometry()
+        self.view.repaint()
+        self._page.runJavaScript(_JS_FORCE_VISIBLE)
+        QTimer.singleShot(80, lambda: self._page.runJavaScript(_JS_FORCE_VISIBLE))
+        QTimer.singleShot(200, lambda: self._page.runJavaScript(_JS_REFRESH_LAYOUT))
+        QTimer.singleShot(400, lambda: self.view.repaint())
+
     def load(self, for_setup: bool = False) -> None:
         """Navigate to Google Voice. Profile auto-logs in if cookies are present."""
+        if not self._page_alive():
+            return
         self._setup_mode = for_setup
         self._load_ok = False
         if for_setup:
@@ -496,6 +570,8 @@ class GVController(QObject):
         self._active_call = False
 
     def dial(self, phone: str) -> None:
+        if not self._page_alive():
+            return
         self._emit_log(f"Dialing {phone}…")
         self._active_call = True
         self._vm_count = 0
@@ -507,12 +583,28 @@ class GVController(QObject):
         QTimer.singleShot(800, self._poll_once)
         QTimer.singleShot(1600, self._poll_once)
         QTimer.singleShot(2400, self.start_polling)
+        if self._dial_stuck_timer is not None:
+            self._dial_stuck_timer.stop()
+        self._dial_stuck_timer = QTimer(self)
+        self._dial_stuck_timer.setSingleShot(True)
+        self._dial_stuck_timer.setInterval(35000)
+        self._dial_stuck_timer.timeout.connect(self._on_dial_stuck)
+        self._dial_stuck_timer.start()
+
+    def _on_dial_stuck(self) -> None:
+        if self._active_call and self._state == "DIALING":
+            self._emit_log("Dial did not progress — marked failed")
+            self._active_call = False
+            self.stop_polling()
+            self._set_state("FAILED")
 
     def _poll_once(self) -> None:
         if self._active_call:
             self._poll_state()
 
     def hangup(self) -> None:
+        if not self._page_alive():
+            return
         self._active_call = False
         self._page.runJavaScript(_JS_HANGUP, lambda r: self._emit_log(
             f"Hangup: {r}"))
@@ -553,6 +645,7 @@ class GVController(QObject):
 
     def _on_load_finished_page(self, ok: bool) -> None:
         self._load_ok = ok
+        self._pulse_heartbeat()
         self._page.runJavaScript(_JS_FORCE_VISIBLE)
         if ok:
             QTimer.singleShot(400, self._try_auto_login)
@@ -658,9 +751,12 @@ class GVController(QObject):
         self._page.load(QUrl("https://accounts.google.com/"))
 
     def _poll_state(self) -> None:
+        if not self._page_alive():
+            return
         self._page.runJavaScript(_JS_DETECT_STATE, self._on_poll_result)
 
     def _on_poll_result(self, raw: str) -> None:
+        self._pulse_heartbeat()
         state = raw or "IDLE"
 
         # Debounce voicemail (avoid false positive while ringing)
@@ -706,6 +802,9 @@ class GVController(QObject):
         if state != self._state:
             self._state = state
             self.state_changed.emit(self.slot_id, state)
+            self._pulse_heartbeat()
+        if state != "DIALING" and self._dial_stuck_timer is not None:
+            self._dial_stuck_timer.stop()
 
     def _emit_log(self, msg: str) -> None:
         self.log_message.emit(self.slot_id, msg)
