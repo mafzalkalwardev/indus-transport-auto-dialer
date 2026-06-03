@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import uuid
 from datetime import datetime
 from typing import Callable, Optional
@@ -100,16 +101,25 @@ _JS_DETECT_STATE = r"""
   function txt(){
     return (document.body&&document.body.innerText||'').toLowerCase();
   }
+  function q(root, sel){
+    try { return (root || document).querySelector(sel); } catch(e) { return null; }
+  }
   var body=txt();
   var inCall=false;
+  var activeRoot=null;
   var hangSels=['button[aria-label*="Hang up" i]','button[aria-label*="End call" i]',
     'button[title*="Hang up" i]','gv-icon-button[icon-name="call_end"]',
     '[data-action="end-call"]','button.end-call'];
   for(var h=0;h<hangSels.length;h++){
     var hang=document.querySelector(hangSels[h]);
-    if(vis(hang)){ inCall=true; break; }
+    if(vis(hang)){
+      inCall=true;
+      activeRoot=hang.closest('[role="dialog"],gv-call-panel,gv-call-widget,gv-in-call-panel,.call-panel,.in-call,body')||document.body;
+      break;
+    }
   }
   if(!inCall) return 'IDLE';
+  var callText=((activeRoot&&activeRoot.innerText)||'').toLowerCase();
 
   // 1. Voicemail — check before ringing/connected (VM also shows hangup)
   var vmPhrases=['leave a message','record after the tone','record your message',
@@ -118,13 +128,13 @@ _JS_DETECT_STATE = r"""
     'forwarded to voicemail','has been forwarded','started recording',
     'person you are calling','reach is not available','no one is available'];
   for(var p=0;p<vmPhrases.length;p++){
-    if(body.indexOf(vmPhrases[p])!==-1) return 'VOICEMAIL';
+    if(callText.indexOf(vmPhrases[p])!==-1) return 'VOICEMAIL';
   }
   var vmSels=['.voicemail-indicator','[data-e2eid="voicemail-record"]',
     '[aria-label*="leave a message" i]','[aria-label*="voicemail" i]',
     '[title*="leave a message" i]','[data-tooltip*="voicemail" i]'];
   for(var v=0;v<vmSels.length;v++){
-    var vm=document.querySelector(vmSels[v]);
+    var vm=q(activeRoot, vmSels[v]);
     if(vis(vm)) return 'VOICEMAIL';
   }
 
@@ -132,7 +142,7 @@ _JS_DETECT_STATE = r"""
   var timerSels=['[jsname="pRLmDf"]','.call-duration','[aria-label*="call duration" i]',
     '[data-e2eid="call-timer"]'];
   for(var t=0;t<timerSels.length;t++){
-    var el=document.querySelector(timerSels[t]);
+    var el=q(activeRoot, timerSels[t]);
     if(!vis(el)) continue;
     var tx=(el.textContent||el.getAttribute('aria-label')||'').replace(/\s+/g,' ').trim();
     if(/^(?:\d{1,2}:)?\d{1,2}:\d{2}$/.test(tx)) return 'CONNECTED';
@@ -143,24 +153,24 @@ _JS_DETECT_STATE = r"""
     'button[aria-label*="Add a call" i]','button[aria-label*="Record the call" i]',
     'button[aria-label*="Send a message" i]'];
   for(var a=0;a<ansCtrl.length;a++){
-    var btn=document.querySelector(ansCtrl[a]);
+    var btn=q(activeRoot, ansCtrl[a]);
     if(vis(btn)) return 'CONNECTED_CTRL';
   }
 
   // 3. Call ended
   var endedSels=['[aria-label*="Call ended" i]','[data-e2eid="call-ended"]','.call-ended'];
   for(var e=0;e<endedSels.length;e++){
-    var end=document.querySelector(endedSels[e]);
+    var end=q(activeRoot, endedSels[e]);
     if(vis(end)) return 'ENDED';
   }
 
   // 4. Ringing / calling (before pickup)
-  if(body.indexOf('ringing')!==-1||body.indexOf('calling')!==-1){
+  if(callText.indexOf('ringing')!==-1||callText.indexOf('calling')!==-1){
     return 'RINGING';
   }
   var ringSels=['[aria-label*="Ringing" i]','[aria-label*="Calling" i]'];
   for(var r=0;r<ringSels.length;r++){
-    var rg=document.querySelector(ringSels[r]);
+    var rg=q(activeRoot, ringSels[r]);
     if(vis(rg)) return 'RINGING';
   }
 
@@ -451,7 +461,9 @@ class GVController(QObject):
         self._autofill_paused = False
         self._email_step_done = False
         self._vm_count = 0
+        self._idle_count = 0
         self._active_call = False
+        self._dial_started_at = 0.0
         self._dial_stuck_timer: QTimer | None = None
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -567,6 +579,7 @@ class GVController(QObject):
         self._poll_timer.stop()
         self._ctrl_count = 0
         self._vm_count = 0
+        self._idle_count = 0
         self._active_call = False
 
     def dial(self, phone: str) -> None:
@@ -574,7 +587,9 @@ class GVController(QObject):
             return
         self._emit_log(f"Dialing {phone}…")
         self._active_call = True
+        self._dial_started_at = time.monotonic()
         self._vm_count = 0
+        self._idle_count = 0
         self._ctrl_count = 0
         self._set_state("DIALING")
         self._page.runJavaScript(_JS_FORCE_VISIBLE)
@@ -759,6 +774,16 @@ class GVController(QObject):
         self._pulse_heartbeat()
         state = raw or "IDLE"
 
+        if state == "IDLE" and self._active_call:
+            self._idle_count += 1
+            age = time.monotonic() - self._dial_started_at
+            if age < 6.0 or self._idle_count < 3:
+                state = self._state if self._state != "IDLE" else "DIALING"
+            else:
+                self._emit_log("Call UI disappeared before answer")
+        else:
+            self._idle_count = 0
+
         # Debounce voicemail (avoid false positive while ringing)
         if state == "VOICEMAIL":
             self._vm_count += 1
@@ -776,7 +801,7 @@ class GVController(QObject):
         else:
             self._ctrl_count = 0
 
-        if state == "CONNECTED":
+        if state == "CONNECTED" and self._state != "CONNECTED":
             self._emit_log("Live answer detected — person answered")
 
         # Promote DIALING → RINGING when in-call UI appears

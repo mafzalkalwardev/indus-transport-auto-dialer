@@ -1,7 +1,7 @@
 {
   "excel_path": "",
   "theme": "light",
-  "n_slots": 1,
+  "n_slots": 5,
   "call_timeout": 45,
   "cooldown": 2.0,
   "voicemail_hangup_sec": 4,

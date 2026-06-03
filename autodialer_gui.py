@@ -69,7 +69,7 @@ WA_NUMBER    = "+92 307 967 0503"
 def _load_cfg() -> dict:
     defaults = {
         "theme": DEFAULT_THEME,
-        "n_slots": 2,
+        "n_slots": 5,
         "call_timeout": 60,
         "cooldown": 4.0,
         "dial_stagger_sec": 0.8,
@@ -196,7 +196,7 @@ class SlotCard(QGroupBox):
         btn_col = QVBoxLayout()
         btn_col.setSpacing(6)
 
-        self.btn_next = _btn("Next number", "green")
+        self.btn_next = _btn("Release slot / next", "green")
         self.btn_next.setEnabled(False)
         self.btn_next.setMinimumHeight(36)
         self.btn_next.setSizePolicy(
@@ -232,11 +232,17 @@ class SlotCard(QGroupBox):
         self._current_state = state
         self.lbl_status.setText(status_label(state))
         self._apply_status_style(state)
-        self.lbl_phone.setText(phone if phone else "No active number")
+        if state == "CONNECTED":
+            phone_text = phone if phone else "Answered call"
+        elif state in ("DIALING", "RINGING", "VOICEMAIL"):
+            phone_text = "Screening in background"
+        else:
+            phone_text = "No active number"
+        self.lbl_phone.setText(phone_text)
         self.lbl_dur.setText(
             f"Call time: {elapsed}" if elapsed else "Call time: —")
         active = state in ("DIALING", "RINGING", "CONNECTED", "VOICEMAIL")
-        self.btn_next.setEnabled(active)
+        self.btn_next.setEnabled(state == "CONNECTED")
         self.btn_cut.setEnabled(active)
 
         self.setProperty("connected", state == "CONNECTED")
@@ -888,7 +894,7 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
 
         # ── Boot controllers ──────────────────────────────────────────────────
-        self._init_controllers(cfg.get("n_slots", 2))
+        self._init_controllers(cfg.get("n_slots", 5))
         self._watchdog.start()
         log_info(f"Session started — user {user.get('email', '?')}")
 
@@ -1272,7 +1278,7 @@ class MainWindow(QMainWindow):
         slay.addWidget(QLabel("Lines at once:"))
         self.spin_slots = QSpinBox()
         self.spin_slots.setRange(1, 5)
-        self.spin_slots.setValue(self.cfg.get("n_slots", 2))
+        self.spin_slots.setValue(self.cfg.get("n_slots", 5))
         slay.addWidget(self.spin_slots)
         slay.addSpacing(20)
         slay.addWidget(QLabel("Call Timeout (sec):"))
@@ -1375,7 +1381,7 @@ class MainWindow(QMainWindow):
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setWidget(self._cards_widget)
 
-        self._rebuild_slot_cards(self.cfg.get("n_slots", 2))
+        self._rebuild_slot_cards(self.cfg.get("n_slots", 5))
         lay.addWidget(scroll, stretch=1)
 
         # Bottom controls
@@ -1593,7 +1599,7 @@ class MainWindow(QMainWindow):
         dlay.addWidget(QLabel("Default lines:"))
         self.settings_slots = QSpinBox()
         self.settings_slots.setRange(1, 5)
-        self.settings_slots.setValue(self.cfg.get("n_slots", 2))
+        self.settings_slots.setValue(self.cfg.get("n_slots", 5))
         dlay.addWidget(self.settings_slots)
         save_btn = _btn("Save settings", "green")
         save_btn.clicked.connect(self._save_settings)
@@ -2154,6 +2160,20 @@ class MainWindow(QMainWindow):
     def _slot_is_ready(self, slot_id: int) -> bool:
         return _now() >= self._slot_cooldown_until.get(slot_id, 0)
 
+    def _slot_has_active_phone(self, slot_id: int) -> bool:
+        return bool(self._slot_phone.get(slot_id))
+
+    def _controller_available(self, ctrl: GVController | None) -> bool:
+        if ctrl is None:
+            return False
+        if not self._slot_account(ctrl.slot_id):
+            return False
+        if self._slot_has_active_phone(ctrl.slot_id):
+            return False
+        if ctrl.current_state not in ("IDLE", "ENDED", "FAILED"):
+            return False
+        return self._slot_is_ready(ctrl.slot_id)
+
     def _begin_slot_cooldown(self, slot_id: int, seconds: float | None = None) -> None:
         wait = self._cooldown_sec() if seconds is None else max(0.0, seconds)
         self._slot_cooldown_until[slot_id] = _now() + wait
@@ -2351,13 +2371,7 @@ class MainWindow(QMainWindow):
             break
 
         for ctrl in self._controllers:
-            if ctrl is None:
-                continue
-            if not self._slot_account(ctrl.slot_id):
-                continue
-            if ctrl.current_state not in ("IDLE", "ENDED"):
-                continue
-            if not self._slot_is_ready(ctrl.slot_id):
+            if not self._controller_available(ctrl):
                 continue
             if self._contact_idx >= len(self._contacts):
                 break
@@ -2387,9 +2401,7 @@ class MainWindow(QMainWindow):
 
     def _idle_controller(self) -> GVController | None:
         for ctrl in self._controllers:
-            if (ctrl and self._slot_account(ctrl.slot_id)
-                    and ctrl.current_state in ("IDLE", "ENDED")
-                    and self._slot_is_ready(ctrl.slot_id)):
+            if self._controller_available(ctrl):
                 return ctrl
         return None
 
@@ -2482,7 +2494,7 @@ class MainWindow(QMainWindow):
             return
         if self._slot_start.get(slot_id) != started_at:
             return
-        if ctrl.current_state in ("DIALING", "RINGING"):
+        if ctrl.current_state in ("DIALING", "RINGING", "IDLE"):
             self._log(f"[Slot {slot_id}] Timeout reached — retry or skip")
             self._handle_slot_failure(slot_id, phone)
 
@@ -2524,6 +2536,14 @@ class MainWindow(QMainWindow):
             self._schedule_assign()
 
     def _on_slot_state(self, slot_id: int, state: str):
+        if state == "IDLE" and self._slot_has_active_phone(slot_id):
+            ctrl = self._get_ctrl(slot_id)
+            last = ctrl.current_state if ctrl else "DIALING"
+            if last == "IDLE":
+                last = "DIALING"
+            self._update_card(slot_id, last, self._slot_phone.get(slot_id, ""))
+            return
+
         self._watchdog.record_state(slot_id, state)
         phone = self._slot_phone.get(slot_id, "")
         disp  = fmt_display(phone[2:]) if phone.startswith("+1") and len(phone) == 12 \
@@ -2550,13 +2570,24 @@ class MainWindow(QMainWindow):
             self._handle_slot_failure(slot_id, phone)
         elif state == "ENDED":
             if phone:
-                self.db.log_call(self.user["id"], phone, "ENDED", slot_id=slot_id)
+                started = self._slot_start.get(slot_id)
+                duration_s = max(0.0, _now() - started) if started else 0.0
+                self.db.log_call(
+                    self.user["id"], phone, "ENDED",
+                    contact_name=self._slot_name.get(slot_id, ""),
+                    duration_s=duration_s,
+                    slot_id=slot_id,
+                )
                 self._refresh_logs()
                 self._watchdog.record_call_completed(slot_id)
                 self._finish_slot_call(slot_id)
         elif state == "NO_ANSWER":
             if phone:
-                self.db.log_call(self.user["id"], phone, "NO_ANSWER", slot_id=slot_id)
+                self.db.log_call(
+                    self.user["id"], phone, "NO_ANSWER",
+                    contact_name=self._slot_name.get(slot_id, ""),
+                    slot_id=slot_id,
+                )
                 self._refresh_logs()
                 self._watchdog.record_call_completed(slot_id)
                 self._finish_slot_call(slot_id)

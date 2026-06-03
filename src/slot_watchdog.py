@@ -145,7 +145,7 @@ class SlotWatchdog(QObject):
                 )
                 continue
 
-            if h.current_state in ("DIALING", "RINGING", "CONNECTED"):
+            if h.current_state in ("DIALING", "RINGING"):
                 elapsed_st = now - h.last_state_change
                 if elapsed_st > self.stuck_state_sec:
                     self._request_restart(

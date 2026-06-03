@@ -107,6 +107,10 @@ def export_client_package(
     os.makedirs(logs_dir, exist_ok=True)
     os.makedirs(data_dir, exist_ok=True)
 
+    allowed_slots = max(1, min(5, int(
+        max_slots if max_slots is not None else admin_cfg.get("n_slots", 1)
+    )))
+
     create_agent_only_database(
         os.path.join(logs_dir, "crm.sqlite3"),
         client_email,
@@ -114,14 +118,14 @@ def export_client_package(
         client_password,
         subscription_plan=subscription_plan,
         subscription_expires_at=subscription_expires_at,
-        max_slots=max_slots or int(admin_cfg.get("n_slots", 1)),
+        max_slots=allowed_slots,
     )
 
     cfg = {
         k: admin_cfg.get(k, v)
         for k, v in {
             "theme": "light",
-            "n_slots": 1,
+            "n_slots": allowed_slots,
             "call_timeout": 60,
             "cooldown": 3.0,
             "voicemail_hangup_sec": 3,
@@ -130,8 +134,7 @@ def export_client_package(
         }.items()
     }
     cfg["deployment_mode"] = "client"
-    if max_slots is not None:
-        cfg["n_slots"] = max(1, min(int(max_slots), int(cfg.get("n_slots", 1))))
+    cfg["n_slots"] = allowed_slots
     with open(os.path.join(pkg, "dialer_config.json"), "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
 
@@ -171,7 +174,7 @@ Email:    {client_email}
 Password: (the password you chose when creating this package)
 Plan:     {subscription_plan}
 Expires:  {subscription_expires_at or 'No local expiry'}
-Max slots: {max_slots or int(admin_cfg.get("n_slots", 1))}
+Max slots: {allowed_slots}
 
 The client cannot create administrators or change Google Voice lines.
 
