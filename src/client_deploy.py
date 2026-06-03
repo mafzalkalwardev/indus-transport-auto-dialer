@@ -20,6 +20,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             password_hash TEXT    NOT NULL,
             role          TEXT    DEFAULT 'agent',
             is_active     INTEGER DEFAULT 1,
+            subscription_plan TEXT DEFAULT 'manual',
+            subscription_expires_at TEXT DEFAULT '',
+            max_slots     INTEGER DEFAULT 1,
             created_at    TEXT,
             last_login    TEXT
         );
@@ -49,7 +52,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 
 
 def create_agent_only_database(db_path: str, email: str, name: str,
-                               password: str) -> None:
+                               password: str, subscription_plan: str = "manual",
+                               subscription_expires_at: str = "",
+                               max_slots: int = 1) -> None:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     if os.path.exists(db_path):
         os.remove(db_path)
@@ -57,12 +62,17 @@ def create_agent_only_database(db_path: str, email: str, name: str,
     try:
         _init_schema(conn)
         conn.execute(
-            "INSERT INTO users (email, name, password_hash, role, created_at) "
-            "VALUES (?, ?, ?, 'agent', ?)",
+            "INSERT INTO users "
+            "(email, name, password_hash, role, subscription_plan, "
+            "subscription_expires_at, max_slots, created_at) "
+            "VALUES (?, ?, ?, 'agent', ?, ?, ?, ?)",
             (
                 email.lower().strip(),
                 name.strip(),
                 _hash_password(password),
+                subscription_plan,
+                subscription_expires_at,
+                int(max_slots),
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             ),
         )
@@ -78,6 +88,9 @@ def export_client_package(
     client_password: str,
     admin_cfg: dict,
     copy_voice_profiles: bool = True,
+    subscription_plan: str = "manual",
+    subscription_expires_at: str = "",
+    max_slots: int | None = None,
 ) -> str:
     """
     Write a folder to copy onto the client's PC.
@@ -99,6 +112,9 @@ def export_client_package(
         client_email,
         client_name,
         client_password,
+        subscription_plan=subscription_plan,
+        subscription_expires_at=subscription_expires_at,
+        max_slots=max_slots or int(admin_cfg.get("n_slots", 1)),
     )
 
     cfg = {
@@ -114,6 +130,8 @@ def export_client_package(
         }.items()
     }
     cfg["deployment_mode"] = "client"
+    if max_slots is not None:
+        cfg["n_slots"] = max(1, min(int(max_slots), int(cfg.get("n_slots", 1))))
     with open(os.path.join(pkg, "dialer_config.json"), "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
 
@@ -151,6 +169,9 @@ CLIENT LOGIN (give these to your client only)
 Name:     {client_name}
 Email:    {client_email}
 Password: (the password you chose when creating this package)
+Plan:     {subscription_plan}
+Expires:  {subscription_expires_at or 'No local expiry'}
+Max slots: {max_slots or int(admin_cfg.get("n_slots", 1))}
 
 The client cannot create administrators or change Google Voice lines.
 

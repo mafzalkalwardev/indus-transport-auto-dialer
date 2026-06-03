@@ -1,5 +1,5 @@
 {
-  "excel_path": "D:/Auto Dialer/phones_test.xlsx",
+  "excel_path": "",
   "theme": "light",
   "n_slots": 1,
   "call_timeout": 45,

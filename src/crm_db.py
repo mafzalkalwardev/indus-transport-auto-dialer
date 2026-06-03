@@ -58,6 +58,9 @@ class CRMDatabase:
                     password_hash TEXT    NOT NULL,
                     role          TEXT    DEFAULT 'agent',
                     is_active     INTEGER DEFAULT 1,
+                    subscription_plan TEXT DEFAULT 'manual',
+                    subscription_expires_at TEXT DEFAULT '',
+                    max_slots     INTEGER DEFAULT 1,
                     created_at    TEXT,
                     last_login    TEXT
                 );
@@ -86,6 +89,20 @@ class CRMDatabase:
                     timestamp    TEXT
                 );
             """)
+            self._migrate_users(c)
+
+    def _migrate_users(self, c: sqlite3.Connection) -> None:
+        cols = {
+            r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()
+        }
+        additions = {
+            "subscription_plan": "TEXT DEFAULT 'manual'",
+            "subscription_expires_at": "TEXT DEFAULT ''",
+            "max_slots": "INTEGER DEFAULT 1",
+        }
+        for name, ddl in additions.items():
+            if name not in cols:
+                c.execute(f"ALTER TABLE users ADD COLUMN {name} {ddl}")
 
     # ── Admin setup ───────────────────────────────────────────────────────────
 
@@ -119,9 +136,29 @@ class CRMDatabase:
                 (email.lower().strip(),)
             ).fetchone()
         if row and _verify_password(password, row["password_hash"]):
+            user = dict(row)
+            if self.user_subscription_expired(user):
+                return None
             self._touch_login(row["id"])
-            return dict(row)
+            return user
         return None
+
+    @staticmethod
+    def user_subscription_expired(user: dict) -> bool:
+        if user.get("role") == "admin":
+            return False
+        expires = str(user.get("subscription_expires_at") or "").strip()
+        if not expires:
+            return False
+        try:
+            return datetime.now() > datetime.strptime(expires, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            try:
+                return datetime.now().date() > datetime.strptime(
+                    expires, "%Y-%m-%d"
+                ).date()
+            except ValueError:
+                return False
 
     def _touch_login(self, user_id: int) -> None:
         with self._conn() as c:
@@ -133,27 +170,45 @@ class CRMDatabase:
     # ── User management (admin) ───────────────────────────────────────────────
 
     def create_user(self, email: str, name: str, password: str,
-                    role: str = "agent") -> dict:
+                    role: str = "agent", subscription_plan: str = "manual",
+                    subscription_expires_at: str = "", max_slots: int = 1) -> dict:
         pw_hash = _hash_password(password)
         with self._conn() as c:
             c.execute(
-                "INSERT INTO users (email, name, password_hash, role, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO users "
+                "(email, name, password_hash, role, subscription_plan, "
+                "subscription_expires_at, max_slots, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (email.lower().strip(), name, pw_hash, role,
+                 subscription_plan, subscription_expires_at, int(max_slots),
                  datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
             )
-        return {"email": email, "name": name, "role": role}
+        return {"email": email, "name": name, "role": role,
+                "subscription_plan": subscription_plan,
+                "subscription_expires_at": subscription_expires_at,
+                "max_slots": int(max_slots)}
 
     def get_all_users(self) -> list[dict]:
         with self._conn() as c:
             return [dict(r) for r in
-                    c.execute("SELECT id,email,name,role,is_active,last_login "
+                    c.execute("SELECT id,email,name,role,is_active,"
+                               "subscription_plan,subscription_expires_at,"
+                               "max_slots,last_login "
                                "FROM users ORDER BY id").fetchall()]
 
     def set_user_active(self, user_id: int, active: bool) -> None:
         with self._conn() as c:
             c.execute("UPDATE users SET is_active=? WHERE id=?",
                       (1 if active else 0, user_id))
+
+    def set_user_subscription(self, user_id: int, plan: str,
+                              expires_at: str, max_slots: int) -> None:
+        with self._conn() as c:
+            c.execute(
+                "UPDATE users SET subscription_plan=?, "
+                "subscription_expires_at=?, max_slots=? WHERE id=?",
+                (plan, expires_at, int(max_slots), user_id),
+            )
 
     def reset_password(self, user_id: int, new_password: str) -> None:
         with self._conn() as c:

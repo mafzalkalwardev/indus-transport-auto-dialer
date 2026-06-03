@@ -7,7 +7,7 @@ Agents see only our branded interface — Google Voice is never visible.
 import os
 import sys
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QDialog, QVBoxLayout,
@@ -762,9 +762,16 @@ class CreateUserDialog(QDialog):
         self.e_pw = QLineEdit()
         self.e_pw.setEchoMode(QLineEdit.EchoMode.Password)
         self.e_pw.setPlaceholderText("At least 8 characters")
+        self.plan = QComboBox()
+        self.plan.addItems(["15 days", "Weekly", "Monthly", "No expiry"])
+        self.max_slots = QSpinBox()
+        self.max_slots.setRange(1, 5)
+        self.max_slots.setValue(5)
         form.addRow("Name:", self.e_name)
         form.addRow("Email:", self.e_email)
         form.addRow("Password:", self.e_pw)
+        form.addRow("Subscription:", self.plan)
+        form.addRow("Max live slots:", self.max_slots)
         lay.addLayout(form)
         lay.addSpacing(12)
 
@@ -782,17 +789,38 @@ class CreateUserDialog(QDialog):
         if len(pw) < 8:
             QMessageBox.warning(self, "Password", "Use at least 8 characters.")
             return
+        plan, expires_at = self._subscription_values()
         try:
-            self.db.create_user(email, name, pw, role="agent")
+            self.db.create_user(
+                email, name, pw, role="agent",
+                subscription_plan=plan,
+                subscription_expires_at=expires_at,
+                max_slots=self.max_slots.value(),
+            )
             QMessageBox.information(
                 self, "User created",
                 f"{name} can sign in with:\n\nEmail: {email}\n"
                 "Password: (the one you just set)\n\n"
+                f"Subscription: {plan}\n"
+                f"Expires: {expires_at or 'No local expiry'}\n"
+                f"Max slots: {self.max_slots.value()}\n\n"
                 "They will see Dialer, Live Calls, Logs, and CRM only.",
             )
             self.accept()
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
+
+    def _subscription_values(self) -> tuple[str, str]:
+        label = self.plan.currentText()
+        days = {
+            "15 days": 15,
+            "Weekly": 7,
+            "Monthly": 30,
+        }.get(label)
+        if not days:
+            return "No expiry", ""
+        expires = datetime.now() + timedelta(days=days)
+        return label, expires.strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1068,10 +1096,23 @@ class MainWindow(QMainWindow):
                 "Add at least one Google Voice account in Settings, then "
                 "use Connect account.")
         n = self.spin_slots.value()
+        if self.user.get("role") != "admin":
+            max_slots = int(self.user.get("max_slots") or 1)
+            if n > max_slots:
+                return False, (
+                    f"Your subscription allows {max_slots} live slot(s). "
+                    "Reduce Lines at once or contact your administrator.")
+        if len(self._gv_accounts) < n:
+            return False, (
+                f"You selected {n} live slot(s), but only "
+                f"{len(self._gv_accounts)} Google Voice account(s) are configured.\n\n"
+                "Add one signed-in Google Voice account for each slot. "
+                "For 5-slot dialing, configure 5 ready lines.")
         missing: list[str] = []
         for i in range(n):
             acct = self._slot_account(i)
             if not acct:
+                missing.append(f"Slot {i + 1}")
                 continue
             if not self._account_session_ready(acct):
                 missing.append(acct.get("name") or acct.get("email", f"Slot {i+1}"))
@@ -1598,6 +1639,7 @@ class MainWindow(QMainWindow):
         for txt, fn, nm in [
             ("Add user", self._admin_create, "green"),
             ("Reset password", self._admin_reset_pw, "secondary"),
+            ("Set subscription", self._admin_set_subscription, "secondary"),
             ("Activate / deactivate", self._admin_toggle_active, "secondary"),
             ("Delete user", self._admin_delete, "red"),
             ("Refresh", self._admin_refresh, "secondary"),
@@ -1605,9 +1647,10 @@ class MainWindow(QMainWindow):
             b = _btn(txt, nm); b.clicked.connect(fn); top.addWidget(b)
         lay.addLayout(top)
 
-        self.admin_table = QTableWidget(0, 6)
+        self.admin_table = QTableWidget(0, 9)
         self.admin_table.setHorizontalHeaderLabels(
-            ["ID", "Email", "Name", "Role", "Active", "Last Login"])
+            ["ID", "Email", "Name", "Role", "Active", "Plan",
+             "Expires", "Slots", "Last Login"])
         self.admin_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
         self.admin_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -1649,6 +1692,22 @@ class MainWindow(QMainWindow):
         if len(pw) < 8:
             QMessageBox.warning(self, "Password", "Use at least 8 characters.")
             return
+        plan, ok = QInputDialog.getItem(
+            self, "Subscription", "Client subscription period:",
+            ["15 days", "Weekly", "Monthly", "No expiry"], 0, False)
+        if not ok:
+            return
+        days = {"15 days": 15, "Weekly": 7, "Monthly": 30}.get(plan)
+        expires_at = ""
+        if days:
+            expires_at = (
+                datetime.now() + timedelta(days=days)
+            ).strftime("%Y-%m-%d %H:%M:%S")
+        max_slots, ok = QInputDialog.getInt(
+            self, "Max live slots", "Allowed simultaneous slots:",
+            min(5, max(1, int(self.cfg.get("n_slots", 1)))), 1, 5)
+        if not ok:
+            return
 
         out = QFileDialog.getExistingDirectory(
             self, "Save client package to folder (e.g. Desktop)")
@@ -1659,6 +1718,9 @@ class MainWindow(QMainWindow):
             pkg = export_client_package(
                 out, name.strip(), email.strip(), pw, self.cfg,
                 copy_voice_profiles=True,
+                subscription_plan=plan,
+                subscription_expires_at=expires_at,
+                max_slots=max_slots,
             )
         except Exception as e:
             QMessageBox.critical(self, "Export failed", str(e))
@@ -2291,6 +2353,8 @@ class MainWindow(QMainWindow):
         for ctrl in self._controllers:
             if ctrl is None:
                 continue
+            if not self._slot_account(ctrl.slot_id):
+                continue
             if ctrl.current_state not in ("IDLE", "ENDED"):
                 continue
             if not self._slot_is_ready(ctrl.slot_id):
@@ -2323,7 +2387,8 @@ class MainWindow(QMainWindow):
 
     def _idle_controller(self) -> GVController | None:
         for ctrl in self._controllers:
-            if (ctrl and ctrl.current_state in ("IDLE", "ENDED")
+            if (ctrl and self._slot_account(ctrl.slot_id)
+                    and ctrl.current_state in ("IDLE", "ENDED")
                     and self._slot_is_ready(ctrl.slot_id)):
                 return ctrl
         return None
@@ -2355,27 +2420,38 @@ class MainWindow(QMainWindow):
     def _release_slot(self, slot_id: int):
         self._next_call(slot_id)
 
-    def _cut_call(self, slot_id: int):
+    def _cut_call(self, slot_id: int, advance: bool = True):
         """Hang up the current backend Google Voice call from our UI."""
         ctrl = self._get_ctrl(slot_id)
         phone = self._slot_phone.get(slot_id, "")
         state = ctrl.current_state if ctrl else "IDLE"
+        started = self._slot_start.get(slot_id)
+        duration_s = max(0.0, _now() - started) if started else 0.0
         if ctrl:
             ctrl.hangup()
             self._log(f"[Slot {slot_id}] Cut call")
         if phone:
             status = "ENDED" if state == "CONNECTED" else "NO_ANSWER"
-            self.db.log_call(self.user["id"], phone, status, slot_id=slot_id)
+            self.db.log_call(
+                self.user["id"], phone, status,
+                contact_name=self._slot_name.get(slot_id, ""),
+                duration_s=duration_s if status == "ENDED" else 0.0,
+                slot_id=slot_id,
+            )
             self._refresh_logs()
+            self._watchdog.record_call_completed(slot_id)
         self._slot_phone.pop(slot_id, None)
         self._slot_start.pop(slot_id, None)
+        self._slot_name.pop(slot_id, None)
+        self._slot_retry_attempt.pop(slot_id, None)
         self._update_card(slot_id, "IDLE", "")
+        if advance and self._running:
+            self._begin_slot_cooldown(slot_id)
+            self._schedule_assign()
 
     def _next_call(self, slot_id: int):
         """Cut the current call and assign the next number after a short pause."""
-        self._cut_call(slot_id)
-        self._slot_name.pop(slot_id, None)
-        self._slot_retry_attempt.pop(slot_id, None)
+        self._cut_call(slot_id, advance=False)
         self._log(f"[Slot {slot_id}] Moving to next call")
         if self._running:
             pause = max(1.0, self._cooldown_sec() * 0.5)
@@ -2389,6 +2465,8 @@ class MainWindow(QMainWindow):
             ctrl.hangup()
         self._slot_phone.pop(slot_id, None)
         self._slot_start.pop(slot_id, None)
+        self._slot_name.pop(slot_id, None)
+        self._slot_retry_attempt.pop(slot_id, None)
         self._update_card(slot_id, "IDLE", "")
         self._log(f"[Slot {slot_id}] Voicemail handled — next number")
         if self._running:
@@ -2709,14 +2787,22 @@ class MainWindow(QMainWindow):
         for u in self.db.get_all_users():
             row = self.admin_table.rowCount()
             self.admin_table.insertRow(row)
+            expired = self.db.user_subscription_expired(u)
+            active_label = "Expired" if expired else (
+                "Active" if u["is_active"] else "Inactive")
             vals = [str(u["id"]), u["email"], u["name"], u["role"],
-                    "✓" if u["is_active"] else "✗",
+                    active_label,
+                    u.get("subscription_plan", "manual") or "manual",
+                    u.get("subscription_expires_at", "") or "No expiry",
+                    str(u.get("max_slots", 1) or 1),
                     u.get("last_login","—") or "—"]
             for col, val in enumerate(vals):
                 item = QTableWidgetItem(val)
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 if u["role"] == "admin":
                     item.setForeground(QColor("#ffd166"))
+                elif expired:
+                    item.setForeground(QColor("#ff4444"))
                 elif not u["is_active"]:
                     item.setForeground(QColor("#8b949e"))
                 self.admin_table.setItem(row, col, item)
@@ -2748,11 +2834,46 @@ class MainWindow(QMainWindow):
         if row < 0:
             return
         uid    = int(self.admin_table.item(row, 0).text())
-        active = self.admin_table.item(row, 4).text() == "✓"
+        active = self.admin_table.item(row, 4).text() == "Active"
         if uid == self.user["id"]:
             QMessageBox.warning(self, "Error", "Cannot deactivate yourself.")
             return
         self.db.set_user_active(uid, not active)
+        self._admin_refresh()
+
+    def _admin_set_subscription(self):
+        row = self.admin_table.currentRow()
+        if row < 0:
+            return
+        uid = int(self.admin_table.item(row, 0).text())
+        email = self.admin_table.item(row, 1).text()
+        role = self.admin_table.item(row, 3).text()
+        if role == "admin":
+            QMessageBox.information(
+                self, "Administrator",
+                "Administrator accounts do not expire.")
+            return
+
+        from PyQt6.QtWidgets import QInputDialog
+        plan, ok = QInputDialog.getItem(
+            self, "Subscription", f"Plan for {email}:",
+            ["15 days", "Weekly", "Monthly", "No expiry"], 0, False)
+        if not ok:
+            return
+        current_slots = int(self.admin_table.item(row, 7).text() or "1")
+        slots, ok = QInputDialog.getInt(
+            self, "Max live slots", "Allowed simultaneous slots:",
+            current_slots, 1, 5)
+        if not ok:
+            return
+        days = {"15 days": 15, "Weekly": 7, "Monthly": 30}.get(plan)
+        expires_at = ""
+        if days:
+            expires_at = (
+                datetime.now() + timedelta(days=days)
+            ).strftime("%Y-%m-%d %H:%M:%S")
+        self.db.set_user_subscription(uid, plan, expires_at, slots)
+        self.db.set_user_active(uid, True)
         self._admin_refresh()
 
     def _admin_delete(self):

@@ -8,6 +8,7 @@ call_logs.csv
 .codegraph/
 *.spec.bak
 Archive_OldProjects/
+New Project/Auto Dialer Pro/
 chrome_profiles/
 logs/
 data/gv_accounts.json
