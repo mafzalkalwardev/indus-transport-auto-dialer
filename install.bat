@@ -1,6 +1,6 @@
 @echo off
 echo ============================================================
-echo   INDUS TRANSPORTS LLC Auto Dialer Pro — Setup
+echo   FT Solutions Auto Dialer Pro - Setup
 echo ============================================================
 echo.
 echo Installing Python packages (PyQt6 + WebEngine = ~500MB)...

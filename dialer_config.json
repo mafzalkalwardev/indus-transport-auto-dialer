@@ -1,9 +1,9 @@
 {
-  "excel_path": "",
+  "excel_path": "C:/Users/pc/Desktop/contacts.xlsx",
   "theme": "light",
-  "n_slots": 5,
+  "n_slots": 1,
   "call_timeout": 45,
-  "cooldown": 2.0,
+  "cooldown": 1.0,
   "voicemail_hangup_sec": 4,
   "deployment_mode": "admin",
   "max_retries": 3,

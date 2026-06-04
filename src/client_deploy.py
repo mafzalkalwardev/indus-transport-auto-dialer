@@ -97,7 +97,7 @@ def export_client_package(
     Contains agent-only login, voice profiles, and client deployment flag.
     Returns path to the package root.
     """
-    pkg = os.path.join(output_dir, "IndusTransports_AutoDialer_Client")
+    pkg = os.path.join(output_dir, "FTSolutions_AutoDialer_Client")
     if os.path.isdir(pkg):
         shutil.rmtree(pkg, ignore_errors=True)
     os.makedirs(pkg, exist_ok=True)
@@ -151,13 +151,13 @@ def export_client_package(
             dirs_exist_ok=True,
         )
 
-    readme = f"""Indus Transports Auto Dialer — Client workstation
+    readme = f"""FT Solutions Auto Dialer - Client workstation
 =====================================================
 
 INSTALL ON CLIENT PC
 --------------------
 1. Install the same Auto Dialer app (Python or EXE) into a folder, e.g.:
-   C:\\IndusTransports\\AutoDialer
+   C:\\FTSolutions\\AutoDialer
 
 2. Copy ALL files from this package INTO that folder (merge/replace):
    - dialer_config.json
