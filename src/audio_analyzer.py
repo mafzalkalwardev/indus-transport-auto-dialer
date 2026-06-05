@@ -13,6 +13,8 @@ import re
 import time
 from typing import Any
 
+from .vad import VoiceActivityDetector
+
 
 @dataclass
 class AudioFeatures:
@@ -34,6 +36,8 @@ class AudioFeatures:
     reason: str = "audio disabled"
     backend_status: str = "OFF"
     backend_name: str = ""
+    vad_backend: str = ""
+    vad_confidence: float = 0.0
 
 
 class AudioAnalyzer:
@@ -60,6 +64,7 @@ class AudioAnalyzer:
         self._recent_rms: list[float] = []
         self._recent_voice: list[bool] = []
         self._backend_error = ""
+        self._vad = VoiceActivityDetector()
 
     def analyze_from_pcm(
         self,
@@ -93,7 +98,9 @@ class AudioAnalyzer:
         zcr = zero_crossings / max(1, len(x) - 1)
 
         is_silent = rms < 0.012
-        has_speech_like = (not is_silent) and 0.015 <= zcr <= 0.23 and var > 0.00005
+        heuristic_speech_like = (not is_silent) and 0.015 <= zcr <= 0.23 and var > 0.00005
+        vad = self._vad.analyze_float_window(x, sample_rate)
+        has_speech_like = vad.is_voice or heuristic_speech_like
         now = time.monotonic()
         if has_speech_like:
             if self._speech_started_at is None:
@@ -119,7 +126,7 @@ class AudioAnalyzer:
         greeting = self._has_human_greeting(transcript)
         short_burst = 0.15 <= speech_duration <= 2.5 and has_speech_like
         vm_keywords = self._voicemail_keyword_count(transcript)
-        conf = max(rms, ring_conf, busy_conf, beep_conf, 0.65 if has_speech_like else 0.0)
+        conf = max(rms, ring_conf, busy_conf, beep_conf, vad.confidence, 0.65 if has_speech_like else 0.0)
 
         reason_parts = []
         if has_speech_like:
@@ -152,6 +159,8 @@ class AudioAnalyzer:
             reason=", ".join(reason_parts),
             backend_status=self.backend_status,
             backend_name=self.backend_name,
+            vad_backend=vad.backend,
+            vad_confidence=vad.confidence,
         )
 
     def get_features_real_time(self) -> AudioFeatures:

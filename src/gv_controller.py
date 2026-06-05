@@ -1010,6 +1010,8 @@ class GVController(QObject):
             "should_hangup": fused_state in {"VOICEMAIL", "NO_ANSWER", "BUSY", "FAILED"},
             "audio_backend": getattr(audio_features, "backend_status", "OFF"),
             "audio_reason": getattr(audio_features, "reason", ""),
+            "vad_backend": getattr(audio_features, "vad_backend", ""),
+            "vad_confidence": float(getattr(audio_features, "vad_confidence", 0.0) or 0.0),
         }
         self.detection_update.emit(self.slot_id, debug)
         if bool(self._runtime_cfg.get("live_debug_mode", False)):
@@ -1114,7 +1116,7 @@ class GVController(QObject):
             "fused_state", "confidence", "reason", "ringback",
             "speech_duration", "silence_duration", "beep_detected",
             "human_greeting_detected", "voicemail_confirmations",
-            "should_hangup",
+            "should_hangup", "vad_backend", "vad_confidence",
         ):
             lines.append(f"{key}={debug.get(key)}")
         self._emit_log("\n".join(lines))

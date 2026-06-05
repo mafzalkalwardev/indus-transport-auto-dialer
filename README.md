@@ -175,6 +175,8 @@ The smoke script requires at least one configured Google Voice account per test 
 
 Final call logs include one row per call with final outcome, detection reason, confidence, and state history.
 
+Pipeline details and dataset layout: [docs/DETECTION_PIPELINE.md](docs/DETECTION_PIPELINE.md).
+
 ## Administration (you only)
 
 - **Add user** — creates **agent** accounts for clients

@@ -173,7 +173,7 @@ class LiveCallSmoke:
             "fused_state", "confidence", "reason", "ringback",
             "speech_duration", "silence_duration", "beep_detected",
             "human_greeting_detected", "voicemail_confirmations",
-            "should_hangup",
+            "should_hangup", "vad_backend", "vad_confidence",
         ):
             print(f"{key}={debug.get(key)}", flush=True)
 

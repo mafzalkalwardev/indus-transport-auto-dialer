@@ -43,6 +43,8 @@ def main() -> None:
     print(f"ringback={features.ringback_cadence_confidence:.2f}")
     print(f"busy={features.busy_tone_cadence_confidence:.2f}")
     print(f"beep={features.beep_detected}")
+    print(f"vad_backend={features.vad_backend}")
+    print(f"vad_confidence={features.vad_confidence:.2f}")
     print(f"reason={features.reason}")
 
 

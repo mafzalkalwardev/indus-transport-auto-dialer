@@ -25,6 +25,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
+from .human_detector import HumanDetector
+from .voicemail_detector import VoicemailDetector
+
 
 class DecisionState(str, Enum):
     IDLE = "IDLE"
@@ -162,6 +165,8 @@ class LocalCallDetector:
 
         # Voicemail stability gating
         self._voicemail_stable_cycles: int = 0
+        self._human_detector = HumanDetector()
+        self._voicemail_detector = VoicemailDetector()
 
 
     def reset_for_new_call(self) -> None:
@@ -303,6 +308,8 @@ class LocalCallDetector:
         short_speech_burst_detected = bool(_get("short_speech_burst_detected", False) or False)
         continuous_greeting_duration_seconds = float(_get("continuous_greeting_duration_seconds", 0.0) or 0.0)
         beep_detected = bool(_get("beep_detected", False) or False)
+        background_noise_level = float(_get("background_noise_level", rms) or 0.0)
+        transcript = str(_get("transcript", "") or "")
 
         # Start pending window if evidence suggests answer has happened.
         if answered_pending_conf >= 0.4:
@@ -363,7 +370,7 @@ class LocalCallDetector:
                 )
 
             # 4) Background noise handling: keep pending and wait for confirmation.
-            background_noise_high = (rms > 0.15) and not human_greeting_detected and not has_speech_like
+            background_noise_high = (background_noise_level > 0.15 or rms > 0.15) and not human_greeting_detected and not has_speech_like
             if background_noise_high:
                 return self._transition(
                     DecisionState.ANSWERED_PENDING,
@@ -388,6 +395,8 @@ class LocalCallDetector:
                     human_greeting_detected,
                     short_speech_burst_detected,
                     continuous_greeting_duration_seconds,
+                    background_noise_level,
+                    transcript,
                 ),
                 answer_elapsed_seconds=answer_elapsed_seconds,
                 debug_base=current_debug_base,
@@ -450,9 +459,21 @@ class LocalCallDetector:
             human_greeting_detected,
             short_speech_burst_detected,
             continuous_greeting_duration_seconds,
+            background_noise_level,
+            transcript,
         ) = audio
 
         debug_base = debug_base or {}
+        human_detection = self._human_detector.classify(
+            transcript=transcript,
+            speech_duration_seconds=speech_duration_seconds,
+            silence_duration_seconds=silence_duration_seconds,
+            answer_elapsed_seconds=answer_elapsed_seconds,
+            has_speech_like=has_speech_like,
+            background_noise_level=background_noise_level,
+            human_greeting_detected=human_greeting_detected,
+            short_speech_burst_detected=short_speech_burst_detected,
+        )
 
         # Human heuristics: human-first during early moments should already keep VOICEMAIL away,
         # but we still compute confidence here.
@@ -467,12 +488,13 @@ class LocalCallDetector:
             human_conf += 0.25
         elif self.config.enable_audio_detection and has_speech_like:
             human_conf += 0.15
+        human_conf = max(human_conf, human_detection.confidence)
 
         # Voicemail confirmation rule: 2-of-5 factors + strict gating.
         factors_true = 0
 
-        # 1) continuous greeting speech longer than 6 seconds
-        f_continuous = continuous_greeting_duration_seconds >= 6.0
+        # 1) continuous greeting speech longer than 4 seconds
+        f_continuous = continuous_greeting_duration_seconds >= 4.0
         factors_true += int(f_continuous)
 
         # 2) voicemail keywords detected
@@ -492,6 +514,17 @@ class LocalCallDetector:
         # 5) DOM clearly shows voicemail
         f_dom_voicemail = bool(evidence.hasVoicemailCue) or bool(evidence.voicemail_match)
         factors_true += int(f_dom_voicemail)
+        vm_detection = self._voicemail_detector.classify(
+            transcript=transcript,
+            answer_elapsed_seconds=answer_elapsed_seconds,
+            continuous_greeting_duration_seconds=continuous_greeting_duration_seconds,
+            voicemail_keywords_detected_count=voicemail_keywords_detected_count,
+            beep_detected=beep_detected,
+            beep_confidence=beep_conf,
+            dom_voicemail=f_dom_voicemail,
+            repeated_machine_pattern=bool(evidence.hasVoicemailCue),
+            human_detected=human_detection.detected,
+        )
 
         # No human greeting detected gate
         no_human_greeting_detected = not human_greeting_detected
@@ -503,9 +536,11 @@ class LocalCallDetector:
         voicemail_score += (0.4 if (f_beep and beep_conf >= 0.5) else 0.0)
         if evidence.hasVoicemailCue:
             voicemail_score = min(1.0, voicemail_score + 0.15)
+        voicemail_score = max(voicemail_score, vm_detection.confidence)
 
         candidate_voicemail = (
-            answer_elapsed_seconds >= self.config.voicemail_min_answer_elapsed_seconds
+            vm_detection.candidate
+            and answer_elapsed_seconds >= self.config.voicemail_min_answer_elapsed_seconds
             and no_human_greeting_detected
             and factors_true >= 2
             and voicemail_score >= self.config.voicemail_confidence_threshold
@@ -529,14 +564,16 @@ class LocalCallDetector:
         decision_debug = {
             **debug_base,
             "candidate_state": "VOICEMAIL" if candidate_voicemail else "HUMAN_OR_PENDING",
-            "confidence": float(max(human_conf, voicemail_score)),
-            "reason": "",
+            "debug_confidence": float(max(human_conf, voicemail_score)),
+            "debug_reason": "",
             "speech_duration": speech_duration_seconds,
             "silence_duration": silence_duration_seconds,
             "beep_detected": bool(beep_detected),
             "human_greeting_detected": bool(human_greeting_detected),
+            "human_reasons": human_detection.reasons,
             "voicemail_confirmation_count": self._voicemail_confirm_count,
             "voicemail_score": voicemail_score,
+            "voicemail_factors": vm_detection.factors,
             "factors_true": factors_true,
             "factor_continuous_greeting": f_continuous,
             "factor_keywords": f_keywords,
@@ -546,35 +583,38 @@ class LocalCallDetector:
         }
 
         if can_emit_voicemail:
-            decision_debug["reason"] = "voicemail confirmed: strong 2-of-5 factors + confidence + stability"
-            self._emit(DecisionState.VOICEMAIL, min(0.99, voicemail_score), decision_debug["reason"], **decision_debug)
+            reason = "voicemail confirmed: strong 2-of-5 factors + confidence + stability"
+            decision_debug["debug_reason"] = reason
+            self._emit(DecisionState.VOICEMAIL, min(0.99, voicemail_score), reason, **decision_debug)
             return self._build(
                 DecisionState.VOICEMAIL,
                 min(0.99, voicemail_score),
-                decision_debug["reason"],
+                reason,
                 **decision_debug,
                 voicemail_conf=voicemail_score,
             )
 
         # Human wins if above threshold and no strong voicemail signal.
         if human_conf >= self.config.human_confidence_threshold:
-            decision_debug["reason"] = "human confidence threshold met (human-first)"
-            self._emit(DecisionState.HUMAN, min(0.98, human_conf), decision_debug["reason"], **decision_debug)
+            reason = "human confidence threshold met (human-first)"
+            decision_debug["debug_reason"] = reason
+            self._emit(DecisionState.HUMAN, min(0.98, human_conf), reason, **decision_debug)
             return self._build(
                 DecisionState.HUMAN,
                 min(0.98, human_conf),
-                decision_debug["reason"],
+                reason,
                 **decision_debug,
                 human_conf=human_conf,
             )
 
         # Otherwise keep pending.
         fallback = DecisionState.ANSWERED_PENDING
-        decision_debug["reason"] = "awaiting more evidence for final classification"
+        reason = "awaiting more evidence for final classification"
+        decision_debug["debug_reason"] = reason
         return self._build(
             fallback,
             max(0.3, min(0.75, max(human_conf, voicemail_score))),
-            decision_debug["reason"],
+            reason,
             **decision_debug,
             human_conf=human_conf,
             voicemail_conf=voicemail_score,
