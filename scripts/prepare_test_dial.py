@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare the two owner test numbers for a power-dial run."""
+"""Prepare the owner test numbers for a power-dial run."""
 from __future__ import annotations
 
 import json
@@ -15,8 +15,9 @@ from src.paths import CONFIG_FILE, ROOT as PROJECT_ROOT
 from src.phone_utils import clean_phone, fmt_e164, fmt_display
 
 TEST_NUMBERS = [
-    ("7855724805", "Test Line 1"),
-    ("5126414655", "Test Line 2"),
+    ("15127616455", "Live test 1"),
+    ("17085681794", "Live test 2"),
+    ("14044651478", "Live test 3"),
 ]
 
 
@@ -42,7 +43,7 @@ def main() -> None:
             print(f"  INVALID  {raw}")
             continue
         print(f"  OK  {name}: {fmt_display(d10)}  ({fmt_e164(d10)})")
-    print("\nIn the app: Dialer -> Load Test List -> Start Power Dial (1-2 slots).")
+    print("\nIn the app: Dialer -> Load Test List -> Start Power Dial (3 slots).")
     print("Use only if you own these lines or consent to test calls.")
 
 

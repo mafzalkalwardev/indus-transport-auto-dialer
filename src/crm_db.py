@@ -242,7 +242,10 @@ class CRMDatabase:
                 "VALUES (?,?,?,?,?,?,?) "
                 "ON CONFLICT(phone) DO UPDATE SET "
                 "name=excluded.name, company=excluded.company, "
-                "email=excluded.email, notes=excluded.notes, status=excluded.status",
+                "email=excluded.email, notes=excluded.notes, "
+                "status=CASE "
+                "WHEN contacts.status='new' THEN excluded.status "
+                "ELSE contacts.status END",
                 (phone, name, company, email, notes, status, now)
             )
 
@@ -257,17 +260,37 @@ class CRMDatabase:
 
     def import_contacts_from_list(self, rows: list[dict]) -> tuple[int, int]:
         added = skipped = 0
-        for r in rows:
-            try:
-                self.upsert_contact(
-                    phone=r.get("phone", ""),
-                    name=r.get("name", ""),
-                    company=r.get("company", ""),
-                    email=r.get("email", ""),
-                )
-                added += 1
-            except Exception:
-                skipped += 1
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as c:
+            for r in rows:
+                try:
+                    phone = str(r.get("phone", "")).strip()
+                    if not phone:
+                        skipped += 1
+                        continue
+                    c.execute(
+                        "INSERT INTO contacts "
+                        "(phone,name,company,email,notes,status,created_at) "
+                        "VALUES (?,?,?,?,?,?,?) "
+                        "ON CONFLICT(phone) DO UPDATE SET "
+                        "name=excluded.name, company=excluded.company, "
+                        "email=excluded.email, notes=excluded.notes, "
+                        "status=CASE "
+                        "WHEN contacts.status='new' THEN excluded.status "
+                        "ELSE contacts.status END",
+                        (
+                            phone,
+                            str(r.get("name", "") or ""),
+                            str(r.get("company", "") or ""),
+                            str(r.get("email", "") or ""),
+                            str(r.get("notes", "") or ""),
+                            str(r.get("status", "new") or "new"),
+                            now,
+                        ),
+                    )
+                    added += 1
+                except Exception:
+                    skipped += 1
         return added, skipped
 
     # ── Call records ──────────────────────────────────────────────────────────
@@ -282,6 +305,19 @@ class CRMDatabase:
                 "(user_id,phone,contact_name,status,duration_s,slot_id,timestamp) "
                 "VALUES (?,?,?,?,?,?,?)",
                 (user_id, phone, contact_name, status, duration_s, slot_id, now)
+            )
+            c.execute(
+                "INSERT INTO contacts (phone,name,status,last_called,created_at) "
+                "VALUES (?,?,?,?,?) "
+                "ON CONFLICT(phone) DO UPDATE SET "
+                "last_called=excluded.last_called, "
+                "status=CASE "
+                "WHEN contacts.status IN ('new','called') THEN 'called' "
+                "ELSE contacts.status END, "
+                "name=CASE "
+                "WHEN contacts.name='' THEN excluded.name "
+                "ELSE contacts.name END",
+                (phone, contact_name, "called", now, now),
             )
         # Also write to CSV for compatibility
         self._append_csv(now, phone, status)

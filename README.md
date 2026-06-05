@@ -1,6 +1,6 @@
-# Indus Transports — Auto Dialer Pro
+# FT Solutions — Auto Dialer Pro
 
-Professional Windows desktop dialer for Indus Transports LLC. Agents use a simple branded app while Google Voice runs in the background on each line.
+Professional Windows desktop dialer for FT Solutions. Agents use a simple branded app while Google Voice runs in the background on each line.
 
 ## Who uses what
 
@@ -28,7 +28,7 @@ Use this when you configure everything on **your** machine and deliver a ready f
 1. Complete Google Voice setup in **Settings**.
 2. **Administration** → **Export client package…**
 3. Enter the client’s name, login email, and password (8+ characters).
-4. Choose a save location (e.g. Desktop). You get a folder like `IndusTransports_AutoDialer_Client` with:
+4. Choose a save location (e.g. Desktop). You get a folder like `FTSolutions_AutoDialer_Client` with:
    - `dialer_config.json` (`deployment_mode: client`)
    - `logs/crm.sqlite3` (single agent account)
    - `data/gv_accounts.json` and `chrome_profiles/` (signed-in voice lines)
@@ -54,7 +54,8 @@ If the client sees “Workstation not configured”, the `logs` folder from the 
 - Light, client-ready interface
 - Hidden Google Voice browser per line (`QWebEngineView`)
 - **Automatic sign-in** using saved email/password and persistent profiles
-- **Listen** on any line — hear the call through your speakers
+- **Live browser panel** on any line — hear and talk through the embedded Google Voice call
+- **Test call** on every line — place one manual call without starting a campaign
 - Live status: Waiting, Ringing, On call, Voicemail
 - Excel contact import, call timeout, voicemail auto-hangup
 - Local CRM and call history
@@ -109,13 +110,13 @@ Passwords are stored only in `data/gv_accounts.json` on this PC (not committed t
 3. Confirm each line shows **Ready** on **Live Calls**
 4. **Start dialing**
 5. On **Live Calls**:
-   - **On call** — talk (use **Listen** to hear that line)
+   - **On call** — the answered line highlights and opens its embedded browser panel so the agent can talk
    - **Voicemail** — app hangs up and moves on automatically
    - **Next number** / **End call** — manual control
 
-## Listen to a line
+## Live line panel
 
-On **Live Calls**, click **Listen** on any line. A monitor window opens the Google Voice view for that line so audio plays through your computer. Close the monitor when done; dialing continues in the background.
+On **Live Calls**, click **Listen** on any line to open its embedded Google Voice view. When a person answers, the app automatically switches to **Live Calls**, highlights the picked-up line, and opens that same panel. Use the panel to talk through the computer mic/speakers, then choose **Release slot / next** or **End call**.
 
 ## Reliability (watchdog, retries, logging)
 
@@ -152,7 +153,7 @@ The app reads the Google Voice web page (not AI audio). Each ~600ms:
 python build_exe.py
 ```
 
-Output: `dist/IndusTransports_AutoDialer.exe`
+Output: `dist/FTSolutions_AutoDialer.exe`
 
 ## Data on disk (do not share)
 

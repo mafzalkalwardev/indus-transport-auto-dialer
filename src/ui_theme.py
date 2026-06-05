@@ -1,4 +1,4 @@
-"""Client-ready UI themes for Indus Transports Auto Dialer."""
+"""Client-ready UI themes for FT Solutions Auto Dialer."""
 
 # Human-readable call status labels (not developer jargon)
 STATUS_LABELS = {

@@ -1,5 +1,5 @@
 """
-Build script — INDUS TRANSPORTS LLC Auto Dialer Pro
+Build script - FT Solutions Auto Dialer Pro
 Run: python build_exe.py
 """
 import json
@@ -18,7 +18,7 @@ DEPS = [
 ]
 
 print("=" * 60)
-print("  INDUS TRANSPORTS LLC — Auto Dialer Pro  |  Build")
+print("  FT Solutions - Auto Dialer Pro  |  Build")
 print("=" * 60)
 print("\n📦 Installing dependencies…")
 for dep in DEPS:
@@ -42,7 +42,7 @@ if not os.path.exists("dialer_config.json"):
     print("\n✅ Created default dialer_config.json")
 
 # ICO from logo PNG
-LOGO_PNG = "Indus_Transports_LLC__1_-removebg-preview (1).png"
+LOGO_PNG = "ftsolutionslogo.jpg"
 LOGO_ICO = "logo.ico"
 icon_arg = []
 if os.path.exists(LOGO_PNG):
@@ -68,7 +68,7 @@ sep = ";" if os.name == "nt" else ":"
 # PyQt6 WebEngine needs special hooks
 cmd = [
     "pyinstaller", "--onefile", "--windowed",
-    "--name", "IndusTransports_AutoDialer",
+    "--name", "FTSolutions_AutoDialer",
     f"--add-data=dialer_config.json{sep}.",
     f"--add-data=src{sep}src",
     "--hidden-import=PyQt6.QtWebEngineWidgets",
@@ -81,7 +81,7 @@ cmd = [
     "--collect-all=PyQt6",
     "--collect-all=PyQt6.QtWebEngineWidgets",
 ]
-for logo in (LOGO_PNG, "Indus Transports LLC (1).jpeg"):
+for logo in (LOGO_PNG,):
     if os.path.exists(logo):
         cmd.append(f"--add-data={logo}{sep}.")
 if icon_arg:
@@ -94,7 +94,7 @@ print()
 if result.returncode == 0:
     print("=" * 60)
     print("  ✅  BUILD SUCCESSFUL")
-    print("  📁  dist/IndusTransports_AutoDialer.exe")
+    print("  📁  dist/FTSolutions_AutoDialer.exe")
     print("=" * 60)
 else:
     print("❌  Build failed — check output above.")

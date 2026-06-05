@@ -1,4 +1,4 @@
-"""Centralised path constants for INDUS TRANSPORTS LLC Auto Dialer Pro."""
+"""Centralised path constants for FT Solutions Auto Dialer Pro."""
 import os
 
 # Project root = parent of src/
@@ -12,8 +12,8 @@ CRM_DB       = os.path.join(LOGS_DIR, "crm.sqlite3")
 CALL_LOG_CSV = os.path.join(LOGS_DIR, "call_logs.csv")
 CONFIG_FILE  = os.path.join(ROOT, "dialer_config.json")
 
-LOGO_PNG  = os.path.join(ROOT, "Indus_Transports_LLC__1_-removebg-preview (1).png")
-LOGO_JPEG = os.path.join(ROOT, "Indus Transports LLC (1).jpeg")
+LOGO_PNG  = os.path.join(ROOT, "ftsolutionslogo.jpg")
+LOGO_JPEG = os.path.join(ROOT, "ftsolutionslogo.jpg")
 
 # Ensure runtime dirs exist
 for _d in (CHROME_PROFILES_DIR, LOGS_DIR, DATA_DIR):
