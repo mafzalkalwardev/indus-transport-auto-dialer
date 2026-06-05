@@ -27,11 +27,15 @@ from PyQt6.QtWebEngineWidgets import QWebEngineView
 GV_URL       = "https://voice.google.com/u/0/calls"
 GV_CALLS_URL = GV_URL
 from src.call_state_engine import CallStateEngine
+from src.call_audio_monitor import CallAudioMonitor
+from src.call_decision_engine import CallDecisionEngine
+from src.local_call_detector import DetectionConfig
 from src.gv_accounts import (
     SESSION_MARKER,
     has_session_marker,
     session_marker_path,
 )
+from src.paths import CONFIG_FILE
 
 SIGNIN_URL = (
     "https://accounts.google.com/signin/v2/identifier"
@@ -422,12 +426,18 @@ def _js_dial(phone: str) -> str:
 
   function findCallButton(){{
     var buttons=Array.from(document.querySelectorAll('button,[role="button"],gv-icon-button'));
+    var input=findNumberInput();
     for(var i=0;i<buttons.length;i++){{
       var btn=buttons[i];
       var aria=(btn.getAttribute('aria-label')||'').toLowerCase();
       var text=(btn.innerText||btn.textContent||'').trim().toLowerCase();
       if(!visible(btn) || btn.disabled) continue;
       if(aria.indexOf('end')!==-1 || aria.indexOf('video')!==-1) continue;
+      if(input){{
+        var br=btn.getBoundingClientRect(), ir=input.getBoundingClientRect();
+        var nearInput=Math.abs((br.top+br.bottom)/2 - (ir.top+ir.bottom)/2) < 180;
+        if(!nearInput && text==='call') continue;
+      }}
       if(aria.indexOf('call +')===0 || (text==='call' && aria.indexOf('call')===0)){{
         return btn;
       }}
@@ -470,7 +480,9 @@ def _js_dial(phone: str) -> str:
     return window.__gvDialStatus;
   }}
   btn.click();
-  window.__gvDialStatus='call_button_clicked';
+  var clickedAria=(btn.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim();
+  var clickedText=(btn.innerText||btn.textContent||'').replace(/\\s+/g,' ').trim();
+  window.__gvDialStatus='call_button_clicked|aria='+clickedAria.slice(0,80)+'|text='+clickedText.slice(0,80);
   return window.__gvDialStatus;
 }})();
 """
@@ -491,6 +503,8 @@ class GVController(QObject):
     log_message      = pyqtSignal(int, str)    # (slot_id, msg)
     heartbeat        = pyqtSignal(int)         # slot_id — poll / page alive
 
+    detection_update = pyqtSignal(int, dict)   # (slot_id, debug)
+
     def __init__(self, slot_id: int, profile_dir: str, parent: QObject = None,
                  profile_key: str = "", login_email: str = "",
                  login_password: str = ""):
@@ -500,6 +514,18 @@ class GVController(QObject):
         self._state      = "IDLE"
         self._ctrl_count = 0   # debounce for answered-controls
         self._call_state_engine = CallStateEngine()
+        self._runtime_cfg = self._load_runtime_cfg()
+        audio_enabled = bool(self._runtime_cfg.get("enable_ai_audio", True))
+        self._decision_engine = CallDecisionEngine(
+            detector_config=DetectionConfig(
+                max_ring_seconds=float(self._runtime_cfg.get("call_timeout", 60)),
+                enable_audio_detection=audio_enabled,
+            )
+        )
+        self._audio_monitor = CallAudioMonitor(
+            enabled=audio_enabled,
+            device=self._runtime_cfg.get("audio_device", None),
+        )
         self._logged_in  = False
         self._login_email = login_email
         self._login_password = login_password
@@ -523,7 +549,7 @@ class GVController(QObject):
 
         self._page = QWebEnginePage(self._profile)
         self._page.featurePermissionRequested.connect(self._grant_permission)
-        self._page.setAudioMuted(True)
+        self._page.setAudioMuted(not audio_enabled)
 
         # Disable JS console noise appearing in our log
         self._page.javaScriptConsoleMessage = lambda *_: None
@@ -539,6 +565,13 @@ class GVController(QObject):
             QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
         settings.setAttribute(
             QWebEngineSettings.WebAttribute.AllowGeolocationOnInsecureOrigins, True)
+        playback_attr = getattr(
+            QWebEngineSettings.WebAttribute,
+            "PlaybackRequiresUserGesture",
+            None,
+        )
+        if playback_attr is not None:
+            settings.setAttribute(playback_attr, False)
 
         self.view = QWebEngineView()
         self.view.setPage(self._page)
@@ -574,11 +607,20 @@ class GVController(QObject):
         self._dial_started_at = 0.0
         self._dial_stuck_timer: QTimer | None = None
         self._pending_dial_phone = ""
+        self._current_call_phone = ""
         self._dial_step_attempts = 0
         self._call_clicked_at = 0.0
         self._min_answer_seconds = 10.0
 
     # ── Public API ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _load_runtime_cfg() -> dict:
+        try:
+            with open(CONFIG_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
 
     def clear_http_cache(self) -> None:
         """Reduce WebEngine disk/memory pressure between long campaigns."""
@@ -641,6 +683,8 @@ class GVController(QObject):
     def set_audio_muted(self, muted: bool) -> None:
         if not self._page_alive():
             return
+        if muted and self._active_call and bool(self._runtime_cfg.get("enable_ai_audio", True)):
+            return
         self._page.setAudioMuted(muted)
 
     def load(self, for_setup: bool = False) -> None:
@@ -699,6 +743,7 @@ class GVController(QObject):
         self._vm_count = 0
         self._idle_count = 0
         self._active_call = False
+        self._decision_engine.stop_call()
 
     def dial(self, phone: str) -> None:
         if not self._page_alive():
@@ -706,12 +751,16 @@ class GVController(QObject):
         self._emit_log(f"Dialing {phone}…")
         self._active_call = True
         self._pending_dial_phone = phone
+        self._current_call_phone = phone
         self._dial_step_attempts = 0
         self._dial_started_at = time.monotonic()
         self._vm_count = 0
         self._idle_count = 0
         self._ctrl_count = 0
+        self._decision_engine.start_call()
         self._set_state("DIALING")
+        if audio_enabled := bool(self._runtime_cfg.get("enable_ai_audio", True)):
+            self._page.setAudioMuted(False)
         self._page.runJavaScript(_JS_FORCE_VISIBLE)
         self._ensure_calls_page_then_dial()
         # Poll early and often while headless (DOM still updates)
@@ -747,7 +796,7 @@ class GVController(QObject):
     def _on_dial_step_result(self, status: str) -> None:
         status = status or "unknown"
         self._emit_log(f"Dial UI status: {status}")
-        if status == "call_button_clicked":
+        if status.startswith("call_button_clicked"):
             self._call_clicked_at = time.monotonic()
             self._pending_dial_phone = ""
             return
@@ -777,13 +826,16 @@ class GVController(QObject):
         if self._active_call:
             self._poll_state()
 
-    def hangup(self) -> None:
+    def hangup(self, *, manual: bool = False) -> None:
         if not self._page_alive():
             return
         self._active_call = False
         self._page.runJavaScript(_JS_HANGUP, lambda r: self._emit_log(
             f"Hangup: {r}"))
         self.stop_polling()
+        if manual:
+            self._set_state("ENDED_MANUALLY")
+        self._current_call_phone = ""
         QTimer.singleShot(1000, lambda: self._set_state("IDLE"))
 
     def run_js(self, js: str,
@@ -942,9 +994,62 @@ class GVController(QObject):
         self._page.runJavaScript(_JS_DETECT_STATE, self._on_poll_result)
 
     def _on_poll_result(self, raw: object) -> None:
+        if not self._active_call and self._state in {"NO_ANSWER", "ENDED", "ENDED_MANUALLY", "FAILED", "BUSY"}:
+            return
         self._pulse_heartbeat()
         decision = self._call_state_engine.classify(raw)
-        state = decision.state or "IDLE"
+        dom_payload = decision.evidence if isinstance(decision.evidence, dict) else {}
+        dom_payload["state"] = decision.state or "IDLE"
+        audio_features = self._audio_monitor.poll()
+        elapsed = time.monotonic() - self._dial_started_at if self._dial_started_at else 0.0
+        fused = self._decision_engine.update(
+            dom_evidence=dom_payload,
+            audio_features=audio_features,
+            elapsed_seconds=elapsed,
+        )
+        fused_state = fused.state or decision.state or "IDLE"
+        state = {
+            "HUMAN": "CONNECTED",
+            "ANSWERED_PENDING": "RINGING",
+        }.get(fused_state, fused_state)
+        debug = {
+            "phone": self._current_call_phone or self._pending_dial_phone,
+            "slot": self.slot_id,
+            "elapsed": round(elapsed, 2),
+            "dom_state": decision.state,
+            "call_text": str(dom_payload.get("callText", ""))[:500],
+            "has_ringing_text": bool(dom_payload.get("hasRingingText", False)),
+            "has_ringing_node": bool(dom_payload.get("hasRingingNode", False)),
+            "has_timer": bool(dom_payload.get("hasTimer", False)),
+            "timer_text": str(dom_payload.get("timerText", "")),
+            "audio_state": fused.debug.get("audio_state") or self._audio_state_from_features(audio_features),
+            "fused_state": fused_state,
+            "confidence": round(float(fused.confidence), 3),
+            "reason": fused.reason,
+            "rms": float(getattr(audio_features, "rms", 0.0) or 0.0),
+            "ringback": float(getattr(audio_features, "ringback_cadence_confidence", 0.0) or 0.0),
+            "speech_duration": float(getattr(audio_features, "speech_duration_seconds", 0.0) or 0.0),
+            "silence_duration": float(getattr(audio_features, "silence_duration_seconds", 0.0) or 0.0),
+            "beep_detected": bool(getattr(audio_features, "beep_detected", False)),
+            "human_greeting_detected": bool(getattr(audio_features, "human_greeting_detected", False)),
+            "voicemail_confirmations": int(
+                fused.debug.get("voicemail_confirmation_count")
+                or fused.debug.get("voicemail_confirm_count")
+                or 0
+            ),
+            "should_hangup": fused_state in {"VOICEMAIL", "NO_ANSWER", "BUSY", "FAILED"},
+            "audio_backend": getattr(audio_features, "backend_status", "OFF"),
+            "audio_backend_name": getattr(audio_features, "backend_name", ""),
+            "audio_reason": getattr(audio_features, "reason", ""),
+            "vad_backend": getattr(audio_features, "vad_backend", ""),
+            "vad_confidence": float(getattr(audio_features, "vad_confidence", 0.0) or 0.0),
+        }
+        self.detection_update.emit(self.slot_id, debug)
+        if bool(self._runtime_cfg.get("live_debug_mode", False)):
+            self._emit_call_debug(debug)
+
+        if self._active_call and decision.state == "IDLE" and fused_state == "UNKNOWN":
+            state = "IDLE"
 
         if state == "IDLE" and self._active_call:
             if self._state == "CONNECTED":
@@ -997,7 +1102,7 @@ class GVController(QObject):
         else:
             self._ctrl_count = 0
 
-        if raw_state == "CONNECTED" and not answer_window_ready:
+        if raw_state == "CONNECTED" and not answer_window_ready and fused_state != "HUMAN":
             state = "RINGING" if self._state != "CONNECTED" else "CONNECTED"
 
         if state == "CONNECTED" and self._state != "CONNECTED":
@@ -1019,8 +1124,36 @@ class GVController(QObject):
         # Auto-stop polling once a terminal state is reached
         if state == "VOICEMAIL":
             self.stop_polling()
+        elif state == "BUSY":
+            self.stop_polling()
         elif state == "IDLE" and not self._active_call:
             self.stop_polling()
+
+    @staticmethod
+    def _audio_state_from_features(features: object) -> str:
+        if float(getattr(features, "busy_tone_cadence_confidence", 0.0) or 0.0) >= 0.8:
+            return "BUSY"
+        if float(getattr(features, "ringback_cadence_confidence", 0.0) or 0.0) >= 0.65:
+            return "RINGING"
+        if bool(getattr(features, "beep_detected", False)):
+            return "BEEP"
+        if bool(getattr(features, "has_speech_like", False)):
+            return "SPEECH"
+        if bool(getattr(features, "is_silent", True)):
+            return "SILENCE"
+        return "NOISE"
+
+    def _emit_call_debug(self, debug: dict) -> None:
+        lines = ["[CALL DEBUG]"]
+        for key in (
+            "phone", "slot", "elapsed", "dom_state", "audio_state",
+            "fused_state", "confidence", "reason", "rms", "ringback",
+            "speech_duration", "silence_duration", "beep_detected",
+            "human_greeting_detected", "voicemail_confirmations",
+            "should_hangup", "audio_backend_name", "vad_backend", "vad_confidence",
+        ):
+            lines.append(f"{key}={debug.get(key)}")
+        self._emit_log("\n".join(lines))
 
     def _set_state(self, state: str) -> None:
         if state != self._state:

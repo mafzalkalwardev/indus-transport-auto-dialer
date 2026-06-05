@@ -11,7 +11,7 @@ import re
 from typing import Any
 
 
-VOICEMAIL_PHRASES = (
+STRONG_VOICEMAIL_PHRASES = (
     "leave a message",
     "leave your message",
     "leave your name and number",
@@ -65,6 +65,14 @@ VOICEMAIL_PHRASES = (
     "please try your call again later",
 )
 
+WEAK_VOICEMAIL_PHRASES = (
+    "you have reached",
+    "not available",
+    "unavailable",
+    "call you back",
+    "try your call again",
+)
+
 VOICEMAIL_PATTERNS = (
     re.compile(r"hi[, ]+this is .{0,80}(not available|unavailable|leave)", re.I),
     re.compile(r"this is .{0,80}(voicemail|not available|unavailable|leave)", re.I),
@@ -97,9 +105,6 @@ class CallStateEngine:
         state = str(evidence.get("state") or "IDLE").upper()
         text = self._normalize(str(evidence.get("callText") or ""))
 
-        if self._is_voicemail(text) or evidence.get("hasVoicemailCue"):
-            return CallStateDecision("VOICEMAIL", "voicemail phrase/cue", evidence)
-
         has_ringing = bool(evidence.get("hasRingingText") or evidence.get("hasRingingNode"))
         has_timer = bool(evidence.get("hasTimer"))
         has_enabled_answer_control = bool(evidence.get("hasEnabledAnswerControl"))
@@ -108,6 +113,11 @@ class CallStateEngine:
         # still says Calling. Do not promote that to pickup.
         if has_ringing and not has_timer:
             return CallStateDecision("RINGING", "ringing/calling text still visible", evidence)
+
+        if self._is_strong_voicemail(text) or (
+            evidence.get("hasVoicemailCue") and not self._is_weak_only(text)
+        ):
+            return CallStateDecision("VOICEMAIL", "strong voicemail phrase/cue", evidence)
 
         if state == "CONNECTED" and has_timer:
             return CallStateDecision("CONNECTED", "live call timer", evidence)
@@ -124,12 +134,17 @@ class CallStateEngine:
             return CallStateDecision("RINGING", "ringing text fallback", evidence)
         return CallStateDecision("RINGING", "in-call state without pickup evidence", evidence)
 
-    def _is_voicemail(self, text: str) -> bool:
+    def _is_strong_voicemail(self, text: str) -> bool:
         if not text:
             return False
-        if any(phrase in text for phrase in VOICEMAIL_PHRASES):
+        if any(phrase in text for phrase in STRONG_VOICEMAIL_PHRASES):
             return True
         return any(pattern.search(text) for pattern in VOICEMAIL_PATTERNS)
+
+    def _is_weak_only(self, text: str) -> bool:
+        if not text:
+            return False
+        return any(phrase in text for phrase in WEAK_VOICEMAIL_PHRASES) and not self._is_strong_voicemail(text)
 
     @staticmethod
     def _normalize(text: str) -> str:

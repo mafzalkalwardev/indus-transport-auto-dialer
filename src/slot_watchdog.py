@@ -17,7 +17,17 @@ def webengine_total_memory_mb() -> int:
     except ImportError:
         return 0
     total = 0
-    for proc in psutil.process_iter(["name", "memory_info"]):
+    try:
+        processes = psutil.process_iter(["name", "memory_info"])
+    except (
+        psutil.NoSuchProcess,
+        psutil.AccessDenied,
+        getattr(psutil, "ZombieProcess", psutil.NoSuchProcess),
+        PermissionError,
+        OSError,
+    ):
+        return 0
+    for proc in processes:
         try:
             name = (proc.info.get("name") or "").lower()
             if "qtwebengine" in name or (
@@ -26,7 +36,13 @@ def webengine_total_memory_mb() -> int:
                 mi = proc.info.get("memory_info")
                 if mi:
                     total += int(mi.rss / (1024 * 1024))
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except (
+            psutil.NoSuchProcess,
+            psutil.AccessDenied,
+            getattr(psutil, "ZombieProcess", psutil.NoSuchProcess),
+            PermissionError,
+            OSError,
+        ):
             continue
     return total
 
@@ -124,7 +140,10 @@ class SlotWatchdog(QObject):
         mem_high = mem_mb > self.memory_limit_mb if mem_mb > 0 else False
 
         for slot_id, h in list(self._slots.items()):
-            if h.current_state in ("IDLE", "ENDED", "VOICEMAIL", "NO_ANSWER", "FAILED"):
+            if h.current_state in (
+                "IDLE", "ENDED", "ENDED_MANUALLY", "VOICEMAIL", "NO_ANSWER",
+                "BUSY", "FAILED",
+            ):
                 if mem_high and h.calls_completed > 10:
                     self._request_restart(
                         slot_id,

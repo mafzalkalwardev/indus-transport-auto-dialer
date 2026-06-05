@@ -86,10 +86,15 @@ class CRMDatabase:
                     duration_s   REAL DEFAULT 0,
                     slot_id      INTEGER DEFAULT 0,
                     session_id   TEXT DEFAULT '',
+                    final_outcome TEXT DEFAULT '',
+                    detection_reason TEXT DEFAULT '',
+                    confidence   REAL DEFAULT 0,
+                    state_history TEXT DEFAULT '',
                     timestamp    TEXT
                 );
             """)
             self._migrate_users(c)
+            self._migrate_call_records(c)
 
     def _migrate_users(self, c: sqlite3.Connection) -> None:
         cols = {
@@ -103,6 +108,20 @@ class CRMDatabase:
         for name, ddl in additions.items():
             if name not in cols:
                 c.execute(f"ALTER TABLE users ADD COLUMN {name} {ddl}")
+
+    def _migrate_call_records(self, c: sqlite3.Connection) -> None:
+        cols = {
+            r["name"] for r in c.execute("PRAGMA table_info(call_records)").fetchall()
+        }
+        additions = {
+            "final_outcome": "TEXT DEFAULT ''",
+            "detection_reason": "TEXT DEFAULT ''",
+            "confidence": "REAL DEFAULT 0",
+            "state_history": "TEXT DEFAULT ''",
+        }
+        for name, ddl in additions.items():
+            if name not in cols:
+                c.execute(f"ALTER TABLE call_records ADD COLUMN {name} {ddl}")
 
     # ── Admin setup ───────────────────────────────────────────────────────────
 
@@ -297,14 +316,22 @@ class CRMDatabase:
 
     def log_call(self, user_id: int, phone: str, status: str,
                  contact_name: str = "", duration_s: float = 0.0,
-                 slot_id: int = 0) -> None:
+                 slot_id: int = 0, detection_reason: str = "",
+                 confidence: float = 0.0, state_history: str = "",
+                 final_outcome: str = "") -> None:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        final_outcome = final_outcome or status
         with self._conn() as c:
             c.execute(
                 "INSERT INTO call_records "
-                "(user_id,phone,contact_name,status,duration_s,slot_id,timestamp) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (user_id, phone, contact_name, status, duration_s, slot_id, now)
+                "(user_id,phone,contact_name,status,duration_s,slot_id,"
+                "final_outcome,detection_reason,confidence,state_history,timestamp) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    user_id, phone, contact_name, status, duration_s, slot_id,
+                    final_outcome, detection_reason, float(confidence or 0.0),
+                    state_history, now,
+                )
             )
             c.execute(
                 "INSERT INTO contacts (phone,name,status,last_called,created_at) "
@@ -320,16 +347,23 @@ class CRMDatabase:
                 (phone, contact_name, "called", now, now),
             )
         # Also write to CSV for compatibility
-        self._append_csv(now, phone, status)
+        self._append_csv(now, phone, status, detection_reason, confidence)
 
-    def _append_csv(self, ts: str, phone: str, status: str) -> None:
+    def _append_csv(
+        self,
+        ts: str,
+        phone: str,
+        status: str,
+        detection_reason: str = "",
+        confidence: float = 0.0,
+    ) -> None:
         exists = os.path.isfile(CALL_LOG_CSV)
         try:
             with open(CALL_LOG_CSV, "a", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
                 if not exists:
-                    w.writerow(["Time", "Phone", "Status"])
-                w.writerow([ts, phone, status])
+                    w.writerow(["Time", "Phone", "Status", "Reason", "Confidence"])
+                w.writerow([ts, phone, status, detection_reason, confidence])
         except Exception:
             pass
 

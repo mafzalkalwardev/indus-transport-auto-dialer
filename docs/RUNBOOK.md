@@ -59,6 +59,45 @@ The **watchdog** restarts a line when:
 - After max retries, status **FAILED** is logged in CRM/Logs.
 - Retries run automatically; do not stop the campaign unless necessary.
 
+## AI audio detection
+
+Settings:
+
+- `enable_ai_audio`: enable local audio fusion.
+- `audio_device`: blank uses default output loopback, or set a device index from `scripts/audio_device_test.py`.
+- `live_debug_mode`: prints `[CALL DEBUG]` blocks during live polling.
+
+Device test:
+
+```bash
+python scripts/audio_device_test.py
+python scripts/audio_device_test.py --device 14 --seconds 2
+```
+
+Expected statuses:
+
+- **AI Audio: ON** - local capture is active.
+- **AI Audio: NO BACKEND** - sounddevice/PortAudio or the selected device cannot capture; DOM detection still runs.
+- **AI Audio: OFF** - audio detection disabled in settings.
+
+Voicemail guardrails:
+
+- Ringing never becomes voicemail directly.
+- Voicemail requires answer evidence, at least 7 seconds after answer, high confidence, stable confirmations, and at least two strong signals.
+- Short hello, short speech burst, or hello with background noise is treated as human or answered-pending, never voicemail.
+- Background noise alone stays answered-pending.
+
+Live test checklist:
+
+1. Run `python scripts/audio_device_test.py` and confirm **AI Audio: ON**.
+2. Configure one Google Voice account per simultaneous test number.
+3. Enable `live_debug_mode` in `dialer_config.json` or Settings.
+4. Run `python scripts/live_call_smoke.py`.
+5. Check the JSON report under `logs/`.
+6. Confirm each `[CALL DEBUG]` block has `dom_state`, `audio_state`, `fused_state`, `confidence`, `reason`, and `should_hangup`.
+
+With no numbers passed, `python scripts/live_call_smoke.py` loads fresh CRM contacts and caps the run to the configured Google Voice account count. You can force the CRM path with `python scripts/live_call_smoke.py --from-crm --crm-limit 2`.
+
 ## Long campaigns (1000+ numbers, 8 slots)
 
 1. Generate list: `python scripts/generate_load_test_list.py`

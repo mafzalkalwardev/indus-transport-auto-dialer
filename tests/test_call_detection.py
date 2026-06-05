@@ -19,6 +19,7 @@ class DummyAudio:
         short_speech_burst_detected=False,
         continuous_greeting_duration_seconds=0.0,
         beep_detected=False,
+        busy_tone_cadence_confidence=0.0,
     ):
         self.rms = rms
         self.is_silent = is_silent
@@ -33,6 +34,7 @@ class DummyAudio:
         self.short_speech_burst_detected = short_speech_burst_detected
         self.continuous_greeting_duration_seconds = continuous_greeting_duration_seconds
         self.beep_detected = beep_detected
+        self.busy_tone_cadence_confidence = busy_tone_cadence_confidence
 
 
 
@@ -203,6 +205,28 @@ def test_browser_error_becomes_failed():
     assert decision.state == DecisionState.FAILED.value
 
 
+def test_busy_tone_becomes_busy():
+    det = LocalCallDetector(DetectionConfig())
+    dom = {"state": "RINGING", "hasRingingText": False, "hasRingingNode": False}
+    audio = DummyAudio(
+        rms=0.2,
+        is_silent=False,
+        busy_tone_cadence_confidence=0.9,
+    )
+    decision = det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=5)
+    assert decision.state == DecisionState.BUSY.value
+
+
+def test_manual_end_becomes_ended_manually():
+    det = LocalCallDetector(DetectionConfig())
+    decision = det.decide(
+        dom_evidence={"state": "ENDED_MANUALLY"},
+        audio_features=DummyAudio(),
+        elapsed_seconds=5,
+    )
+    assert decision.state == DecisionState.ENDED_MANUALLY.value
+
+
 def test_final_outcome_only_once():
     cfg = DetectionConfig(max_ring_seconds=55, voicemail_confirmation_count=1)
     det = LocalCallDetector(cfg)
@@ -212,4 +236,23 @@ def test_final_outcome_only_once():
     d2 = det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=21)
     assert d1.state == d2.state
     assert d1.state == DecisionState.ENDED.value
+
+
+def test_watchdog_access_denied_does_not_crash(monkeypatch):
+    import src.slot_watchdog as watchdog
+
+    class FakePsutil:
+        class AccessDenied(Exception):
+            pass
+        class NoSuchProcess(Exception):
+            pass
+        class ZombieProcess(Exception):
+            pass
+
+        @staticmethod
+        def process_iter(_attrs):
+            raise FakePsutil.AccessDenied()
+
+    monkeypatch.setitem(__import__("sys").modules, "psutil", FakePsutil)
+    assert watchdog.webengine_total_memory_mb() == 0
 
