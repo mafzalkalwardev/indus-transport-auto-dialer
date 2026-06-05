@@ -592,6 +592,7 @@ class GVController(QObject):
         self._dial_started_at = 0.0
         self._dial_stuck_timer: QTimer | None = None
         self._pending_dial_phone = ""
+        self._current_call_phone = ""
         self._dial_step_attempts = 0
         self._call_clicked_at = 0.0
         self._min_answer_seconds = 10.0
@@ -733,6 +734,7 @@ class GVController(QObject):
         self._emit_log(f"Dialing {phone}…")
         self._active_call = True
         self._pending_dial_phone = phone
+        self._current_call_phone = phone
         self._dial_step_attempts = 0
         self._dial_started_at = time.monotonic()
         self._vm_count = 0
@@ -814,6 +816,7 @@ class GVController(QObject):
         self.stop_polling()
         if manual:
             self._set_state("ENDED_MANUALLY")
+        self._current_call_phone = ""
         QTimer.singleShot(1000, lambda: self._set_state("IDLE"))
 
     def run_js(self, js: str,
@@ -989,7 +992,7 @@ class GVController(QObject):
             "ANSWERED_PENDING": "RINGING",
         }.get(fused_state, fused_state)
         debug = {
-            "phone": self._pending_dial_phone,
+            "phone": self._current_call_phone or self._pending_dial_phone,
             "slot": self.slot_id,
             "elapsed": round(elapsed, 2),
             "dom_state": decision.state,
@@ -1016,6 +1019,9 @@ class GVController(QObject):
         self.detection_update.emit(self.slot_id, debug)
         if bool(self._runtime_cfg.get("live_debug_mode", False)):
             self._emit_call_debug(debug)
+
+        if self._active_call and decision.state == "IDLE" and fused_state == "UNKNOWN":
+            state = "IDLE"
 
         if state == "IDLE" and self._active_call:
             if self._state == "CONNECTED":

@@ -169,9 +169,10 @@ Live smoke test:
 
 ```bash
 python scripts/live_call_smoke.py
+python scripts/live_call_smoke.py --from-crm --crm-limit 2
 ```
 
-The smoke script requires at least one configured Google Voice account per test number. It prints `[CALL DEBUG]` blocks and writes a JSON report under `logs/`.
+With no numbers passed, the smoke script loads fresh CRM contacts and caps the run to the configured Google Voice account count. It prints `[CALL DEBUG]` blocks and writes a JSON report under `logs/`.
 
 Final call logs include one row per call with final outcome, detection reason, confidence, and state history.
 

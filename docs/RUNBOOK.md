@@ -96,7 +96,7 @@ Live test checklist:
 5. Check the JSON report under `logs/`.
 6. Confirm each `[CALL DEBUG]` block has `dom_state`, `audio_state`, `fused_state`, `confidence`, `reason`, and `should_hangup`.
 
-Known limitation from the latest local run: `python scripts/live_call_smoke.py` was blocked because this checkout had 2 Google Voice accounts configured for the script's 3 default test numbers. Add a third account or pass two explicit numbers to run live dialing.
+With no numbers passed, `python scripts/live_call_smoke.py` loads fresh CRM contacts and caps the run to the configured Google Voice account count. You can force the CRM path with `python scripts/live_call_smoke.py --from-crm --crm-limit 2`.
 
 ## Long campaigns (1000+ numbers, 8 slots)
 

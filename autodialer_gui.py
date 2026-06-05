@@ -319,6 +319,9 @@ class SlotCard(QGroupBox):
             reason = reason[:69] + "..."
         self.lbl_ai_decision.setText(f"Decision: {fused} ({conf}) {reason}")
 
+    def set_ai_audio_enabled(self, enabled: bool) -> None:
+        self.lbl_ai_audio.setText("AI Audio: ON" if enabled else "AI Audio: OFF")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ADMIN SETUP PAGE
@@ -1559,6 +1562,7 @@ class MainWindow(QMainWindow):
         for i in range(n):
             card = SlotCard(i)
             card.set_line_label(self._slot_label(i))
+            card.set_ai_audio_enabled(bool(self.cfg.get("enable_ai_audio", True)))
             card.next_clicked.connect(self._next_call)
             card.cut_clicked.connect(self._cut_call)
             card.listen_clicked.connect(self._open_slot_monitor)
@@ -3277,6 +3281,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "chk_live_debug"):
             self.cfg["live_debug_mode"] = self.chk_live_debug.isChecked()
         _save_cfg(self.cfg)
+        if hasattr(self, "_slot_cards"):
+            for card in self._slot_cards.values():
+                card.set_ai_audio_enabled(bool(self.cfg.get("enable_ai_audio", True)))
         QMessageBox.information(self, "Saved", "Settings saved.")
 
     # ── Utility ───────────────────────────────────────────────────────────────

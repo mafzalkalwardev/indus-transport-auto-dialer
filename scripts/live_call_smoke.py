@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import QApplication
 
 from src.gv_accounts import load_accounts, profile_dir, has_session_marker
 from src.gv_controller import GVController
-from src.paths import LOGS_DIR
+from src.paths import CRM_DB, LOGS_DIR
 from src.phone_utils import clean_phone, fmt_e164
 
 
@@ -40,6 +40,46 @@ def _parse_numbers(values: list[str]) -> list[str]:
         if not d10:
             raise SystemExit(f"Invalid phone number: {raw}")
         numbers.append(fmt_e164(d10))
+    return numbers
+
+
+def _load_crm_numbers(limit: int) -> list[str]:
+    import sqlite3
+
+    if not os.path.exists(CRM_DB):
+        raise SystemExit(f"CRM database not found: {CRM_DB}")
+    numbers: list[str] = []
+    with sqlite3.connect(CRM_DB) as con:
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            """
+            SELECT c.phone
+            FROM contacts c
+            WHERE c.phone IS NOT NULL
+              AND TRIM(c.phone) != ''
+              AND NOT EXISTS (
+                  SELECT 1 FROM call_records r
+                  WHERE r.phone = c.phone
+                    AND r.status IN ('ENDED', 'ENDED_MANUALLY', 'HUMAN', 'VOICEMAIL', 'BUSY')
+              )
+            ORDER BY
+              CASE WHEN c.status = 'new' THEN 0 ELSE 1 END,
+              CASE WHEN c.last_called IS NULL OR c.last_called = '' THEN 0 ELSE 1 END,
+              c.id DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)) * 3,),
+        ).fetchall()
+    for row in rows:
+        cleaned = clean_phone(str(row["phone"]))
+        if cleaned:
+            phone = fmt_e164(cleaned)
+            if phone not in numbers:
+                numbers.append(phone)
+        if len(numbers) >= limit:
+            break
+    if not numbers:
+        raise SystemExit("No dialable CRM contacts found.")
     return numbers
 
 
@@ -195,7 +235,7 @@ class LiveCallSmoke:
         if not rec or rec.get("final") != "PENDING":
             return
         state = self.controllers[slot].current_state
-        if state in ("DIALING", "RINGING", "IDLE"):
+        if state in ("DIALING", "RINGING", "IDLE", "UNKNOWN", "ANSWERED_PENDING"):
             rec["final"] = "NO_ANSWER"
             self.log(slot, f"NO_ANSWER after {self.call_timeout}s timeout")
             self.controllers[slot].hangup()
@@ -245,13 +285,22 @@ class LiveCallSmoke:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Dial approved live test numbers.")
     parser.add_argument("numbers", nargs="*", help="Phone numbers to dial")
+    parser.add_argument("--from-crm", action="store_true", help="Load test numbers from CRM contacts")
+    parser.add_argument("--crm-limit", type=int, default=0, help="CRM numbers to load; default is GV account count")
     parser.add_argument("--call-timeout", type=int, default=45)
     parser.add_argument("--connected-hold", type=int, default=8)
     parser.add_argument("--voicemail-hold", type=int, default=4)
     parser.add_argument("--stagger-ms", type=int, default=1200)
     args = parser.parse_args()
 
-    numbers = _parse_numbers(args.numbers or DEFAULT_NUMBERS)
+    accounts = load_accounts()
+    if args.numbers:
+        numbers = _parse_numbers(args.numbers)
+    elif args.from_crm or accounts:
+        limit = args.crm_limit or max(1, len(accounts))
+        numbers = _load_crm_numbers(limit)
+    else:
+        numbers = _parse_numbers(DEFAULT_NUMBERS)
     app = QApplication(sys.argv)
     smoke = LiveCallSmoke(
         numbers,
