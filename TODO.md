@@ -8,3 +8,8 @@
 - [ ] Step 6: Update/extend unit tests per required scenarios in `tests/test_call_detection.py`
 - [ ] Step 7: Run `pytest -q` and adjust thresholds/tests to pass
 
+# Additional plan for current fix
+- [x] Step 8: Fix “answer detected elapsed timer” so audio speech-like does not start the answer clock before DOM answer evidence
+- [ ] Step 9: Tighten VOICEMAIL candidate computation so DOM voicemail cue alone cannot satisfy 2-of-5 without audio/keyword/beep support
+- [ ] Step 10: Add unit tests covering the failure path: speech-like + intermittent voicemail cue before DOM answer control/timer
+

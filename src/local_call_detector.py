@@ -209,14 +209,21 @@ class LocalCallDetector:
         evidence = Evidence.from_dom(dom_evidence)
         af = audio_features or AudioFeatures()
 
-        # Track when we first see answer evidence (timer/answer control/audio speech-like).
+        # Track when we first see answer evidence.
+        # Critical: do NOT start the answer clock purely from audio "speech-like".
+        # In real campaigns, some audio can appear briefly before GV updates the DOM
+        # (or when UI/slots are transitioning), which causes early VOICEMAIL gating.
         timer_evidence0 = bool(getattr(evidence, "hasTimer", False))
         ctrl_evidence0 = bool(getattr(evidence, "hasEnabledAnswerControl", False))
         has_speech_like0 = bool(getattr(af, "has_speech_like", False))
         is_silent0 = bool(getattr(af, "is_silent", False))
-        answer_evidence_now = (timer_evidence0 or ctrl_evidence0) or (has_speech_like0 and not is_silent0)
-        if answer_evidence_now and self._answer_detected_elapsed_seconds is None:
+
+        # DOM-first answer evidence. Audio can influence HUMAN/VOICEMAIL later,
+        # but must not start answer_elapsed_seconds unless DOM also indicates answer stage.
+        dom_answer_evidence_now = timer_evidence0 or ctrl_evidence0
+        if dom_answer_evidence_now and self._answer_detected_elapsed_seconds is None:
             self._answer_detected_elapsed_seconds = float(elapsed_seconds)
+
 
         answer_elapsed_seconds = 0.0
         if self._answer_detected_elapsed_seconds is not None:
