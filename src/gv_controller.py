@@ -27,11 +27,15 @@ from PyQt6.QtWebEngineWidgets import QWebEngineView
 GV_URL       = "https://voice.google.com/u/0/calls"
 GV_CALLS_URL = GV_URL
 from src.call_state_engine import CallStateEngine
+from src.call_audio_monitor import CallAudioMonitor
+from src.call_decision_engine import CallDecisionEngine
+from src.local_call_detector import DetectionConfig
 from src.gv_accounts import (
     SESSION_MARKER,
     has_session_marker,
     session_marker_path,
 )
+from src.paths import CONFIG_FILE
 
 SIGNIN_URL = (
     "https://accounts.google.com/signin/v2/identifier"
@@ -491,6 +495,8 @@ class GVController(QObject):
     log_message      = pyqtSignal(int, str)    # (slot_id, msg)
     heartbeat        = pyqtSignal(int)         # slot_id — poll / page alive
 
+    detection_update = pyqtSignal(int, dict)   # (slot_id, debug)
+
     def __init__(self, slot_id: int, profile_dir: str, parent: QObject = None,
                  profile_key: str = "", login_email: str = "",
                  login_password: str = ""):
@@ -500,6 +506,18 @@ class GVController(QObject):
         self._state      = "IDLE"
         self._ctrl_count = 0   # debounce for answered-controls
         self._call_state_engine = CallStateEngine()
+        self._runtime_cfg = self._load_runtime_cfg()
+        audio_enabled = bool(self._runtime_cfg.get("enable_ai_audio", True))
+        self._decision_engine = CallDecisionEngine(
+            detector_config=DetectionConfig(
+                max_ring_seconds=float(self._runtime_cfg.get("call_timeout", 60)),
+                enable_audio_detection=audio_enabled,
+            )
+        )
+        self._audio_monitor = CallAudioMonitor(
+            enabled=audio_enabled,
+            device=self._runtime_cfg.get("audio_device", None),
+        )
         self._logged_in  = False
         self._login_email = login_email
         self._login_password = login_password
@@ -579,6 +597,14 @@ class GVController(QObject):
         self._min_answer_seconds = 10.0
 
     # ── Public API ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _load_runtime_cfg() -> dict:
+        try:
+            with open(CONFIG_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
 
     def clear_http_cache(self) -> None:
         """Reduce WebEngine disk/memory pressure between long campaigns."""
@@ -699,6 +725,7 @@ class GVController(QObject):
         self._vm_count = 0
         self._idle_count = 0
         self._active_call = False
+        self._decision_engine.stop_call()
 
     def dial(self, phone: str) -> None:
         if not self._page_alive():
@@ -711,6 +738,7 @@ class GVController(QObject):
         self._vm_count = 0
         self._idle_count = 0
         self._ctrl_count = 0
+        self._decision_engine.start_call()
         self._set_state("DIALING")
         self._page.runJavaScript(_JS_FORCE_VISIBLE)
         self._ensure_calls_page_then_dial()
@@ -777,13 +805,15 @@ class GVController(QObject):
         if self._active_call:
             self._poll_state()
 
-    def hangup(self) -> None:
+    def hangup(self, *, manual: bool = False) -> None:
         if not self._page_alive():
             return
         self._active_call = False
         self._page.runJavaScript(_JS_HANGUP, lambda r: self._emit_log(
             f"Hangup: {r}"))
         self.stop_polling()
+        if manual:
+            self._set_state("ENDED_MANUALLY")
         QTimer.singleShot(1000, lambda: self._set_state("IDLE"))
 
     def run_js(self, js: str,
@@ -944,7 +974,46 @@ class GVController(QObject):
     def _on_poll_result(self, raw: object) -> None:
         self._pulse_heartbeat()
         decision = self._call_state_engine.classify(raw)
-        state = decision.state or "IDLE"
+        dom_payload = decision.evidence if isinstance(decision.evidence, dict) else {}
+        dom_payload["state"] = decision.state or "IDLE"
+        audio_features = self._audio_monitor.poll()
+        elapsed = time.monotonic() - self._dial_started_at if self._dial_started_at else 0.0
+        fused = self._decision_engine.update(
+            dom_evidence=dom_payload,
+            audio_features=audio_features,
+            elapsed_seconds=elapsed,
+        )
+        fused_state = fused.state or decision.state or "IDLE"
+        state = {
+            "HUMAN": "CONNECTED",
+            "ANSWERED_PENDING": "RINGING",
+        }.get(fused_state, fused_state)
+        debug = {
+            "phone": self._pending_dial_phone,
+            "slot": self.slot_id,
+            "elapsed": round(elapsed, 2),
+            "dom_state": decision.state,
+            "audio_state": fused.debug.get("audio_state") or self._audio_state_from_features(audio_features),
+            "fused_state": fused_state,
+            "confidence": round(float(fused.confidence), 3),
+            "reason": fused.reason,
+            "ringback": float(getattr(audio_features, "ringback_cadence_confidence", 0.0) or 0.0),
+            "speech_duration": float(getattr(audio_features, "speech_duration_seconds", 0.0) or 0.0),
+            "silence_duration": float(getattr(audio_features, "silence_duration_seconds", 0.0) or 0.0),
+            "beep_detected": bool(getattr(audio_features, "beep_detected", False)),
+            "human_greeting_detected": bool(getattr(audio_features, "human_greeting_detected", False)),
+            "voicemail_confirmations": int(
+                fused.debug.get("voicemail_confirmation_count")
+                or fused.debug.get("voicemail_confirm_count")
+                or 0
+            ),
+            "should_hangup": fused_state in {"VOICEMAIL", "NO_ANSWER", "BUSY", "FAILED"},
+            "audio_backend": getattr(audio_features, "backend_status", "OFF"),
+            "audio_reason": getattr(audio_features, "reason", ""),
+        }
+        self.detection_update.emit(self.slot_id, debug)
+        if bool(self._runtime_cfg.get("live_debug_mode", False)):
+            self._emit_call_debug(debug)
 
         if state == "IDLE" and self._active_call:
             if self._state == "CONNECTED":
@@ -997,7 +1066,7 @@ class GVController(QObject):
         else:
             self._ctrl_count = 0
 
-        if raw_state == "CONNECTED" and not answer_window_ready:
+        if raw_state == "CONNECTED" and not answer_window_ready and fused_state != "HUMAN":
             state = "RINGING" if self._state != "CONNECTED" else "CONNECTED"
 
         if state == "CONNECTED" and self._state != "CONNECTED":
@@ -1019,8 +1088,36 @@ class GVController(QObject):
         # Auto-stop polling once a terminal state is reached
         if state == "VOICEMAIL":
             self.stop_polling()
+        elif state == "BUSY":
+            self.stop_polling()
         elif state == "IDLE" and not self._active_call:
             self.stop_polling()
+
+    @staticmethod
+    def _audio_state_from_features(features: object) -> str:
+        if float(getattr(features, "busy_tone_cadence_confidence", 0.0) or 0.0) >= 0.8:
+            return "BUSY"
+        if float(getattr(features, "ringback_cadence_confidence", 0.0) or 0.0) >= 0.65:
+            return "RINGING"
+        if bool(getattr(features, "beep_detected", False)):
+            return "BEEP"
+        if bool(getattr(features, "has_speech_like", False)):
+            return "SPEECH"
+        if bool(getattr(features, "is_silent", True)):
+            return "SILENCE"
+        return "NOISE"
+
+    def _emit_call_debug(self, debug: dict) -> None:
+        lines = ["[CALL DEBUG]"]
+        for key in (
+            "phone", "slot", "elapsed", "dom_state", "audio_state",
+            "fused_state", "confidence", "reason", "ringback",
+            "speech_duration", "silence_duration", "beep_detected",
+            "human_greeting_detected", "voicemail_confirmations",
+            "should_hangup",
+        ):
+            lines.append(f"{key}={debug.get(key)}")
+        self._emit_log("\n".join(lines))
 
     def _set_state(self, state: str) -> None:
         if state != self._state:

@@ -34,6 +34,8 @@ class DecisionState(str, Enum):
     HUMAN = "HUMAN"
     VOICEMAIL = "VOICEMAIL"
     NO_ANSWER = "NO_ANSWER"
+    BUSY = "BUSY"
+    ENDED_MANUALLY = "ENDED_MANUALLY"
     ENDED = "ENDED"
     FAILED = "FAILED"
     UNKNOWN = "UNKNOWN"
@@ -57,7 +59,7 @@ class DetectionConfig:
     # Human/voicemail heuristic thresholds.
     human_short_speech_max_duration_seconds: float = 2.5
 
-    voicemail_min_answer_elapsed_seconds: float = 6.0
+    voicemail_min_answer_elapsed_seconds: float = 7.0
 
     # Confirmation counts
     voicemail_confirmation_count: int = 3
@@ -225,6 +227,7 @@ class LocalCallDetector:
         has_speech_like = bool(_get("has_speech_like", False))
         ring_cad = float(_get("ringback_cadence_confidence", 0.0) or 0.0)
         beep_conf = float(_get("beep_hz_confidence", 0.0) or 0.0)
+        busy_conf = float(_get("busy_tone_cadence_confidence", 0.0) or 0.0)
 
         dom_state = evidence.state.upper()
 
@@ -232,6 +235,10 @@ class LocalCallDetector:
         if dom_state in ("FAILED", "ERROR", "BROWSER_CRASH"):
             self._emit(DecisionState.FAILED, 0.95, "dom indicates failure", dom_state=dom_state)
             return self._build(DecisionState.FAILED, 0.95, "dom indicates failure", dom_state=dom_state)
+
+        if dom_state in ("ENDED_MANUALLY", "MANUAL_ENDED"):
+            self._emit(DecisionState.ENDED_MANUALLY, 0.95, "manual hangup/end requested", dom_state=dom_state)
+            return self._build(DecisionState.ENDED_MANUALLY, 0.95, "manual hangup/end requested", dom_state=dom_state)
 
         # 2) ENDED when DOM says ended.
         if dom_state == "ENDED":
@@ -252,6 +259,15 @@ class LocalCallDetector:
             ringing_conf += 0.5
         if self.config.enable_audio_detection and audio_ringing:
             ringing_conf += 0.5
+
+        if self.config.enable_audio_detection and busy_conf >= 0.8 and elapsed_seconds >= 2.0:
+            self._emit(DecisionState.BUSY, 0.9, "busy tone cadence detected")
+            return self._build(
+                DecisionState.BUSY,
+                0.9,
+                "busy tone cadence detected",
+                busy_tone_cadence_confidence=busy_conf,
+            )
 
         # While ringing, never consider voicemail.
         if ringing_conf >= self.config.ringing_confidence_threshold or dom_ringing:
@@ -293,12 +309,19 @@ class LocalCallDetector:
             current_debug_base = {
                 "current_state": self._current_state.value,
                 "candidate_state": "ANSWERED_PENDING",
-                "confidence": max(0.45, min(0.9, answered_pending_conf)),
-                "reason": "answered evidence detected",
+                "debug_confidence": max(0.45, min(0.9, answered_pending_conf)),
+                "debug_reason": "answered evidence detected",
                 "speech_duration": speech_duration_seconds,
                 "silence_duration": silence_duration_seconds,
                 "ringback_detected": dom_ringing or (ring_cad >= self.config.ringing_confidence_threshold),
-                "beep_detected": beep_detected or (beep_conf >= 0.5),
+                    "beep_detected": beep_detected or (beep_conf >= 0.5),
+                    "audio_state": self._audio_state(
+                        has_speech_like=has_speech_like,
+                        ring_cad=ring_cad,
+                        beep_conf=beep_conf,
+                        busy_conf=busy_conf,
+                        is_silent=is_silent,
+                    ),
                 "human_greeting_detected": human_greeting_detected,
                 "voicemail_confirmation_count": self._voicemail_confirm_count,
             }
@@ -384,6 +407,27 @@ class LocalCallDetector:
 
         # Default fallback.
         return self._transition(DecisionState.UNKNOWN, 0.2, "insufficient evidence")
+
+    @staticmethod
+    def _audio_state(
+        *,
+        has_speech_like: bool,
+        ring_cad: float,
+        beep_conf: float,
+        busy_conf: float,
+        is_silent: bool,
+    ) -> str:
+        if busy_conf >= 0.8:
+            return "BUSY"
+        if ring_cad >= 0.65:
+            return "RINGING"
+        if beep_conf >= 0.6:
+            return "BEEP"
+        if has_speech_like:
+            return "SPEECH"
+        if is_silent:
+            return "SILENCE"
+        return "NOISE"
 
     def _classify_human_or_voicemail(
         self,

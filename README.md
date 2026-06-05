@@ -132,7 +132,7 @@ Load testing: [docs/LOAD_TEST.md](docs/LOAD_TEST.md) and `python scripts/generat
 
 ## How call detection works
 
-The app reads the Google Voice web page (not AI audio). Each ~600ms:
+The app reads Google Voice page state and fuses it with optional local AI audio features.
 
 | Status | Meaning |
 |--------|---------|
@@ -140,6 +140,40 @@ The app reads the Google Voice web page (not AI audio). Each ~600ms:
 | On call | Person answered (timer or hold/mute controls) |
 | Voicemail | Greeting / beep detected → auto hangup after configured seconds |
 | Waiting | Idle, ready for next number |
+
+## Live detection and audio
+
+The app now fuses Google Voice page evidence with local Windows audio features. It does not use Twilio, paid APIs, cloud calling APIs, or fake demo detection.
+
+Audio capture tries Windows WASAPI loopback first. If that is unavailable, it falls back to local capture devices such as Stereo Mix or VB-Cable. If no backend works, the live cards show **AI Audio: NO BACKEND** and the dialer continues with DOM-only detection.
+
+| Status | Meaning |
+|--------|---------|
+| Ringing | Outbound ring |
+| On call | Human pickup confirmed; short hello/background noise wins over voicemail |
+| Checking answer | Answer evidence exists, waiting for human vs voicemail confirmation |
+| Voicemail | Confirmed only after answer evidence, 7+ seconds, high confidence, stable signals |
+| Busy | Busy tone cadence detected |
+| No answer | Ring timeout reached |
+| Ended by operator | Manual hangup/release |
+| Waiting | Idle, ready for next number |
+
+Audio device test:
+
+```bash
+python scripts/audio_device_test.py
+python scripts/audio_device_test.py --device 14 --seconds 2
+```
+
+Live smoke test:
+
+```bash
+python scripts/live_call_smoke.py
+```
+
+The smoke script requires at least one configured Google Voice account per test number. It prints `[CALL DEBUG]` blocks and writes a JSON report under `logs/`.
+
+Final call logs include one row per call with final outcome, detection reason, confidence, and state history.
 
 ## Administration (you only)
 

@@ -30,7 +30,7 @@ DEFAULT_NUMBERS = [
     "+14044651478",
 ]
 
-TERMINAL_STATES = {"CONNECTED", "VOICEMAIL", "ENDED", "FAILED", "NO_ANSWER"}
+TERMINAL_STATES = {"CONNECTED", "VOICEMAIL", "ENDED", "ENDED_MANUALLY", "FAILED", "NO_ANSWER", "BUSY"}
 
 
 def _parse_numbers(values: list[str]) -> list[str]:
@@ -93,6 +93,7 @@ class LiveCallSmoke:
             ctrl.state_changed.connect(self.on_state)
             ctrl.login_detected.connect(lambda sid, i=idx: self.log(i, "Google Voice ready"))
             ctrl.log_message.connect(self.on_controller_log)
+            ctrl.detection_update.connect(self.on_detection)
             ctrl.load()
             self.controllers.append(ctrl)
             self.results[idx] = {
@@ -157,10 +158,24 @@ class LiveCallSmoke:
         elif state == "VOICEMAIL":
             rec["final"] = "VOICEMAIL"
             self.schedule_hangup(slot, self.voicemail_hold, "voicemail detected")
-        elif state in ("NO_ANSWER", "ENDED", "FAILED"):
+        elif state in ("NO_ANSWER", "ENDED", "ENDED_MANUALLY", "FAILED", "BUSY"):
             if rec.get("final") == "PENDING":
                 rec["final"] = state
             self.check_done()
+
+    def on_detection(self, slot: int, debug: dict) -> None:
+        rec = self.results.get(slot)
+        if rec is not None:
+            rec.setdefault("detection", []).append(debug)
+        print("[CALL DEBUG]", flush=True)
+        for key in (
+            "phone", "slot", "elapsed", "dom_state", "audio_state",
+            "fused_state", "confidence", "reason", "ringback",
+            "speech_duration", "silence_duration", "beep_detected",
+            "human_greeting_detected", "voicemail_confirmations",
+            "should_hangup",
+        ):
+            print(f"{key}={debug.get(key)}", flush=True)
 
     def schedule_hangup(self, slot: int, delay_sec: int, reason: str) -> None:
         if slot in self.pending_hangups:

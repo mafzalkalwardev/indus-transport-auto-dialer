@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QSpinBox, QDoubleSpinBox, QFileDialog, QMessageBox,
     QTextEdit, QFrame, QProgressBar, QScrollArea, QSizePolicy,
     QTabWidget, QSplitter, QGroupBox, QRadioButton, QButtonGroup,
-    QFormLayout, QAbstractItemView, QMenu, QGridLayout,
+    QFormLayout, QAbstractItemView, QMenu, QGridLayout, QCheckBox,
 )
 from PyQt6.QtCore import (
     Qt, QTimer, QSize, QUrl, pyqtSignal, QThread, QObject, QLockFile,
@@ -83,6 +83,9 @@ def _load_cfg() -> dict:
         "slot_memory_limit_mb": 700,
         "slot_recycle_after_calls": 75,
         "watchdog_check_interval_sec": 5,
+        "enable_ai_audio": True,
+        "audio_device": "",
+        "live_debug_mode": False,
     }
     if os.path.exists(CONFIG_FILE):
         try:
@@ -200,6 +203,14 @@ class SlotCard(QGroupBox):
         self.lbl_dur = _label("Call time: —", "muted")
         lay.addWidget(self.lbl_dur)
 
+        self.lbl_ai_audio = _label("AI Audio: OFF", "muted")
+        self.lbl_ai_audio.setWordWrap(True)
+        lay.addWidget(self.lbl_ai_audio)
+
+        self.lbl_ai_decision = _label("Decision: --", "muted")
+        self.lbl_ai_decision.setWordWrap(True)
+        lay.addWidget(self.lbl_ai_decision)
+
         btn_col = QVBoxLayout()
         btn_col.setSpacing(6)
 
@@ -265,7 +276,7 @@ class SlotCard(QGroupBox):
         if state == "CONNECTED":
             phone_text = phone if phone else "Answered call"
             self.lbl_pickup.setText("CALL PICKED UP - talk now")
-        elif state in ("DIALING", "RINGING", "VOICEMAIL"):
+        elif state in ("DIALING", "RINGING", "ANSWERED_PENDING", "VOICEMAIL", "BUSY"):
             phone_text = "Screening in background"
             self.lbl_pickup.setText("")
         else:
@@ -274,11 +285,11 @@ class SlotCard(QGroupBox):
         self.lbl_phone.setText(phone_text)
         self.lbl_dur.setText(
             f"Call time: {elapsed}" if elapsed else "Call time: —")
-        active = state in ("DIALING", "RINGING", "CONNECTED", "VOICEMAIL")
+        active = state in ("DIALING", "RINGING", "CONNECTED", "ANSWERED_PENDING", "VOICEMAIL", "BUSY")
         self.btn_next.setEnabled(state == "CONNECTED")
         self.btn_cut.setEnabled(active)
         self.btn_listen.setEnabled(state == "CONNECTED")
-        self.btn_monitor.setEnabled(state in ("DIALING", "RINGING", "CONNECTED", "VOICEMAIL"))
+        self.btn_monitor.setEnabled(state in ("DIALING", "RINGING", "CONNECTED", "ANSWERED_PENDING", "VOICEMAIL", "BUSY"))
         self.btn_test.setEnabled(not active)
 
         self.setProperty("connected", state == "CONNECTED")
@@ -292,6 +303,21 @@ class SlotCard(QGroupBox):
         key = "READY" if ready else "SETUP REQUIRED"
         self.lbl_status.setText(status_label(key))
         self._apply_status_style(key)
+
+    def update_detection(self, debug: dict) -> None:
+        backend = str(debug.get("audio_backend") or "OFF")
+        if backend == "ON":
+            self.lbl_ai_audio.setText("AI Audio: ON")
+        elif backend == "NO_BACKEND":
+            self.lbl_ai_audio.setText("AI Audio: NO BACKEND")
+        else:
+            self.lbl_ai_audio.setText("AI Audio: OFF")
+        fused = str(debug.get("fused_state") or "--")
+        conf = debug.get("confidence", 0)
+        reason = str(debug.get("reason") or debug.get("audio_reason") or "")
+        if len(reason) > 72:
+            reason = reason[:69] + "..."
+        self.lbl_ai_decision.setText(f"Decision: {fused} ({conf}) {reason}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -918,9 +944,11 @@ class MainWindow(QMainWindow):
         self._slot_phone:  dict[int, str]   = {}
         self._slot_name:   dict[int, str]   = {}
         self._slot_retry_attempt: dict[int, int] = {}
+        self._slot_detection_debug: dict[int, dict] = {}
         self._slot_cooldown_until: dict[int, float] = {}
         self._manual_test_slots: set[int] = set()
         self._slot_call_token: dict[int, int] = {}
+        self._slot_final_logged: set[int] = set()
         self._all_logs:    list = []
         self._retry_queue = DialRetryQueue(
             max_retries=int(cfg.get("max_retries", 3)),
@@ -1092,6 +1120,7 @@ class MainWindow(QMainWindow):
         ctrl.state_changed.connect(self._on_slot_state)
         ctrl.login_detected.connect(self._on_slot_login)
         ctrl.log_message.connect(self._on_slot_log)
+        ctrl.detection_update.connect(self._on_slot_detection)
         ctrl.view.setParent(self._browser_host)
         ctrl.view.setMaximumSize(1, 1)
         self._browser_layout.addWidget(ctrl.view)
@@ -1196,7 +1225,7 @@ class MainWindow(QMainWindow):
                 "Open Settings -> Connect account and complete sign-in for "
                 f"{acct.get('name') or acct.get('email')}.")
             return
-        if self._slot_has_active_phone(slot_id) or ctrl.current_state not in ("IDLE", "ENDED", "FAILED"):
+        if self._slot_has_active_phone(slot_id) or ctrl.current_state not in ("IDLE", "ENDED", "ENDED_MANUALLY", "BUSY", "FAILED"):
             QMessageBox.information(
                 self, "Line busy",
                 f"Line {slot_id + 1} already has an active call.")
@@ -1585,7 +1614,7 @@ class MainWindow(QMainWindow):
         frow.addSpacing(10)
         self.log_status_combo = QComboBox()
         self.log_status_combo.addItems(
-            ["All Statuses", "ENDED", "VOICEMAIL", "NO_ANSWER", "FAILED"])
+            ["All Statuses", "ENDED", "ENDED_MANUALLY", "VOICEMAIL", "NO_ANSWER", "BUSY", "FAILED"])
         self.log_status_combo.currentTextChanged.connect(self._apply_log_filter)
         frow.addWidget(self.log_status_combo)
         frow.addStretch()
@@ -1726,6 +1755,29 @@ class MainWindow(QMainWindow):
         self.settings_slots.setRange(1, 5)
         self.settings_slots.setValue(self.cfg.get("n_slots", 5))
         dlay.addWidget(self.settings_slots)
+        self.chk_ai_audio = QCheckBox("AI audio detection")
+        self.chk_ai_audio.setChecked(bool(self.cfg.get("enable_ai_audio", True)))
+        dlay.addWidget(self.chk_ai_audio)
+        dlay.addWidget(QLabel("Audio device:"))
+        self.audio_device_combo = QComboBox()
+        self.audio_device_combo.addItem("Default output loopback", "")
+        try:
+            from src.audio_analyzer import AudioAnalyzer
+            for dev in AudioAnalyzer.list_audio_devices():
+                if dev.get("max_output_channels", 0) or dev.get("max_input_channels", 0):
+                    label = f"{dev['index']}: {dev['name']}"
+                    self.audio_device_combo.addItem(label, str(dev["index"]))
+        except Exception:
+            self.audio_device_combo.addItem("NO BACKEND", "")
+        saved_device = str(self.cfg.get("audio_device", "") or "")
+        idx = self.audio_device_combo.findData(saved_device)
+        if idx >= 0:
+            self.audio_device_combo.setCurrentIndex(idx)
+        self.audio_device_combo.setMinimumWidth(220)
+        dlay.addWidget(self.audio_device_combo)
+        self.chk_live_debug = QCheckBox("Live debug")
+        self.chk_live_debug.setChecked(bool(self.cfg.get("live_debug_mode", False)))
+        dlay.addWidget(self.chk_live_debug)
         save_btn = _btn("Save settings", "green")
         save_btn.clicked.connect(self._save_settings)
         dlay.addWidget(save_btn)
@@ -2058,6 +2110,7 @@ class MainWindow(QMainWindow):
             )
             ctrl.login_detected.connect(self._on_slot_login)
             ctrl.log_message.connect(self._on_slot_log)
+            ctrl.detection_update.connect(self._on_slot_detection)
             created_temp = True
         else:
             ctrl.set_login_credentials(
@@ -2234,6 +2287,7 @@ class MainWindow(QMainWindow):
         new_ctrl.state_changed.connect(self._on_slot_state)
         new_ctrl.login_detected.connect(self._on_slot_login)
         new_ctrl.log_message.connect(self._on_slot_log)
+        new_ctrl.detection_update.connect(self._on_slot_detection)
         new_ctrl.heartbeat.connect(self._on_slot_heartbeat)
         new_ctrl.view.setParent(self._browser_host)
         new_ctrl.view.setMaximumSize(1, 1)
@@ -2266,8 +2320,7 @@ class MainWindow(QMainWindow):
             if self._retry_queue.defer(phone, name, attempt):
                 self._log(f"[Slot {slot_id}] Queued retry for {phone}")
             else:
-                self.db.log_call(self.user["id"], phone, "FAILED", slot_id=slot_id)
-                self._refresh_logs()
+                self._log_final_call(slot_id, "FAILED", phone, contact_name=name)
 
         self.statusBar().showMessage("Ready")
         if was_running:
@@ -2296,7 +2349,7 @@ class MainWindow(QMainWindow):
             return False
         if self._slot_has_active_phone(ctrl.slot_id):
             return False
-        if ctrl.current_state not in ("IDLE", "ENDED", "FAILED"):
+        if ctrl.current_state not in ("IDLE", "ENDED", "ENDED_MANUALLY", "BUSY", "FAILED"):
             return False
         return self._slot_is_ready(ctrl.slot_id)
 
@@ -2607,7 +2660,7 @@ class MainWindow(QMainWindow):
                 and self._retry_queue.pending_count() == 0):
             all_idle = all(
                 c and c.current_state in (
-                    "IDLE", "ENDED", "VOICEMAIL", "NO_ANSWER", "FAILED")
+                    "IDLE", "ENDED", "ENDED_MANUALLY", "VOICEMAIL", "NO_ANSWER", "BUSY", "FAILED")
                 for c in self._controllers)
             if all_idle:
                 self._dial_timer.stop()
@@ -2630,6 +2683,7 @@ class MainWindow(QMainWindow):
         self._slot_start[sid] = _now()
         token = self._slot_call_token.get(sid, 0) + 1
         self._slot_call_token[sid] = token
+        self._slot_final_logged.discard(sid)
         self._update_card(sid, "DIALING", phone)
         if retry_attempt > 0:
             self._log(
@@ -2658,17 +2712,14 @@ class MainWindow(QMainWindow):
         duration_s = max(0.0, _now() - started) if started else 0.0
         if ctrl:
             ctrl.set_audio_muted(True)
-            ctrl.hangup()
+            ctrl.hangup(manual=True)
             self._log(f"[Slot {slot_id}] Cut call")
         if phone:
-            status = "ENDED" if state == "CONNECTED" else "NO_ANSWER"
-            self.db.log_call(
-                self.user["id"], phone, status,
-                contact_name=self._slot_name.get(slot_id, ""),
-                duration_s=duration_s if status == "ENDED" else 0.0,
-                slot_id=slot_id,
+            status = "ENDED_MANUALLY"
+            self._log_final_call(
+                slot_id, status, phone,
+                duration_s=duration_s,
             )
-            self._refresh_logs()
             self._watchdog.record_call_completed(slot_id)
         self._slot_phone.pop(slot_id, None)
         self._slot_start.pop(slot_id, None)
@@ -2734,6 +2785,33 @@ class MainWindow(QMainWindow):
 
     # ── Slot state handling ───────────────────────────────────────────────────
 
+    def _log_final_call(self, slot_id: int, status: str, phone: str,
+                        *, duration_s: float = 0.0, contact_name: str = "") -> bool:
+        if not phone or slot_id in self._slot_final_logged:
+            return False
+        debug = self._slot_detection_debug.get(slot_id, {})
+        history = json.dumps({
+            "dom_state": debug.get("dom_state"),
+            "audio_state": debug.get("audio_state"),
+            "fused_state": debug.get("fused_state"),
+            "elapsed": debug.get("elapsed"),
+        })
+        self.db.log_call(
+            self.user["id"],
+            phone,
+            status,
+            contact_name=contact_name or self._slot_name.get(slot_id, ""),
+            duration_s=duration_s,
+            slot_id=slot_id,
+            detection_reason=str(debug.get("reason") or debug.get("audio_reason") or ""),
+            confidence=float(debug.get("confidence") or 0.0),
+            state_history=history,
+            final_outcome=status,
+        )
+        self._slot_final_logged.add(slot_id)
+        self._refresh_logs()
+        return True
+
     def _handle_slot_failure(self, slot_id: int, phone: str) -> None:
         """Retry with backoff or log FAILED after max attempts."""
         name = self._slot_name.get(slot_id, "")
@@ -2747,18 +2825,12 @@ class MainWindow(QMainWindow):
                 pass
         if phone:
             if slot_id in self._manual_test_slots:
-                self.db.log_call(
-                    self.user["id"], phone, "FAILED",
-                    contact_name=name,
-                    slot_id=slot_id,
-                )
-                self._refresh_logs()
+                self._log_final_call(slot_id, "FAILED", phone, contact_name=name)
             elif self._retry_queue.defer(phone, name, attempt):
                 log_info(f"Queued retry for {phone} (after attempt {attempt + 1})")
                 self._log(f"[Slot {slot_id}] Will retry {phone} shortly")
             else:
-                self.db.log_call(self.user["id"], phone, "FAILED", slot_id=slot_id)
-                self._refresh_logs()
+                self._log_final_call(slot_id, "FAILED", phone, contact_name=name)
                 log_warning(f"Max retries exhausted for {phone}")
         self._slot_phone.pop(slot_id, None)
         self._slot_start.pop(slot_id, None)
@@ -2794,8 +2866,7 @@ class MainWindow(QMainWindow):
             vm_sec = int(self.cfg.get("voicemail_hangup_sec", 3))
             self._log(
                 f"[Slot {slot_id}] 📭 Voicemail — auto-hangup in {vm_sec}s, then next number")
-            self.db.log_call(self.user["id"], phone, "VOICEMAIL", slot_id=slot_id)
-            self._refresh_logs()
+            self._log_final_call(slot_id, "VOICEMAIL", phone)
             self._watchdog.record_call_completed(slot_id)
             QTimer.singleShot(
                 vm_sec * 1000,
@@ -2807,23 +2878,38 @@ class MainWindow(QMainWindow):
             if phone:
                 started = self._slot_start.get(slot_id)
                 duration_s = max(0.0, _now() - started) if started else 0.0
-                self.db.log_call(
-                    self.user["id"], phone, "ENDED",
+                self._log_final_call(
+                    slot_id, "ENDED", phone,
                     contact_name=self._slot_name.get(slot_id, ""),
                     duration_s=duration_s,
-                    slot_id=slot_id,
                 )
-                self._refresh_logs()
                 self._watchdog.record_call_completed(slot_id)
                 self._finish_slot_call(slot_id)
         elif state == "NO_ANSWER":
             if phone:
-                self.db.log_call(
-                    self.user["id"], phone, "NO_ANSWER",
+                self._log_final_call(
+                    slot_id, "NO_ANSWER", phone,
                     contact_name=self._slot_name.get(slot_id, ""),
-                    slot_id=slot_id,
                 )
-                self._refresh_logs()
+                self._watchdog.record_call_completed(slot_id)
+                self._finish_slot_call(slot_id)
+        elif state == "BUSY":
+            if phone:
+                self._log_final_call(
+                    slot_id, "BUSY", phone,
+                    contact_name=self._slot_name.get(slot_id, ""),
+                )
+                self._watchdog.record_call_completed(slot_id)
+                self._finish_slot_call(slot_id)
+        elif state == "ENDED_MANUALLY":
+            if phone:
+                started = self._slot_start.get(slot_id)
+                duration_s = max(0.0, _now() - started) if started else 0.0
+                self._log_final_call(
+                    slot_id, "ENDED_MANUALLY", phone,
+                    contact_name=self._slot_name.get(slot_id, ""),
+                    duration_s=duration_s,
+                )
                 self._watchdog.record_call_completed(slot_id)
                 self._finish_slot_call(slot_id)
         elif state == "IDLE":
@@ -2842,10 +2928,15 @@ class MainWindow(QMainWindow):
         if "sign-in required" in msg.lower() or "google account detected" in msg.lower():
             self._refresh_slot_login_badges()
 
+    def _on_slot_detection(self, slot_id: int, debug: dict) -> None:
+        self._slot_detection_debug[slot_id] = debug
+        if hasattr(self, "_slot_cards") and slot_id in self._slot_cards:
+            self._slot_cards[slot_id].update_detection(debug)
+
     def _update_card(self, slot_id: int, state: str, phone: str):
         if hasattr(self, "_slot_cards") and slot_id in self._slot_cards:
             elapsed = ""
-            if slot_id in self._slot_start and state not in ("IDLE", "ENDED"):
+            if slot_id in self._slot_start and state not in ("IDLE", "ENDED", "ENDED_MANUALLY"):
                 s = int(_now() - self._slot_start[slot_id])
                 elapsed = f"{s//60:02d}:{s%60:02d}"
             disp = fmt_display(phone[2:]) if phone.startswith("+1") and len(phone)==12 \
@@ -2857,7 +2948,7 @@ class MainWindow(QMainWindow):
             if ctrl is None:
                 continue
             sid = ctrl.slot_id
-            if ctrl.current_state not in ("IDLE", "ENDED", "FAILED"):
+            if ctrl.current_state not in ("IDLE", "ENDED", "ENDED_MANUALLY", "BUSY", "FAILED"):
                 self._update_card(sid, ctrl.current_state,
                                   self._slot_phone.get(sid, ""))
 
@@ -2893,6 +2984,7 @@ class MainWindow(QMainWindow):
             if st == "ENDED":       ended += 1
             elif st == "VOICEMAIL": vm    += 1
             elif st == "FAILED":    fail  += 1
+            elif st == "BUSY":      fail  += 1
         self.log_total.setText(f"Total: {len(self._all_logs)}")
         self.log_ended.setText(f"Ended: {ended}")
         self.log_vm.setText(f"Voicemail: {vm}")
@@ -2903,6 +2995,8 @@ class MainWindow(QMainWindow):
             "ENDED":     "#00e676",
             "VOICEMAIL": "#ff6b35",
             "NO_ANSWER": "#8b949e",
+            "BUSY":      "#a855f7",
+            "ENDED_MANUALLY": "#8b949e",
             "FAILED":    "#ff4444",
         }
         for r in reversed(filtered):
@@ -3176,6 +3270,12 @@ class MainWindow(QMainWindow):
 
     def _save_settings(self):
         self.cfg["n_slots"] = self.settings_slots.value()
+        if hasattr(self, "chk_ai_audio"):
+            self.cfg["enable_ai_audio"] = self.chk_ai_audio.isChecked()
+        if hasattr(self, "audio_device_combo"):
+            self.cfg["audio_device"] = self.audio_device_combo.currentData() or ""
+        if hasattr(self, "chk_live_debug"):
+            self.cfg["live_debug_mode"] = self.chk_live_debug.isChecked()
         _save_cfg(self.cfg)
         QMessageBox.information(self, "Saved", "Settings saved.")
 

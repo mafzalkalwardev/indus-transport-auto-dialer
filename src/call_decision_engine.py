@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from .local_call_detector import AudioFeatures, CallDecision, CallDecision, DecisionState, LocalCallDetector
+from .local_call_detector import AudioFeatures, DetectionConfig, LocalCallDetector
 
 
 @dataclass
@@ -28,8 +28,12 @@ class CallDecisionResult:
 
 
 class CallDecisionEngine:
-    def __init__(self, detector: LocalCallDetector | None = None):
-        self.detector = detector or LocalCallDetector()
+    def __init__(
+        self,
+        detector: LocalCallDetector | None = None,
+        detector_config: DetectionConfig | None = None,
+    ):
+        self.detector = detector or LocalCallDetector(detector_config)
         self._in_call = False
 
     def start_call(self) -> None:
