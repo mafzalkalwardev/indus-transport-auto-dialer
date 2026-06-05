@@ -1,12 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('dialer_config.json', '.'), ('src', 'src'), ('Indus_Transports_LLC__1_-removebg-preview (1).png', '.'), ('Indus Transports LLC (1).jpeg', '.')]
+datas = [('dialer_config.json', '.'), ('src', 'src'), ('models', 'models'), ('Indus_Transports_LLC__1_-removebg-preview (1).png', '.'), ('Indus Transports LLC (1).jpeg', '.')]
 binaries = []
-hiddenimports = ['PyQt6.QtWebEngineWidgets', 'PyQt6.QtWebEngineCore', 'PyQt6.sip', 'pandas', 'openpyxl', 'PIL', 'pyperclip']
+hiddenimports = ['PyQt6.QtWebEngineWidgets', 'PyQt6.QtWebEngineCore', 'PyQt6.sip', 'pandas', 'openpyxl', 'PIL', 'pyperclip', 'numpy', 'sklearn', 'sklearn.ensemble', 'joblib']
 tmp_ret = collect_all('PyQt6')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('PyQt6.QtWebEngineWidgets')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('sklearn')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 

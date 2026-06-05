@@ -15,6 +15,8 @@ def pip(*pkgs):
 DEPS = [
     "PyQt6", "PyQt6-WebEngine",
     "pandas", "openpyxl", "Pillow", "pyperclip", "pyinstaller",
+    # AI call-progress detection
+    "numpy", "scikit-learn", "joblib", "soundfile", "soundcard",
 ]
 
 print("=" * 60)
@@ -78,9 +80,17 @@ cmd = [
     "--hidden-import=openpyxl",
     "--hidden-import=PIL",
     "--hidden-import=pyperclip",
+    "--hidden-import=numpy",
+    "--hidden-import=sklearn",
+    "--hidden-import=sklearn.ensemble",
+    "--hidden-import=joblib",
     "--collect-all=PyQt6",
     "--collect-all=PyQt6.QtWebEngineWidgets",
+    "--collect-all=sklearn",
 ]
+# Ship the trained AI model so the EXE detects calls out of the box.
+if os.path.exists(os.path.join("models", "call_progress_model.joblib")):
+    cmd.append(f"--add-data=models{sep}models")
 for logo in (LOGO_PNG, "Indus Transports LLC (1).jpeg"):
     if os.path.exists(logo):
         cmd.append(f"--add-data={logo}{sep}.")

@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy scipy scikit-learn joblib soundfile pytest ruff
+
+      - name: Lint (critical errors)
+        run: |
+          # Fail on real errors (syntax, undefined names) across the repo,
+          # and the full style ruleset on the new AI modules.
+          ruff check --select E9,F63,F7,F82 .
+          ruff check src/call_audio_ai.py scripts tests
+
+      - name: Syntax-check all modules
+        run: python -m compileall -q src scripts autodialer_gui.py
+
+      - name: Run tests
+        run: python -m pytest tests/ -q

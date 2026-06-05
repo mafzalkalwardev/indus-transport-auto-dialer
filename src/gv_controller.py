@@ -111,60 +111,69 @@ _JS_DETECT_STATE = r"""
   }
   if(!inCall) return 'IDLE';
 
-  // 1. Voicemail — check before ringing/connected (VM also shows hangup)
-  var vmPhrases=['leave a message','record after the tone','record your message',
-    'after the beep','leave a voicemail','voicemail box','not available to take',
-    'cannot take your call',"can't take your call",'at the tone','mailbox is full',
-    'forwarded to voicemail','has been forwarded','started recording',
-    'person you are calling','reach is not available','no one is available'];
-  for(var p=0;p<vmPhrases.length;p++){
-    if(body.indexOf(vmPhrases[p])!==-1) return 'VOICEMAIL';
+  // Are we still ringing? Explicit indicators only (not generic announcements).
+  var ringingNow=false;
+  if(body.indexOf('ringing')!==-1||body.indexOf('dialing')!==-1) ringingNow=true;
+  if(/\bcalling\b/.test(body)&&body.indexOf('on call')===-1) ringingNow=true;
+  var ringSels=['[aria-label*="Ringing" i]','[aria-label*="Calling" i]',
+    '[aria-label*="Dialing" i]'];
+  for(var rs=0;rs<ringSels.length;rs++){
+    if(vis(document.querySelector(ringSels[rs]))){ ringingNow=true; break; }
+  }
+
+  // 1. Voicemail.
+  //    Strong phrases unambiguously mean a recording/greeting — accept even
+  //    while "calling" text lingers.  Weak phrases also appear in ringback
+  //    announcements, so they only count once ringing has stopped.
+  var vmStrong=['record after the tone','record your message','after the beep',
+    'at the tone','leave a message after','started recording','mailbox is full',
+    'leave a voicemail','please record','begin recording'];
+  for(var p=0;p<vmStrong.length;p++){
+    if(body.indexOf(vmStrong[p])!==-1) return 'VOICEMAIL';
   }
   var vmSels=['.voicemail-indicator','[data-e2eid="voicemail-record"]',
     '[aria-label*="leave a message" i]','[aria-label*="voicemail" i]',
     '[title*="leave a message" i]','[data-tooltip*="voicemail" i]'];
   for(var v=0;v<vmSels.length;v++){
-    var vm=document.querySelector(vmSels[v]);
-    if(vis(vm)) return 'VOICEMAIL';
+    if(vis(document.querySelector(vmSels[v]))) return 'VOICEMAIL';
+  }
+  if(!ringingNow){
+    var vmWeak=['leave a message','forwarded to voicemail','has been forwarded',
+      'not available to take','cannot take your call',"can't take your call",
+      'person you are calling','is not available','no one is available'];
+    for(var w=0;w<vmWeak.length;w++){
+      if(body.indexOf(vmWeak[w])!==-1) return 'VOICEMAIL';
+    }
   }
 
-  // 2. Live answer — MM:SS call timer (strict) or answered-call controls
-  var timerSels=['[jsname="pRLmDf"]','.call-duration','[aria-label*="call duration" i]',
-    '[data-e2eid="call-timer"]'];
-  for(var t=0;t<timerSels.length;t++){
-    var el=document.querySelector(timerSels[t]);
-    if(!vis(el)) continue;
-    var tx=(el.textContent||el.getAttribute('aria-label')||'').replace(/\s+/g,' ').trim();
-    if(/^(?:\d{1,2}:)?\d{1,2}:\d{2}$/.test(tx)) return 'CONNECTED';
-    if(/^\d{1,2}:\d{2}$/.test(tx)) return 'CONNECTED';
+  // 2. Live answer — a running MM:SS call timer (must be advancing, i.e. > 00:00)
+  //    or explicit answered-call controls.  Guard: ignore a timer while ringing.
+  if(!ringingNow){
+    var timerSels=['[jsname="pRLmDf"]','.call-duration','[aria-label*="call duration" i]',
+      '[data-e2eid="call-timer"]'];
+    for(var t=0;t<timerSels.length;t++){
+      var el=document.querySelector(timerSels[t]);
+      if(!vis(el)) continue;
+      var tx=(el.textContent||el.getAttribute('aria-label')||'').replace(/\s+/g,' ').trim();
+      if(/^(?:\d{1,2}:)?\d{1,2}:\d{2}$/.test(tx)&&!/^0?0:00$/.test(tx)) return 'CONNECTED';
+    }
   }
   var ansCtrl=['button[aria-label*="Hold call" i]','button[aria-label*="Mute call" i]',
     'button[aria-label*="Unmute call" i]','button[aria-label*="Transfer" i]',
     'button[aria-label*="Add a call" i]','button[aria-label*="Record the call" i]',
     'button[aria-label*="Send a message" i]'];
   for(var a=0;a<ansCtrl.length;a++){
-    var btn=document.querySelector(ansCtrl[a]);
-    if(vis(btn)) return 'CONNECTED_CTRL';
+    if(vis(document.querySelector(ansCtrl[a]))) return 'CONNECTED_CTRL';
   }
 
   // 3. Call ended
   var endedSels=['[aria-label*="Call ended" i]','[data-e2eid="call-ended"]','.call-ended'];
   for(var e=0;e<endedSels.length;e++){
-    var end=document.querySelector(endedSels[e]);
-    if(vis(end)) return 'ENDED';
+    if(vis(document.querySelector(endedSels[e]))) return 'ENDED';
   }
 
-  // 4. Ringing / calling (before pickup)
-  if(body.indexOf('ringing')!==-1||body.indexOf('calling')!==-1){
-    return 'RINGING';
-  }
-  var ringSels=['[aria-label*="Ringing" i]','[aria-label*="Calling" i]'];
-  for(var r=0;r<ringSels.length;r++){
-    var rg=document.querySelector(ringSels[r]);
-    if(vis(rg)) return 'RINGING';
-  }
-
-  // In-call but unknown — treat as ringing until timer/VM/controls appear
+  // 4. Ringing / calling (before pickup) or in-call but unknown — treat as
+  //    ringing until a timer / voicemail / answered controls appear.
   return 'RINGING';
 })();
 """
@@ -378,7 +387,7 @@ class GVController(QObject):
 
     def __init__(self, slot_id: int, profile_dir: str, parent: QObject = None,
                  profile_key: str = "", login_email: str = "",
-                 login_password: str = ""):
+                 login_password: str = "", audio_ai: bool = True):
         super().__init__(parent)
         self.slot_id     = slot_id
         self.profile_dir = profile_dir
@@ -454,6 +463,24 @@ class GVController(QObject):
         self._active_call = False
         self._dial_stuck_timer: QTimer | None = None
 
+        # ── AI audio monitor (Call-Progress-Analysis) ─────────────────────────
+        # Disambiguates ringback vs. voicemail vs. live answer from the call
+        # audio.  Best-effort: stays disabled if no audio backend is available,
+        # in which case detection falls back to the (hardened) DOM signal.
+        self._audio_enabled = audio_ai
+        self._audio_monitor = None
+        self._audio_result = None        # latest CPAResult
+        self._audio_result_ts = 0.0
+        if self._audio_enabled:
+            try:
+                from src.call_audio_monitor import CallAudioMonitor
+                self._audio_monitor = CallAudioMonitor(slot_id, self)
+                self._audio_monitor.result_ready.connect(self._on_audio_result)
+                if not self._audio_monitor.available:
+                    self._emit_log("Audio AI: no capture backend — DOM only")
+            except Exception:
+                self._audio_monitor = None
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def clear_http_cache(self) -> None:
@@ -477,6 +504,8 @@ class GVController(QObject):
             self._dial_stuck_timer.stop()
             self._dial_stuck_timer = None
         self._active_call = False
+        if self._audio_monitor is not None:
+            self._audio_monitor.stop()
 
         page = getattr(self, "_page", None)
         view = getattr(self, "view", None)
@@ -568,6 +597,9 @@ class GVController(QObject):
         self._ctrl_count = 0
         self._vm_count = 0
         self._active_call = False
+        if self._audio_monitor is not None:
+            self._audio_monitor.stop()
+        self._audio_result = None
 
     def dial(self, phone: str) -> None:
         if not self._page_alive():
@@ -576,6 +608,10 @@ class GVController(QObject):
         self._active_call = True
         self._vm_count = 0
         self._ctrl_count = 0
+        self._audio_result = None
+        self._audio_result_ts = 0.0
+        if self._audio_monitor is not None:
+            self._audio_monitor.start()
         self._set_state("DIALING")
         self._page.runJavaScript(_JS_FORCE_VISIBLE)
         self._page.runJavaScript(_js_dial(phone))
@@ -750,6 +786,25 @@ class GVController(QObject):
         self._emit_log("Opening Google sign-in page…")
         self._page.load(QUrl("https://accounts.google.com/"))
 
+    def _on_audio_result(self, slot_id: int, label: str, state: str,
+                         confidence: float) -> None:
+        """Store the latest AI audio classification for DOM/audio fusion."""
+        import time as _time
+        from src.call_audio_ai import CPAResult
+        self._audio_result = CPAResult(
+            label=label, state=state, confidence=confidence,
+            proba={}, source="model")
+        self._audio_result_ts = _time.monotonic()
+
+    def _fresh_audio_result(self):
+        """Return the latest audio result if recent (<3s), else None."""
+        if self._audio_result is None:
+            return None
+        import time as _time
+        if _time.monotonic() - self._audio_result_ts > 3.0:
+            return None
+        return self._audio_result
+
     def _poll_state(self) -> None:
         if not self._page_alive():
             return
@@ -757,7 +812,22 @@ class GVController(QObject):
 
     def _on_poll_result(self, raw: str) -> None:
         self._pulse_heartbeat()
-        state = raw or "IDLE"
+        dom_state = raw or "IDLE"
+
+        # Fuse the DOM signal with the AI audio classification when available.
+        audio = self._fresh_audio_result()
+        if audio is not None:
+            try:
+                from src.call_audio_ai import fuse_states
+                state = fuse_states(dom_state, audio)
+                if state != dom_state:
+                    self._emit_log(
+                        f"AI audio: {audio.label} ({audio.confidence:.0%}) "
+                        f"→ {state} [DOM said {dom_state}]")
+            except Exception:
+                state = dom_state
+        else:
+            state = dom_state
 
         # Debounce voicemail (avoid false positive while ringing)
         if state == "VOICEMAIL":
@@ -793,7 +863,7 @@ class GVController(QObject):
         self._set_state(state)
 
         # Auto-stop polling once a terminal state is reached
-        if state == "VOICEMAIL":
+        if state in ("VOICEMAIL", "FAILED"):
             self.stop_polling()
         elif state == "IDLE" and not self._active_call:
             self.stop_polling()

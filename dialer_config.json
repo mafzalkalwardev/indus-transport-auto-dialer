@@ -17,5 +17,6 @@
   "slot_memory_limit_mb": 700,
   "slot_recycle_after_calls": 75,
   "watchdog_check_interval_sec": 5,
-  "dial_stagger_sec": 0.8
+  "dial_stagger_sec": 0.8,
+  "audio_ai_enabled": true
 }

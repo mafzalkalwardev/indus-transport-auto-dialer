@@ -131,14 +131,38 @@ Load testing: [docs/LOAD_TEST.md](docs/LOAD_TEST.md) and `python scripts/generat
 
 ## How call detection works
 
-The app reads the Google Voice web page (not AI audio). Each ~600ms:
+Detection uses **two layers, fused** for reliability:
+
+1. **Web-page reading** (`src/gv_controller.py`) — each ~1 s the app inspects the Google Voice
+   page (in-call controls, call timer, voicemail text) to know whether a call is active and what
+   stage it's at.
+2. **AI audio (Call-Progress-Analysis)** (`src/call_audio_ai.py`) — a trained classifier listens to
+   the call audio and decides RINGBACK / live HUMAN pickup / VOICEMAIL (greeting or beep) / SILENCE
+   / BUSY. This resolves the cases the page alone gets wrong (e.g. ringback misread as voicemail, or
+   a stray timer misread as "answered").
+
+The audio signal only overrides the page when it is confident, and the whole AI layer is optional —
+if no audio-capture backend is present the app falls back to page-only detection automatically
+(toggle with `audio_ai_enabled` in `dialer_config.json`).
 
 | Status | Meaning |
 |--------|---------|
-| Ringing | Outbound ring |
-| On call | Person answered (timer or hold/mute controls) |
-| Voicemail | Greeting / beep detected → auto hangup after configured seconds |
+| Ringing | Outbound ringback (audio confirms it isn't yet answered) |
+| On call | Live person answered (audio HUMAN, or call timer / hold-mute controls) |
+| Voicemail | Greeting / beep detected (audio or page) → auto hangup after configured seconds |
 | Waiting | Idle, ready for next number |
+
+### Retraining the AI model
+
+The shipped model lives at `models/call_progress_model.joblib`. To rebuild it from scratch
+(downloads public-domain voice samples + synthesizes telephony tones, then trains and evaluates):
+
+```bash
+python scripts/build_audio_dataset.py   # builds data/audio_dataset/dataset.npz
+python scripts/train_call_model.py       # trains + evaluates, writes models/call_progress_model.joblib
+```
+
+See [docs/AI_CALL_DETECTION.md](docs/AI_CALL_DETECTION.md) for the full design.
 
 ## Administration (you only)
 

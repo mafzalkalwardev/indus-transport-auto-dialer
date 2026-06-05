@@ -83,6 +83,7 @@ def _load_cfg() -> dict:
         "slot_memory_limit_mb": 700,
         "slot_recycle_after_calls": 75,
         "watchdog_check_interval_sec": 5,
+        "audio_ai_enabled": True,
     }
     if os.path.exists(CONFIG_FILE):
         try:
@@ -1017,6 +1018,7 @@ class MainWindow(QMainWindow):
             profile_key=acct["profile"],
             login_email=acct.get("email", ""),
             login_password=acct.get("password", ""),
+            audio_ai=bool(self.cfg.get("audio_ai_enabled", True)),
         )
         ctrl.state_changed.connect(self._on_slot_state)
         ctrl.login_detected.connect(self._on_slot_login)
@@ -1924,6 +1926,7 @@ class MainWindow(QMainWindow):
                 profile_key=acct["profile"],
                 login_email=acct.get("email", ""),
                 login_password=acct.get("password", ""),
+                audio_ai=bool(self.cfg.get("audio_ai_enabled", True)),
             )
             ctrl.login_detected.connect(self._on_slot_login)
             ctrl.log_message.connect(self._on_slot_log)
@@ -2014,7 +2017,8 @@ class MainWindow(QMainWindow):
             ctrl = GVController(i, profile_dir, parent=self,
                                 profile_key=profile_name,
                                 login_email=login_email,
-                                login_password=login_password)
+                                login_password=login_password,
+                                audio_ai=bool(self.cfg.get("audio_ai_enabled", True)))
             ctrl.state_changed.connect(self._on_slot_state)
             ctrl.login_detected.connect(self._on_slot_login)
             ctrl.log_message.connect(self._on_slot_log)
@@ -2099,6 +2103,7 @@ class MainWindow(QMainWindow):
             profile_key=profile_name,
             login_email=login_email,
             login_password=login_password,
+            audio_ai=bool(self.cfg.get("audio_ai_enabled", True)),
         )
         new_ctrl.state_changed.connect(self._on_slot_state)
         new_ctrl.login_detected.connect(self._on_slot_login)
