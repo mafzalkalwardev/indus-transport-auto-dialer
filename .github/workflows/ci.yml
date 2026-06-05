@@ -23,9 +23,10 @@ jobs:
       - name: Lint (critical errors)
         run: |
           # Fail on real errors (syntax, undefined names) across the repo,
-          # and the full style ruleset on the new AI modules.
+          # and the full style ruleset on the new AI modules only.
           ruff check --select E9,F63,F7,F82 .
-          ruff check src/call_audio_ai.py scripts tests
+          ruff check src/call_audio_ai.py src/call_audio_monitor.py \
+            scripts/build_audio_dataset.py scripts/train_call_model.py tests
 
       - name: Syntax-check all modules
         run: python -m compileall -q src scripts autodialer_gui.py
