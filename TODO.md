@@ -1,15 +1,15 @@
-# TODO - Fix false voicemail detection
+# TODO
 
-- [ ] Step 1: Inspect current local detector + tests (done: read local_call_detector.py and tests/test_call_detection.py)
-- [ ] Step 2: Implement ANSWERED_PENDING safe window + human-first rules in `src/local_call_detector.py`
-- [ ] Step 3: Implement stricter VOICEMAIL confirmation (2-of-5) + stability cycles + confidence gating in `src/local_call_detector.py`
-- [ ] Step 4: Add debug logs per state decision in `src/local_call_detector.py`
-- [ ] Step 5: Extend audio feature expectations (duck-typed optional fields) in detector and update tests’ DummyAudio
-- [ ] Step 6: Update/extend unit tests per required scenarios in `tests/test_call_detection.py`
-- [ ] Step 7: Run `pytest -q` and adjust thresholds/tests to pass
+## Call-state + voicemail/human pipeline fixes
 
-# Additional plan for current fix
-- [x] Step 8: Fix “answer detected elapsed timer” so audio speech-like does not start the answer clock before DOM answer evidence
-- [ ] Step 9: Tighten VOICEMAIL candidate computation so DOM voicemail cue alone cannot satisfy 2-of-5 without audio/keyword/beep support
-- [ ] Step 10: Add unit tests covering the failure path: speech-like + intermittent voicemail cue before DOM answer control/timer
+- [x] Step 1: Identify ringing hangup bug location in `src/gv_controller.py` and fix policy so ringing never triggers voicemail/failed/hangup before timeout.
+
+- [ ] Step 2: Enforce VICIdial-style state pipeline mapping (IDLE/DIALING/RINGING/CONNECTED/CLASSIFYING_AUDIO/HUMAN_DETECTED/VOICEMAIL_DETECTED/BUSY/NO_ANSWER/FAILED/ENDED) in controller glue.
+- [ ] Step 3: Add missing timestamps (dialed_at/ringing_started_at/connected_at) and ensure they feed call-logging.
+- [ ] Step 4: Improve per-call structured logging to include required fields exactly once per terminal state.
+- [ ] Step 5: Ensure voicemail detector only runs after CONNECTED evidence and never during ringing (confirm in `src/local_call_detector.py`; adjust if needed).
+- [ ] Step 6: Add unknown-audio retry behavior for 2–3 seconds before NO_ANSWER/ENDED.
+- [ ] Step 7: Add/update unit tests for the required edge cases.
+- [ ] Step 8: Run `pytest` and fix any regressions.
+- [ ] Step 9: Commit changes with message: "Fix call state detection and human voicemail classification"
 

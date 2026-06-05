@@ -1071,15 +1071,23 @@ class GVController(QObject):
         else:
             self._idle_count = 0
 
-        # Debounce voicemail (avoid false positive while ringing)
+        # Debounce + ringing-safety for voicemail.
+        # Rule: RINGING is NOT voicemail and must not trigger hangup before timeout.
         if state == "VOICEMAIL":
-            self._vm_count += 1
-            if self._vm_count < 2:
+            if self._state in {"DIALING", "RINGING"}:
+                # Treat as non-terminal evidence until we have real CONNECTED/PICKUP evidence.
+                # Allow it to be re-evaluated, but never promote to VOICEMAIL during ringing.
                 state = self._state if self._state != "IDLE" else "RINGING"
+                self._vm_count += 1
             else:
-                self._emit_log("Voicemail detected")
+                self._vm_count += 1
+                if self._vm_count < 2:
+                    state = self._state if self._state != "IDLE" else "RINGING"
+                else:
+                    self._emit_log("Voicemail detected")
         else:
             self._vm_count = 0
+
 
         raw_state = state
         call_age = (
