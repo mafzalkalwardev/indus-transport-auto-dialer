@@ -19,6 +19,6 @@
   "watchdog_check_interval_sec": 5,
   "dial_stagger_sec": 0.8,
   "enable_ai_audio": true,
-  "audio_device": "6",
+  "audio_device": "25",
   "live_debug_mode": false
 }

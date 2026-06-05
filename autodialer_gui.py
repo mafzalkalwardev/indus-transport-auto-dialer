@@ -3399,6 +3399,8 @@ if __name__ == "__main__":
         "--disable-gpu",
         "--disable-gpu-compositing",
         "--disable-software-rasterizer",
+        "--autoplay-policy=no-user-gesture-required",
+        "--use-fake-ui-for-media-stream",
     ):
         if _flag not in _we_flags:
             _we_flags = f"{_we_flags} {_flag}".strip()

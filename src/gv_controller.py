@@ -426,12 +426,18 @@ def _js_dial(phone: str) -> str:
 
   function findCallButton(){{
     var buttons=Array.from(document.querySelectorAll('button,[role="button"],gv-icon-button'));
+    var input=findNumberInput();
     for(var i=0;i<buttons.length;i++){{
       var btn=buttons[i];
       var aria=(btn.getAttribute('aria-label')||'').toLowerCase();
       var text=(btn.innerText||btn.textContent||'').trim().toLowerCase();
       if(!visible(btn) || btn.disabled) continue;
       if(aria.indexOf('end')!==-1 || aria.indexOf('video')!==-1) continue;
+      if(input){{
+        var br=btn.getBoundingClientRect(), ir=input.getBoundingClientRect();
+        var nearInput=Math.abs((br.top+br.bottom)/2 - (ir.top+ir.bottom)/2) < 180;
+        if(!nearInput && text==='call') continue;
+      }}
       if(aria.indexOf('call +')===0 || (text==='call' && aria.indexOf('call')===0)){{
         return btn;
       }}
@@ -474,7 +480,9 @@ def _js_dial(phone: str) -> str:
     return window.__gvDialStatus;
   }}
   btn.click();
-  window.__gvDialStatus='call_button_clicked';
+  var clickedAria=(btn.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim();
+  var clickedText=(btn.innerText||btn.textContent||'').replace(/\\s+/g,' ').trim();
+  window.__gvDialStatus='call_button_clicked|aria='+clickedAria.slice(0,80)+'|text='+clickedText.slice(0,80);
   return window.__gvDialStatus;
 }})();
 """
@@ -541,7 +549,7 @@ class GVController(QObject):
 
         self._page = QWebEnginePage(self._profile)
         self._page.featurePermissionRequested.connect(self._grant_permission)
-        self._page.setAudioMuted(True)
+        self._page.setAudioMuted(not audio_enabled)
 
         # Disable JS console noise appearing in our log
         self._page.javaScriptConsoleMessage = lambda *_: None
@@ -557,6 +565,13 @@ class GVController(QObject):
             QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
         settings.setAttribute(
             QWebEngineSettings.WebAttribute.AllowGeolocationOnInsecureOrigins, True)
+        playback_attr = getattr(
+            QWebEngineSettings.WebAttribute,
+            "PlaybackRequiresUserGesture",
+            None,
+        )
+        if playback_attr is not None:
+            settings.setAttribute(playback_attr, False)
 
         self.view = QWebEngineView()
         self.view.setPage(self._page)
@@ -668,6 +683,8 @@ class GVController(QObject):
     def set_audio_muted(self, muted: bool) -> None:
         if not self._page_alive():
             return
+        if muted and self._active_call and bool(self._runtime_cfg.get("enable_ai_audio", True)):
+            return
         self._page.setAudioMuted(muted)
 
     def load(self, for_setup: bool = False) -> None:
@@ -742,6 +759,8 @@ class GVController(QObject):
         self._ctrl_count = 0
         self._decision_engine.start_call()
         self._set_state("DIALING")
+        if audio_enabled := bool(self._runtime_cfg.get("enable_ai_audio", True)):
+            self._page.setAudioMuted(False)
         self._page.runJavaScript(_JS_FORCE_VISIBLE)
         self._ensure_calls_page_then_dial()
         # Poll early and often while headless (DOM still updates)
@@ -777,7 +796,7 @@ class GVController(QObject):
     def _on_dial_step_result(self, status: str) -> None:
         status = status or "unknown"
         self._emit_log(f"Dial UI status: {status}")
-        if status == "call_button_clicked":
+        if status.startswith("call_button_clicked"):
             self._call_clicked_at = time.monotonic()
             self._pending_dial_phone = ""
             return
@@ -975,6 +994,8 @@ class GVController(QObject):
         self._page.runJavaScript(_JS_DETECT_STATE, self._on_poll_result)
 
     def _on_poll_result(self, raw: object) -> None:
+        if not self._active_call and self._state in {"NO_ANSWER", "ENDED", "ENDED_MANUALLY", "FAILED", "BUSY"}:
+            return
         self._pulse_heartbeat()
         decision = self._call_state_engine.classify(raw)
         dom_payload = decision.evidence if isinstance(decision.evidence, dict) else {}
@@ -996,10 +1017,16 @@ class GVController(QObject):
             "slot": self.slot_id,
             "elapsed": round(elapsed, 2),
             "dom_state": decision.state,
+            "call_text": str(dom_payload.get("callText", ""))[:500],
+            "has_ringing_text": bool(dom_payload.get("hasRingingText", False)),
+            "has_ringing_node": bool(dom_payload.get("hasRingingNode", False)),
+            "has_timer": bool(dom_payload.get("hasTimer", False)),
+            "timer_text": str(dom_payload.get("timerText", "")),
             "audio_state": fused.debug.get("audio_state") or self._audio_state_from_features(audio_features),
             "fused_state": fused_state,
             "confidence": round(float(fused.confidence), 3),
             "reason": fused.reason,
+            "rms": float(getattr(audio_features, "rms", 0.0) or 0.0),
             "ringback": float(getattr(audio_features, "ringback_cadence_confidence", 0.0) or 0.0),
             "speech_duration": float(getattr(audio_features, "speech_duration_seconds", 0.0) or 0.0),
             "silence_duration": float(getattr(audio_features, "silence_duration_seconds", 0.0) or 0.0),
@@ -1012,6 +1039,7 @@ class GVController(QObject):
             ),
             "should_hangup": fused_state in {"VOICEMAIL", "NO_ANSWER", "BUSY", "FAILED"},
             "audio_backend": getattr(audio_features, "backend_status", "OFF"),
+            "audio_backend_name": getattr(audio_features, "backend_name", ""),
             "audio_reason": getattr(audio_features, "reason", ""),
             "vad_backend": getattr(audio_features, "vad_backend", ""),
             "vad_confidence": float(getattr(audio_features, "vad_confidence", 0.0) or 0.0),
@@ -1119,10 +1147,10 @@ class GVController(QObject):
         lines = ["[CALL DEBUG]"]
         for key in (
             "phone", "slot", "elapsed", "dom_state", "audio_state",
-            "fused_state", "confidence", "reason", "ringback",
+            "fused_state", "confidence", "reason", "rms", "ringback",
             "speech_duration", "silence_duration", "beep_detected",
             "human_greeting_detected", "voicemail_confirmations",
-            "should_hangup", "vad_backend", "vad_confidence",
+            "should_hangup", "audio_backend_name", "vad_backend", "vad_confidence",
         ):
             lines.append(f"{key}={debug.get(key)}")
         self._emit_log("\n".join(lines))
