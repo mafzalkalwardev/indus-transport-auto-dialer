@@ -15,14 +15,20 @@ from datetime import datetime
 from typing import Callable, Optional
 from urllib.parse import quote
 
-from PyQt6.QtCore import QObject, Qt, QTimer, QUrl, pyqtSignal
+from src.webengine_env import configure_webengine_environment
+
+configure_webengine_environment()
+
+from PyQt6.QtCore import QObject, QPoint, QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor
+from PyQt6.QtTest import QTest
 from PyQt6.QtWebEngineCore import (
     QWebEnginePage,
     QWebEngineProfile,
     QWebEngineSettings,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtWidgets import QApplication
 
 GV_URL       = "https://voice.google.com/u/0/calls"
 GV_CALLS_URL = GV_URL
@@ -44,6 +50,13 @@ SIGNIN_URL = (
 
 POLL_MS = 1000   # state-detection poll interval (active calls)
 
+
+def _gv_direct_call_url(phone: str) -> str:
+    digits = re.sub(r"\D", "", phone or "")
+    if not digits:
+        return GV_CALLS_URL
+    return f"{GV_CALLS_URL}?a=nc,%2B{digits}"
+
 _JS_FORCE_VISIBLE = """
 (function(){
   try {
@@ -61,6 +74,35 @@ _JS_REFRESH_LAYOUT = """
     window.dispatchEvent(new Event('resize'));
     document.body && document.body.offsetHeight;
   } catch(e) {}
+})();
+"""
+
+_JS_READY_FOR_DIAL = """
+(function(){
+  function vis(el){
+    if(!el) return false;
+    var s=window.getComputedStyle(el), r=el.getBoundingClientRect();
+    return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;
+  }
+  var body=(document.body&&document.body.innerText||'').toLowerCase();
+  if(body && body.trim()==='voice') return false;
+  var readyText = (
+    body.indexOf('latest calls')!==-1 ||
+    body.indexOf('enter a name or number')!==-1 ||
+    body.indexOf('keypad')!==-1 ||
+    body.indexOf('calls')!==-1
+  );
+  if(!readyText) return false;
+  var controls=[
+    'button[aria-label*="keypad" i]','button[aria-label*="dialpad" i]',
+    'button[aria-label*="new call" i]','button[aria-label*="make a call" i]',
+    'input[placeholder*="name" i]','input[placeholder*="number" i]'
+  ];
+  for(var i=0;i<controls.length;i++){
+    var el=document.querySelector(controls[i]);
+    if(vis(el)) return true;
+  }
+  return readyText;
 })();
 """
 
@@ -142,7 +184,54 @@ _JS_DETECT_STATE = r"""
     .replace(/\s+/g, ' ')
     .trim();
 
-  // 1. Voicemail — check before ringing/connected (VM also shows hangup)
+  var hasRingingText = (
+    callText.indexOf('ringing')!==-1 || callText.indexOf('calling')!==-1 ||
+    callText.indexOf('connecting')!==-1 ||
+    callText.indexOf('trying to connect')!==-1
+  );
+  var hasRingingNode = false;
+  var ringSels=['[aria-label*="Ringing" i]','[aria-label*="Calling" i]',
+    '[aria-label*="Connecting" i]'];
+  for(var r=0;r<ringSels.length;r++){
+    var rg=q(activeRoot, ringSels[r]);
+    if(vis(rg)) { hasRingingNode = true; break; }
+  }
+
+  var timerText = '';
+  var hasTimer = false;
+  var timerSels=['[jsname="pRLmDf"]','.call-duration','[aria-label*="call duration" i]',
+    '[data-e2eid="call-timer"]'];
+  for(var t=0;t<timerSels.length;t++){
+    var el=q(activeRoot, timerSels[t]);
+    if(!vis(el)) continue;
+    var tx=(el.textContent||el.getAttribute('aria-label')||'').replace(/\s+/g,' ').trim();
+    if(/^(?:\d{1,2}:)?\d{1,2}:\d{2}$/.test(tx) || /^\d{1,2}:\d{2}$/.test(tx)) {
+      hasTimer = true;
+      timerText = tx;
+      break;
+    }
+  }
+
+  var hasEnabledAnswerControl = false;
+  var answerControl = '';
+  var ansCtrl=['button[aria-label*="Hold call" i]','button[aria-label*="Mute call" i]',
+    'button[aria-label*="Unmute call" i]','button[aria-label*="Transfer" i]'];
+  for(var a=0;a<ansCtrl.length;a++){
+    var btn=q(activeRoot, ansCtrl[a]);
+    if(vis(btn) && !btn.disabled && btn.getAttribute('aria-disabled')!=='true') {
+      hasEnabledAnswerControl = true;
+      answerControl = ansCtrl[a];
+      break;
+    }
+  }
+
+  // Vicidial-style AMD stage gate: ringing is never voicemail. Only allow
+  // machine cues after pickup evidence (timer or enabled in-call controls).
+  if((hasRingingText || hasRingingNode) && !hasTimer && !hasEnabledAnswerControl) {
+    return out('RINGING', {hasRingingText:hasRingingText, hasRingingNode:hasRingingNode});
+  }
+
+  // 1. Voicemail — only after answer evidence; detector will confirm it.
   var vmPhrases=[
     'leave a message','leave your message','leave your name and number',
     'leave your name, number','reason for call','record after the tone',
@@ -174,7 +263,10 @@ _JS_DETECT_STATE = r"""
   ];
   for(var p=0;p<vmPhrases.length;p++){
     if(callText.indexOf(vmPhrases[p])!==-1) {
-      return out('VOICEMAIL', {hasVoicemailCue:true, voicemailMatch:vmPhrases[p]});
+      return out('VOICEMAIL', {hasVoicemailCue:true, voicemailMatch:vmPhrases[p],
+        hasTimer:hasTimer, timerText:timerText,
+        hasEnabledAnswerControl:hasEnabledAnswerControl, answerControl:answerControl,
+        hasRingingText:hasRingingText, hasRingingNode:hasRingingNode});
     }
   }
   var vmPatterns=[
@@ -187,7 +279,10 @@ _JS_DETECT_STATE = r"""
   ];
   for(var rp=0;rp<vmPatterns.length;rp++){
     if(vmPatterns[rp].test(callText)) {
-      return out('VOICEMAIL', {hasVoicemailCue:true, voicemailMatch:String(vmPatterns[rp])});
+      return out('VOICEMAIL', {hasVoicemailCue:true, voicemailMatch:String(vmPatterns[rp]),
+        hasTimer:hasTimer, timerText:timerText,
+        hasEnabledAnswerControl:hasEnabledAnswerControl, answerControl:answerControl,
+        hasRingingText:hasRingingText, hasRingingNode:hasRingingNode});
     }
   }
   var vmSels=['.voicemail-indicator','[data-e2eid="voicemail-record"]',
@@ -195,37 +290,17 @@ _JS_DETECT_STATE = r"""
     '[title*="leave a message" i]','[data-tooltip*="voicemail" i]'];
   for(var v=0;v<vmSels.length;v++){
     var vm=q(activeRoot, vmSels[v]);
-    if(vis(vm)) return out('VOICEMAIL', {hasVoicemailCue:true, voicemailMatch:vmSels[v]});
-  }
-
-  var hasRingingText = (
-    callText.indexOf('ringing')!==-1 || callText.indexOf('calling')!==-1 ||
-    callText.indexOf('connecting')!==-1 ||
-    callText.indexOf('trying to connect')!==-1
-  );
-  var hasRingingNode = false;
-  var ringSels=['[aria-label*="Ringing" i]','[aria-label*="Calling" i]',
-    '[aria-label*="Connecting" i]'];
-  for(var r=0;r<ringSels.length;r++){
-    var rg=q(activeRoot, ringSels[r]);
-    if(vis(rg)) { hasRingingNode = true; break; }
+    if(vis(vm)) return out('VOICEMAIL', {hasVoicemailCue:true, voicemailMatch:vmSels[v],
+      hasTimer:hasTimer, timerText:timerText,
+      hasEnabledAnswerControl:hasEnabledAnswerControl, answerControl:answerControl,
+      hasRingingText:hasRingingText, hasRingingNode:hasRingingNode});
   }
 
   // 2. Live answer — MM:SS call timer (strict).
   // Some GV panels keep stale "calling" text after pickup, so answer signals
   // must be allowed to override ringing text.
-  var timerSels=['[jsname="pRLmDf"]','.call-duration','[aria-label*="call duration" i]',
-    '[data-e2eid="call-timer"]'];
-  for(var t=0;t<timerSels.length;t++){
-    var el=q(activeRoot, timerSels[t]);
-    if(!vis(el)) continue;
-    var tx=(el.textContent||el.getAttribute('aria-label')||'').replace(/\s+/g,' ').trim();
-    if(/^(?:\d{1,2}:)?\d{1,2}:\d{2}$/.test(tx)) {
-      return out('CONNECTED', {hasTimer:true, timerText:tx, hasRingingText:hasRingingText, hasRingingNode:hasRingingNode});
-    }
-    if(/^\d{1,2}:\d{2}$/.test(tx)) {
-      return out('CONNECTED', {hasTimer:true, timerText:tx, hasRingingText:hasRingingText, hasRingingNode:hasRingingNode});
-    }
+  if(hasTimer) {
+    return out('CONNECTED', {hasTimer:true, timerText:timerText, hasRingingText:hasRingingText, hasRingingNode:hasRingingNode});
   }
 
   // 3. Ringing / calling (before pickup). Do this before checking call
@@ -234,13 +309,8 @@ _JS_DETECT_STATE = r"""
     return out('RINGING', {hasRingingText:hasRingingText, hasRingingNode:hasRingingNode});
   }
 
-  var ansCtrl=['button[aria-label*="Hold call" i]','button[aria-label*="Mute call" i]',
-    'button[aria-label*="Unmute call" i]','button[aria-label*="Transfer" i]'];
-  for(var a=0;a<ansCtrl.length;a++){
-    var btn=q(activeRoot, ansCtrl[a]);
-    if(vis(btn) && !btn.disabled && btn.getAttribute('aria-disabled')!=='true') {
-      return out('CONNECTED_CTRL', {hasEnabledAnswerControl:true, answerControl:ansCtrl[a]});
-    }
+  if(hasEnabledAnswerControl) {
+    return out('CONNECTED_CTRL', {hasEnabledAnswerControl:true, answerControl:answerControl});
   }
 
   // 4. Call ended
@@ -265,6 +335,39 @@ _JS_HANGUP = """
     if(btn){ btn.click(); return 'hung_up'; }
   }
   return 'not_found';
+})();
+"""
+
+_JS_ACTIVE_CALL_PRESENT = """
+(function(){
+  function vis(el){
+    if(!el) return false;
+    var s=getComputedStyle(el), r=el.getBoundingClientRect();
+    return s.display!=='none' && s.visibility!=='hidden' && r.width>0 && r.height>0;
+  }
+  var hangSels=[
+    'button[aria-label*="Hang up" i]',
+    'button[aria-label*="End call" i]',
+    'button[title*="Hang up" i]',
+    'gv-icon-button[icon-name="call_end"]',
+    '[data-action="end-call"]'
+  ];
+  for(var i=0;i<hangSels.length;i++){
+    var hang=document.querySelector(hangSels[i]);
+    if(vis(hang)) return true;
+  }
+  var controlSels=[
+    'button[aria-label*="Mute" i]',
+    'button[aria-label*="Hold" i]',
+    'button[aria-label*="Add" i]',
+    'button[aria-label*="Message" i]',
+    'button[aria-label*="Record" i]'
+  ];
+  for(var c=0;c<controlSels.length;c++){
+    var ctrl=document.querySelector(controlSels[c]);
+    if(vis(ctrl)) return true;
+  }
+  return false;
 })();
 """
 
@@ -394,15 +497,61 @@ def _js_dial(phone: str) -> str:
 
   function setNativeVal(el,val){{
     try{{
+      if(el.isContentEditable || !('value' in el)){{
+        el.focus();
+        try{{
+          var sel=window.getSelection();
+          var range=document.createRange();
+          range.selectNodeContents(el);
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }}catch(e){{}}
+        if(document.execCommand){{
+          document.execCommand('delete', false, null);
+          document.execCommand('insertText', false, val);
+        }}
+        if((el.innerText||el.textContent||'')!==val){{
+          el.textContent=val;
+        }}
+        el.dispatchEvent(new InputEvent('input',{{bubbles:true,inputType:'insertText',data:val}}));
+        el.dispatchEvent(new Event('change',{{bubbles:true}}));
+        return;
+      }}
       var proto=el.tagName==='TEXTAREA'
         ?window.HTMLTextAreaElement.prototype
         :window.HTMLInputElement.prototype;
       var setter=Object.getOwnPropertyDescriptor(proto,'value').set;
-      el.focus(); setter.call(el,val);
+      el.focus();
+      el.click();
+      setter.call(el,'');
+      el.dispatchEvent(new InputEvent('input',{{bubbles:true,inputType:'deleteContentBackward',data:null}}));
+      var current='';
+      for(var i=0;i<val.length;i++){{
+        var ch=val.charAt(i);
+        try{{
+          el.dispatchEvent(new KeyboardEvent('keydown',{{bubbles:true,cancelable:true,key:ch}}));
+          el.dispatchEvent(new InputEvent('beforeinput',{{bubbles:true,cancelable:true,inputType:'insertText',data:ch}}));
+        }}catch(e){{}}
+        current += ch;
+        setter.call(el,current);
+        try{{
+          el.dispatchEvent(new InputEvent('input',{{bubbles:true,inputType:'insertText',data:ch}}));
+        }}catch(e){{
+          el.dispatchEvent(new Event('input',{{bubbles:true}}));
+        }}
+        try{{
+          el.dispatchEvent(new KeyboardEvent('keyup',{{bubbles:true,cancelable:true,key:ch}}));
+        }}catch(e){{}}
+      }}
+      if((el.value||'')!==val) setter.call(el,val);
     }}catch(e){{ el.value=val; }}
-    ['keydown','keypress','input','keyup','change'].forEach(function(type){{
-      el.dispatchEvent(new Event(type,{{bubbles:true}}));
-    }});
+    try {{
+      el.dispatchEvent(new InputEvent('input',{{bubbles:true,inputType:'insertText',data:val}}));
+    }} catch(e) {{
+      el.dispatchEvent(new Event('input',{{bubbles:true}}));
+    }}
+    el.dispatchEvent(new Event('change',{{bubbles:true}}));
+    el.dispatchEvent(new KeyboardEvent('keyup',{{bubbles:true,key:(val||'').slice(-1)||'0'}}));
   }}
 
   function visible(el){{
@@ -411,84 +560,340 @@ def _js_dial(phone: str) -> str:
     return r.width>0 && r.height>0 && s.display!=='none' && s.visibility!=='hidden';
   }}
 
+  function disabled(el){{
+    return !el || el.disabled || el.getAttribute('aria-disabled')==='true' ||
+      el.getAttribute('disabled')!==null;
+  }}
+
+  function fireClick(el){{
+    if(!el) return false;
+    try{{
+      el.scrollIntoView({{block:'center', inline:'center'}});
+    }}catch(e){{}}
+    try{{
+      ['pointerdown','mousedown','mouseup','pointerup','click'].forEach(function(type){{
+        var opts={{bubbles:true,cancelable:true,view:window,button:0,buttons:type.indexOf('down')!==-1?1:0}};
+        var ev = type.indexOf('pointer')===0 && window.PointerEvent
+          ? new PointerEvent(type, opts)
+          : new MouseEvent(type, opts);
+        el.dispatchEvent(ev);
+      }});
+      if(typeof el.click==='function') el.click();
+      return true;
+    }}catch(e){{
+      try{{ el.click(); return true; }}catch(ex){{ return false; }}
+    }}
+  }}
+
+  function roots(){{
+    var out=[document];
+    var seen=new Set(out);
+    for(var i=0;i<out.length;i++){{
+      var root=out[i];
+      var nodes=[];
+      try{{ nodes=Array.from(root.querySelectorAll('*')); }}catch(e){{}}
+      for(var n=0;n<nodes.length;n++){{
+        var sr=nodes[n].shadowRoot;
+        if(sr && !seen.has(sr)){{
+          seen.add(sr);
+          out.push(sr);
+        }}
+      }}
+    }}
+    return out;
+  }}
+
+  function qsa(sel){{
+    var found=[];
+    roots().forEach(function(root){{
+      try{{ found=found.concat(Array.from(root.querySelectorAll(sel))); }}catch(e){{}}
+    }});
+    return found;
+  }}
+
+  function textBits(el){{
+    var bits=[];
+    if(!el) return '';
+    ['aria-label','placeholder','title','name','type','autocomplete','data-e2eid','data-action'].forEach(function(attr){{
+      var v=el.getAttribute && el.getAttribute(attr);
+      if(v) bits.push(v);
+    }});
+    var p=el.parentElement;
+    for(var i=0;p && i<3;i++,p=p.parentElement){{
+      var t=(p.innerText||p.textContent||'').replace(/\\s+/g,' ').trim();
+      if(t) bits.push(t.slice(0,160));
+    }}
+    return bits.join(' ').toLowerCase();
+  }}
+
+  function attrBits(el){{
+    var bits=[];
+    ['aria-label','placeholder','title','name','type','autocomplete','data-e2eid','data-action'].forEach(function(attr){{
+      var v=el && el.getAttribute && el.getAttribute(attr);
+      if(v) bits.push(v);
+    }});
+    return bits.join(' ').toLowerCase();
+  }}
+
+  function editableValue(el){{
+    if(!el) return '';
+    if('value' in el) return el.value || '';
+    return el.innerText || el.textContent || '';
+  }}
+
+  function digitsOf(text){{
+    return (text || '').replace(/\\D/g,'');
+  }}
+
+  function sameNumber(candidateDigits, wantedDigits){{
+    if(!candidateDigits || !wantedDigits) return false;
+    if(candidateDigits === wantedDigits) return true;
+    var minLen=Math.min(candidateDigits.length, wantedDigits.length);
+    if(minLen < 7) return false;
+    return candidateDigits.slice(-minLen) === wantedDigits.slice(-minLen) ||
+      candidateDigits.slice(-10) === wantedDigits.slice(-10);
+  }}
+
   function findNumberInput(){{
-    var inputs=Array.from(document.querySelectorAll('input,textarea'));
+    var inputs=qsa('input,textarea,[contenteditable="true"],[contenteditable=""],[role="textbox"],[role="combobox"]');
     for(var i=0;i<inputs.length;i++){{
       var el=inputs[i];
-      var aria=(el.getAttribute('aria-label')||'').toLowerCase();
-      var ph=(el.getAttribute('placeholder')||'').toLowerCase();
-      if(!visible(el) || el.disabled) continue;
-      if(aria.indexOf('number')!==-1 || ph.indexOf('number')!==-1 ||
-         ph.indexOf('name')!==-1) return el;
+      if(!visible(el) || disabled(el)) continue;
+      var bits=textBits(el);
+      var attrs=attrBits(el);
+      var tag=(el.tagName||'').toLowerCase();
+      var role=(el.getAttribute('role')||'').toLowerCase();
+      var type=(el.getAttribute('type')||'').toLowerCase();
+      if(type==='hidden' || type==='password' || type==='email') continue;
+      if(attrs.indexOf('call as')!==-1 || attrs.indexOf('receiving calls')!==-1) continue;
+      if((role==='textbox' || role==='combobox' || el.isContentEditable) &&
+         attrs.indexOf('number')===-1 &&
+         attrs.indexOf('name')===-1 &&
+         attrs.indexOf('phone')===-1) continue;
+      if(
+        type==='tel' ||
+        bits.indexOf('enter a name or number')!==-1 ||
+        bits.indexOf('name or number')!==-1 ||
+        bits.indexOf('phone number')!==-1 ||
+        bits.indexOf('number')!==-1 ||
+        (bits.indexOf('name')!==-1 && (tag==='input' || role==='textbox' || role==='combobox'))
+      ) return el;
     }}
     return null;
   }}
 
-  function findCallButton(){{
-    var buttons=Array.from(document.querySelectorAll('button,[role="button"],gv-icon-button'));
+  function findCallButton(wantedDigits){{
+    var buttons=qsa('button,[role="button"],gv-icon-button,[data-action="call"],[role="option"],[role="menuitem"]');
     var input=findNumberInput();
+    var wrongNumberButtons=[];
+    var disabledMatchingButton=null;
     for(var i=0;i<buttons.length;i++){{
       var btn=buttons[i];
       var aria=(btn.getAttribute('aria-label')||'').toLowerCase();
+      var icon=(btn.getAttribute('icon-name')||'').toLowerCase();
+      var data=(btn.getAttribute('data-action')||'').toLowerCase();
       var text=(btn.innerText||btn.textContent||'').trim().toLowerCase();
-      if(!visible(btn) || btn.disabled) continue;
+      if(!visible(btn)) continue;
       if(aria.indexOf('end')!==-1 || aria.indexOf('video')!==-1) continue;
+      var label=(aria+' '+text+' '+icon+' '+data).replace(/\\s+/g,' ').trim();
+      var buttonDigits=digitsOf(label);
+      if(buttonDigits && !sameNumber(buttonDigits, wantedDigits)){{
+        if(aria.indexOf('call')!==-1 || text==='call' || icon==='call' || data==='call') {{
+          wrongNumberButtons.push(buttonDigits);
+        }}
+        continue;
+      }}
+      if(disabled(btn)){{
+        if(buttonDigits && sameNumber(buttonDigits, wantedDigits)) disabledMatchingButton=btn;
+        continue;
+      }}
       if(input){{
         var br=btn.getBoundingClientRect(), ir=input.getBoundingClientRect();
         var nearInput=Math.abs((br.top+br.bottom)/2 - (ir.top+ir.bottom)/2) < 180;
         if(!nearInput && text==='call') continue;
       }}
-      if(aria.indexOf('call +')===0 || (text==='call' && aria.indexOf('call')===0)){{
+      if(
+        aria.indexOf('call +')===0 ||
+        aria.indexOf('call')===0 ||
+        text==='call' ||
+        icon==='call' ||
+        data==='call'
+      ){{
         return btn;
       }}
     }}
+    if(disabledMatchingButton) return {{disabledButton: disabledMatchingButton}};
+    if(wrongNumberButtons.length){{
+      return {{wrongNumber: wrongNumberButtons[0]}};
+    }}
     return null;
+  }}
+
+  function clickKeypadDigits(digits){{
+    var buttons=qsa('button,[role="button"],gv-icon-button');
+    var clicked=0;
+    for(var d=0; d<digits.length; d++){{
+      var digit=digits.charAt(d);
+      var found=null;
+      for(var i=0;i<buttons.length;i++){{
+        var btn=buttons[i];
+        var aria=(btn.getAttribute('aria-label')||'').toLowerCase();
+        var text=(btn.innerText||btn.textContent||'').replace(/\\s+/g,' ').trim();
+        if(!visible(btn) || disabled(btn)) continue;
+        if(text===digit || text.indexOf(digit+' ')===0 ||
+           aria.indexOf(\"'\"+digit+\"'\")!==-1 || aria===digit ||
+           aria.indexOf(digit)===0) {{
+          found=btn;
+          break;
+        }}
+      }}
+      if(!found) return false;
+      fireClick(found);
+      clicked++;
+    }}
+    return clicked===digits.length;
   }}
 
   function openDialpadIfNeeded(){{
     if(findNumberInput()) return true;
     var dpSels=['button[aria-label*="keypad" i]','button[aria-label*="dialpad" i]',
+                'gv-icon-button[icon-name="phone"]',
                 'gv-new-conversation-fab','[data-action="new-call"]',
-                'button[aria-label*="new call" i]','button[aria-label*="make a call" i]'];
+                'button[aria-label*="new call" i]','button[aria-label*="make a call" i]',
+                'button[aria-label*="make" i]'];
     for(var i=0;i<dpSels.length;i++){{
-      var btn=document.querySelector(dpSels[i]);
-      if(btn && visible(btn) && !btn.disabled){{ btn.click(); return false; }}
+      var btn=qsa(dpSels[i])[0];
+      if(btn && visible(btn) && !disabled(btn)){{ fireClick(btn); return false; }}
     }}
     return false;
   }}
 
+  try{{ window.focus(); }}catch(e){{}}
+  try{{ window.dispatchEvent(new Event('resize')); }}catch(e){{}}
   openDialpadIfNeeded();
   var inp=findNumberInput();
   if(!inp){{ window.__gvDialStatus='number_input_missing'; return window.__gvDialStatus; }}
 
-  setNativeVal(inp,phone);
   var digits=phone.replace(/\\D/g,'');
-  var current=(inp.value||'').replace(/\\D/g,'');
-  if(current.indexOf(digits)===-1 && digits.indexOf(current)===-1){{
-    window.__gvDialStatus='number_not_entered';
+  setNativeVal(inp,phone);
+  var current=editableValue(inp).replace(/\\D/g,'');
+  var numberEntered = current.length >= Math.min(7, digits.length) &&
+    (current.indexOf(digits)!==-1 || digits.indexOf(current)!==-1 ||
+     current.slice(-10)===digits.slice(-10));
+  if(!numberEntered){{
+    setNativeVal(inp,'');
+    if(clickKeypadDigits(digits)){{
+      current=editableValue(inp).replace(/\\D/g,'');
+      numberEntered = current.length >= Math.min(7, digits.length) &&
+        (current.indexOf(digits)!==-1 || digits.indexOf(current)!==-1 ||
+         current.slice(-10)===digits.slice(-10));
+    }}
+  }}
+  if(!numberEntered){{
+    window.__gvDialStatus='number_not_entered|value='+editableValue(inp).slice(0,40);
     return window.__gvDialStatus;
   }}
 
-  var btn=findCallButton();
-  if(!btn){{
-    var anyCall=Array.from(document.querySelectorAll('button,[role="button"],gv-icon-button')).filter(function(b){{
-      var aria=(b.getAttribute('aria-label')||'').toLowerCase();
-      var text=(b.innerText||b.textContent||'').trim().toLowerCase();
-      return visible(b) && (aria.indexOf('call')!==-1 || text==='call');
-    }})[0];
-    window.__gvDialStatus = anyCall && anyCall.disabled ? 'call_button_disabled' : 'call_button_missing';
+  function fallbackToKeypad(){{
+    setNativeVal(inp,'');
+    var clickedDigits=clickKeypadDigits(digits);
+    if(!clickedDigits) return false;
+    current=editableValue(inp).replace(/\\D/g,'');
+    var inputReflectsDigits = current.length >= Math.min(7, digits.length) &&
+      (current.indexOf(digits)!==-1 || digits.indexOf(current)!==-1 ||
+       current.slice(-10)===digits.slice(-10));
+    return clickedDigits || inputReflectsDigits;
+  }}
+
+  function nativeKeyStatus(reason){{
+    try{{
+      var ir=inp.getBoundingClientRect();
+      var meta=((inp.tagName||'')+' role='+(inp.getAttribute('role')||'')+
+        ' aria='+(inp.getAttribute('aria-label')||'')+
+        ' ph='+(inp.getAttribute('placeholder')||'')+
+        ' value='+editableValue(inp).slice(0,30)).replace(/\\s+/g,' ');
+      return 'input_needs_native_keys|reason='+reason+
+        '|x='+Math.round(ir.left+Math.max(4, Math.min(ir.width/2, 30)))+
+        '|y='+Math.round(ir.top+ir.height/2)+
+        '|input='+meta.slice(0,120);
+    }}catch(e){{
+      return 'call_button_missing';
+    }}
+  }}
+
+  var btn=findCallButton(digits);
+  if(btn && btn.disabledButton && fallbackToKeypad()){{
+    btn=findCallButton(digits);
+  }}
+  if(btn && btn.disabledButton){{
+    window.__gvDialStatus = nativeKeyStatus('disabled');
     return window.__gvDialStatus;
   }}
-  btn.click();
+  if(btn && btn.wrongNumber){{
+    window.__gvDialStatus = 'call_button_wrong_number|wanted='+digits.slice(-10)+'|found='+btn.wrongNumber.slice(-10);
+    return window.__gvDialStatus;
+  }}
+  if(!btn){{
+    if(fallbackToKeypad()){{
+      btn=findCallButton(digits);
+    }}
+  }}
+  if(!btn){{
+    var anyCall=qsa('button,[role="button"],gv-icon-button,[data-action="call"],[role="option"],[role="menuitem"]').filter(function(b){{
+      var aria=(b.getAttribute('aria-label')||'').toLowerCase();
+      var icon=(b.getAttribute('icon-name')||'').toLowerCase();
+      var data=(b.getAttribute('data-action')||'').toLowerCase();
+      var text=(b.innerText||b.textContent||'').trim().toLowerCase();
+      var buttonDigits=digitsOf(aria+' '+text+' '+icon+' '+data);
+      return visible(b) &&
+        (!buttonDigits || sameNumber(buttonDigits, digits)) &&
+        (aria.indexOf('call')!==-1 || text==='call' || icon==='call' || data==='call');
+    }})[0];
+    if(anyCall && disabled(anyCall)){{
+      window.__gvDialStatus = nativeKeyStatus('disabled');
+      return window.__gvDialStatus;
+    }}
+    window.__gvDialStatus = nativeKeyStatus('missing');
+    return window.__gvDialStatus;
+  }}
+  if(btn && btn.disabledButton){{
+    window.__gvDialStatus = nativeKeyStatus('disabled');
+    return window.__gvDialStatus;
+  }}
+  if(btn && btn.wrongNumber){{
+    window.__gvDialStatus = 'call_button_wrong_number|wanted='+digits.slice(-10)+'|found='+btn.wrongNumber.slice(-10);
+    return window.__gvDialStatus;
+  }}
+  var br=btn.getBoundingClientRect();
   var clickedAria=(btn.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim();
   var clickedText=(btn.innerText||btn.textContent||'').replace(/\\s+/g,' ').trim();
-  window.__gvDialStatus='call_button_clicked|aria='+clickedAria.slice(0,80)+'|text='+clickedText.slice(0,80);
+  if(fireClick(btn)) {{
+    window.__gvDialStatus='call_button_clicked_js|x='+Math.round(br.left+br.width/2)+
+      '|y='+Math.round(br.top+br.height/2)+
+      '|aria='+clickedAria.slice(0,80)+'|text='+clickedText.slice(0,80);
+    return window.__gvDialStatus;
+  }}
+  window.__gvDialStatus='call_button_ready|x='+Math.round(br.left+br.width/2)+
+    '|y='+Math.round(br.top+br.height/2)+
+    '|aria='+clickedAria.slice(0,80)+'|text='+clickedText.slice(0,80);
   return window.__gvDialStatus;
 }})();
 """
 
 
 # ── GVController ──────────────────────────────────────────────────────────────
+class _GVWebEnginePage(QWebEnginePage):
+    """Google Voice page wrapper that prevents modal prompts blocking slots."""
+
+    def javaScriptConfirm(self, securityOrigin: QUrl, msg: str) -> bool:
+        text = (msg or "").lower()
+        if "leave this page" in text or "changes that you made may not be saved" in text:
+            return False
+        return False
+
+    def javaScriptAlert(self, securityOrigin: QUrl, msg: str) -> None:
+        return None
+
 
 class GVController(QObject):
     """
@@ -507,14 +912,14 @@ class GVController(QObject):
 
     def __init__(self, slot_id: int, profile_dir: str, parent: QObject = None,
                  profile_key: str = "", login_email: str = "",
-                 login_password: str = ""):
+                 login_password: str = "", runtime_cfg: dict | None = None):
         super().__init__(parent)
         self.slot_id     = slot_id
         self.profile_dir = profile_dir
         self._state      = "IDLE"
         self._ctrl_count = 0   # debounce for answered-controls
         self._call_state_engine = CallStateEngine()
-        self._runtime_cfg = self._load_runtime_cfg()
+        self._runtime_cfg = runtime_cfg or self._load_runtime_cfg()
         audio_enabled = bool(self._runtime_cfg.get("enable_ai_audio", True))
         self._decision_engine = CallDecisionEngine(
             detector_config=DetectionConfig(
@@ -541,13 +946,18 @@ class GVController(QObject):
         key = re.sub(r"[^a-zA-Z0-9_]+", "_", key).strip("_") or f"slot_{slot_id}"
         # Unique in-process name; cookies/session live in profile_dir on disk.
         self._profile = QWebEngineProfile(f"gv_{key}_{uuid.uuid4().hex[:8]}")
+        self._profile.setHttpUserAgent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0.0.0 Safari/537.36"
+        )
         self._profile.setPersistentStoragePath(profile_dir)
         self._profile.setCachePath(cache_dir)
         self._profile.setPersistentCookiesPolicy(
             QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies
         )
 
-        self._page = QWebEnginePage(self._profile)
+        self._page = _GVWebEnginePage(self._profile)
         self._page.featurePermissionRequested.connect(self._grant_permission)
         self._page.setAudioMuted(not audio_enabled)
 
@@ -575,6 +985,13 @@ class GVController(QObject):
 
         self.view = QWebEngineView()
         self.view.setPage(self._page)
+        self.view.resize(1280, 900)
+        self.view.setMinimumSize(1024, 720)
+        if hasattr(self._page, "setViewportSize"):
+            try:
+                self._page.setViewportSize(QSize(1280, 900))
+            except Exception:
+                pass
         self._page.setBackgroundColor(QColor("#ffffff"))
         self.view.setStyleSheet("background-color: #ffffff;")
         self._load_ok = False
@@ -609,8 +1026,12 @@ class GVController(QObject):
         self._pending_dial_phone = ""
         self._current_call_phone = ""
         self._dial_step_attempts = 0
+        self._calls_ready_attempts = 0
+        self._native_key_attempted = False
+        self._native_key_attempts = 0
         self._call_clicked_at = 0.0
         self._min_answer_seconds = 10.0
+        self.prepare_for_background_rendering()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -655,8 +1076,19 @@ class GVController(QObject):
             page.deleteLater()
             self._page = None  # type: ignore[assignment]
         if view is not None:
+            try:
+                view.setParent(None)
+            except Exception:
+                pass
             view.deleteLater()
             self.view = None  # type: ignore[assignment]
+        profile = getattr(self, "_profile", None)
+        if profile is not None:
+            try:
+                profile.deleteLater()
+            except Exception:
+                pass
+            self._profile = None  # type: ignore[assignment]
 
     def _page_alive(self) -> bool:
         return getattr(self, "_page", None) is not None
@@ -734,8 +1166,28 @@ class GVController(QObject):
         self._autofill_paused = True
         self._login_fill_timer.stop()
 
+    def prepare_for_background_rendering(self) -> None:
+        """Keep Google Voice rendered without showing the browser to the user."""
+        max_dim = 16777215
+        self.view.setParent(None)
+        self.view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
+        self.view.setWindowFlag(Qt.WindowType.Tool, True)
+        self.view.setMinimumSize(1024, 720)
+        self.view.setMaximumSize(max_dim, max_dim)
+        self.view.resize(1280, 900)
+        self.view.move(-20000, -20000)
+        if hasattr(self._page, "setViewportSize"):
+            try:
+                self._page.setViewportSize(QSize(1280, 900))
+            except Exception:
+                pass
+        self.view.show()
+        self._page.runJavaScript(_JS_FORCE_VISIBLE)
+        self._page.runJavaScript(_JS_REFRESH_LAYOUT)
+
     def start_polling(self) -> None:
-        self._poll_timer.start()
+        if self._active_call:
+            self._poll_timer.start()
 
     def stop_polling(self) -> None:
         self._poll_timer.stop()
@@ -753,67 +1205,262 @@ class GVController(QObject):
         self._pending_dial_phone = phone
         self._current_call_phone = phone
         self._dial_step_attempts = 0
+        self._calls_ready_attempts = 0
+        self._native_key_attempted = False
+        self._native_key_attempts = 0
         self._dial_started_at = time.monotonic()
         self._vm_count = 0
         self._idle_count = 0
         self._ctrl_count = 0
         self._decision_engine.start_call()
         self._set_state("DIALING")
+        if bool(self._runtime_cfg.get("dry_run_mode", False)):
+            self._emit_log("Dry-run mode: simulated dial, no Google Voice call placed")
+            self._pending_dial_phone = ""
+            self._call_clicked_at = time.monotonic()
+            QTimer.singleShot(700, self._dry_run_mark_ringing)
+            timeout_ms = min(
+                int(float(self._runtime_cfg.get("call_timeout", 45)) * 1000),
+                8000,
+            )
+            QTimer.singleShot(max(1800, timeout_ms), self._dry_run_finish_no_answer)
+            return
         if audio_enabled := bool(self._runtime_cfg.get("enable_ai_audio", True)):
             self._page.setAudioMuted(False)
         self._page.runJavaScript(_JS_FORCE_VISIBLE)
         self._ensure_calls_page_then_dial()
-        # Poll early and often while headless (DOM still updates)
-        QTimer.singleShot(800, self._poll_once)
-        QTimer.singleShot(1600, self._poll_once)
-        QTimer.singleShot(2400, self.start_polling)
         if self._dial_stuck_timer is not None:
             self._dial_stuck_timer.stop()
         self._dial_stuck_timer = QTimer(self)
         self._dial_stuck_timer.setSingleShot(True)
-        self._dial_stuck_timer.setInterval(35000)
+        self._dial_stuck_timer.setInterval(70000)
         self._dial_stuck_timer.timeout.connect(self._on_dial_stuck)
         self._dial_stuck_timer.start()
 
+    def _dry_run_mark_ringing(self) -> None:
+        if self._active_call and self._state == "DIALING":
+            self._set_state("RINGING")
+
+    def _dry_run_finish_no_answer(self) -> None:
+        if self._active_call and self._state in {"DIALING", "RINGING"}:
+            self._active_call = False
+            self._set_state("NO_ANSWER")
+
     def _ensure_calls_page_then_dial(self) -> None:
-        if not self._page_alive() or not self._pending_dial_phone:
+        if not self._active_call or not self._page_alive() or not self._pending_dial_phone:
             return
         url = self._page.url().toString()
         if "voice.google.com" not in url or "/calls" not in url:
             self._emit_log("Opening Google Voice calls page…")
-            self._page.load(QUrl(GV_CALLS_URL))
+            self._page.load(QUrl(_gv_direct_call_url(self._pending_dial_phone)))
             QTimer.singleShot(2500, self._ensure_calls_page_then_dial)
             return
+        if self._dial_step_attempts == 0 and "a=nc" not in url:
+            self._emit_log("Opening Google Voice direct dial link...")
+            self._page.load(QUrl(_gv_direct_call_url(self._pending_dial_phone)))
+            QTimer.singleShot(2500, self._ensure_calls_page_then_dial)
+            return
+        self._page.runJavaScript(_JS_REFRESH_LAYOUT)
         QTimer.singleShot(700, self._dial_step)
 
     def _dial_step(self) -> None:
-        if not self._page_alive() or not self._pending_dial_phone:
+        if not self._active_call or not self._page_alive() or not self._pending_dial_phone:
             return
         self._dial_step_attempts += 1
         phone = self._pending_dial_phone
         self._page.runJavaScript(_js_dial(phone), self._on_dial_step_result)
 
     def _on_dial_step_result(self, status: str) -> None:
+        if not self._active_call:
+            return
         status = status or "unknown"
+        status_base = status.split("|", 1)[0]
         self._emit_log(f"Dial UI status: {status}")
-        if status.startswith("call_button_clicked"):
+        if status.startswith("call_button_clicked_js"):
+            if not self._call_button_status_matches_pending(status):
+                self._emit_log("Ignoring stale JS call button for a different number")
+                self._handle_retryable_dial_status("call_button_wrong_number")
+                return
             self._call_clicked_at = time.monotonic()
             self._pending_dial_phone = ""
+            QTimer.singleShot(700, lambda s=status: self._retry_native_click_if_no_panel(s))
+            QTimer.singleShot(1700, lambda s=status: self._retry_native_click_if_no_panel(s))
+            QTimer.singleShot(800, self._poll_once)
+            QTimer.singleShot(1600, self._poll_once)
+            QTimer.singleShot(2400, self.start_polling)
             return
-        if status in (
+        if status.startswith("call_button_ready"):
+            if not self._call_button_status_matches_pending(status):
+                self._emit_log("Ignoring stale call button for a different number")
+                status = "call_button_wrong_number"
+                status_base = status
+            elif self._click_call_button_from_status(status):
+                self._call_clicked_at = time.monotonic()
+                self._pending_dial_phone = ""
+                self._emit_log("Dial UI status: call_button_clicked")
+                QTimer.singleShot(800, self._poll_once)
+                QTimer.singleShot(1600, self._poll_once)
+                QTimer.singleShot(2400, self.start_polling)
+                return
+            else:
+                status = "call_button_click_failed"
+                status_base = status
+        if status_base == "enter_pressed_no_call_button":
+            self._call_clicked_at = time.monotonic()
+            self._pending_dial_phone = ""
+            QTimer.singleShot(800, self._poll_once)
+            QTimer.singleShot(1600, self._poll_once)
+            QTimer.singleShot(2400, self.start_polling)
+            return
+        if status_base == "input_needs_native_keys":
+            if self._type_number_from_status(status):
+                QTimer.singleShot(900, self._dial_step)
+                return
+            status_base = "call_button_missing"
+        if status_base in (
             "number_input_missing",
             "number_not_entered",
             "call_button_missing",
             "call_button_disabled",
+            "call_button_disabled_for_target",
+            "call_button_wrong_number",
         ):
-            if self._dial_step_attempts < 12 and self._active_call:
-                QTimer.singleShot(900, self._dial_step)
-                return
+            self._handle_retryable_dial_status(status_base)
+            return
         if self._active_call:
             self._emit_log("Dial UI did not accept the number")
             self._active_call = False
             self.stop_polling()
             self._set_state("FAILED")
+
+    def _handle_retryable_dial_status(self, status_base: str) -> None:
+        if not self._active_call:
+            return
+        if not self._page_alive():
+            self._set_state("FAILED")
+            return
+
+        def after_active_check(active: object) -> None:
+            if not self._active_call:
+                return
+            if bool(active):
+                self._emit_log("Call panel is active - switching to call-state polling")
+                if not self._call_clicked_at:
+                    self._call_clicked_at = time.monotonic()
+                self._pending_dial_phone = ""
+                QTimer.singleShot(200, self._poll_once)
+                QTimer.singleShot(1000, self._poll_once)
+                QTimer.singleShot(1800, self.start_polling)
+                return
+
+            if status_base in ("number_input_missing", "call_button_wrong_number") and self._dial_step_attempts in (8, 18):
+                self._emit_log("Dialpad did not appear - reloading Google Voice direct dial link...")
+                self._page.load(QUrl(_gv_direct_call_url(self._pending_dial_phone or self._current_call_phone)))
+                QTimer.singleShot(2500, self._ensure_calls_page_then_dial)
+                return
+            if self._dial_step_attempts < 30:
+                QTimer.singleShot(900, self._dial_step)
+                return
+
+            self._emit_log("Dial UI did not accept the number")
+            self._active_call = False
+            self.stop_polling()
+            self._set_state("FAILED")
+
+        self._page.runJavaScript(_JS_ACTIVE_CALL_PRESENT, after_active_check)
+
+    def _retry_native_click_if_no_panel(self, status: str) -> None:
+        if not self._active_call or not self._page_alive():
+            return
+
+        def after_active_check(active: object) -> None:
+            if not self._active_call or bool(active):
+                return
+            if self._click_call_button_from_status(status):
+                self._call_clicked_at = time.monotonic()
+                self._emit_log("Dial UI status: native_call_click_retry")
+
+        self._page.runJavaScript(_JS_ACTIVE_CALL_PRESENT, after_active_check)
+
+    def _type_number_from_status(self, status: str) -> bool:
+        if getattr(self, "_native_key_attempts", 0) >= 3:
+            self._native_key_attempted = True
+            return False
+        try:
+            mx = re.search(r"(?:^|\|)x=(\d+)", status)
+            my = re.search(r"(?:^|\|)y=(-?\d+)", status)
+            if not mx or not my:
+                return False
+            x = int(mx.group(1))
+            y = int(my.group(1))
+            if x < 0 or y < 0 or x > self.view.width() or y > self.view.height():
+                self._emit_log(
+                    f"Dial UI native typing target off-screen ({x},{y}); waiting for dialpad"
+                )
+                return False
+            phone = self._pending_dial_phone or self._current_call_phone
+            digits = re.sub(r"\D", "", phone)
+            if not digits:
+                return False
+            self._native_key_attempts = getattr(self, "_native_key_attempts", 0) + 1
+            self._native_key_attempted = self._native_key_attempts >= 3
+            self.view.activateWindow()
+            self.view.setFocus()
+            global_pos = self.view.mapToGlobal(QPoint(x, y))
+            target = QApplication.widgetAt(global_pos) or self.view.focusProxy() or self.view
+            local_pos = target.mapFromGlobal(global_pos)
+            QTest.mouseClick(
+                target,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                local_pos,
+            )
+            QTest.keyClick(target, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+            QTest.keyClick(target, Qt.Key.Key_Backspace)
+            QTest.keyClicks(target, digits)
+            QTest.keyClick(target, Qt.Key.Key_Return)
+            self._emit_log("Dial UI status: native_number_typed")
+            return True
+        except Exception as exc:
+            self._emit_log(f"Native number typing failed: {exc}")
+            return False
+
+    def _call_button_status_matches_pending(self, status: str) -> bool:
+        wanted = re.sub(r"\D", "", self._pending_dial_phone or self._current_call_phone)
+        if not wanted:
+            return True
+        label = status
+        label = re.sub(r"(?:^|\|)x=\d+", "", label)
+        label = re.sub(r"(?:^|\|)y=\d+", "", label)
+        label_digits = re.sub(r"\D", "", label)
+        if not label_digits:
+            return True
+        min_len = min(len(wanted), len(label_digits))
+        return min_len < 7 or label_digits[-min_len:] == wanted[-min_len:]
+
+    def _click_call_button_from_status(self, status: str) -> bool:
+        try:
+            mx = re.search(r"(?:^|\|)x=(\d+)", status)
+            my = re.search(r"(?:^|\|)y=(\d+)", status)
+            if not mx or not my:
+                return False
+            x = int(mx.group(1))
+            y = int(my.group(1))
+            self.view.activateWindow()
+            self.view.setFocus()
+            global_pos = self.view.mapToGlobal(QPoint(x, y))
+            target = QApplication.widgetAt(global_pos) or self.view.focusProxy() or self.view
+            local_pos = target.mapFromGlobal(global_pos)
+            QTest.mouseClick(
+                target,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                local_pos,
+            )
+            return True
+        except Exception as exc:
+            self._emit_log(f"Dial UI mouse click failed: {exc}")
+            return False
 
     def _on_dial_stuck(self) -> None:
         if self._active_call and self._state == "DIALING":
@@ -830,6 +1477,10 @@ class GVController(QObject):
         if not self._page_alive():
             return
         self._active_call = False
+        self._pending_dial_phone = ""
+        self._call_clicked_at = 0.0
+        if self._dial_stuck_timer is not None:
+            self._dial_stuck_timer.stop()
         self._page.runJavaScript(_JS_HANGUP, lambda r: self._emit_log(
             f"Hangup: {r}"))
         self.stop_polling()
@@ -864,6 +1515,8 @@ class GVController(QObject):
         self._login_fill_timer.stop()
         self._stop_autofill()
         self._emit_log("Google Voice session saved")
+        if self._active_call and self._pending_dial_phone:
+            QTimer.singleShot(1000, self._ensure_calls_page_then_dial)
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
@@ -989,11 +1642,13 @@ class GVController(QObject):
         self._page.load(QUrl("https://accounts.google.com/"))
 
     def _poll_state(self) -> None:
-        if not self._page_alive():
+        if not self._active_call or not self._page_alive():
             return
         self._page.runJavaScript(_JS_DETECT_STATE, self._on_poll_result)
 
     def _on_poll_result(self, raw: object) -> None:
+        if not self._active_call:
+            return
         if not self._active_call and self._state in {"NO_ANSWER", "ENDED", "ENDED_MANUALLY", "FAILED", "BUSY"}:
             return
         self._pulse_heartbeat()
@@ -1010,8 +1665,13 @@ class GVController(QObject):
         fused_state = fused.state or decision.state or "IDLE"
         state = {
             "HUMAN": "CONNECTED",
-            "ANSWERED_PENDING": "RINGING",
+            "ANSWERED_PENDING": "ANSWERED_PENDING",
         }.get(fused_state, fused_state)
+        if state == "UNKNOWN" and self._active_call:
+            if self._state in {"DIALING", "RINGING", "ANSWERED_PENDING", "CONNECTED"}:
+                state = self._state
+            else:
+                state = "DIALING"
         debug = {
             "phone": self._current_call_phone or self._pending_dial_phone,
             "slot": self.slot_id,
@@ -1044,9 +1704,11 @@ class GVController(QObject):
             "vad_backend": getattr(audio_features, "vad_backend", ""),
             "vad_confidence": float(getattr(audio_features, "vad_confidence", 0.0) or 0.0),
         }
+        # Emit detection debug for UI/DB layers.
         self.detection_update.emit(self.slot_id, debug)
         if bool(self._runtime_cfg.get("live_debug_mode", False)):
             self._emit_call_debug(debug)
+
 
         if self._active_call and decision.state == "IDLE" and fused_state == "UNKNOWN":
             state = "IDLE"
@@ -1058,8 +1720,19 @@ class GVController(QObject):
                 self.stop_polling()
                 self._set_state("ENDED")
                 return
+            if (
+                self._state == "DIALING"
+                and self._call_clicked_at
+                and (time.monotonic() - self._call_clicked_at) >= 12.0
+            ):
+                self._emit_log("Dial attempt did not open a call panel")
+                self._active_call = False
+                self.stop_polling()
+                self._set_state("FAILED")
+                return
             self._idle_count += 1
-            age = time.monotonic() - self._dial_started_at
+            idle_reference = self._call_clicked_at or self._dial_started_at
+            age = time.monotonic() - idle_reference
             if age < 22.0:
                 state = self._state if self._state != "IDLE" else "DIALING"
             else:
@@ -1110,8 +1783,15 @@ class GVController(QObject):
         else:
             self._ctrl_count = 0
 
+        # Safety: do not churn into ringing/unknown when GV UI briefly
+        # disappears during early dialing. If we haven't reached the
+        # answer window yet, keep the last known state (usually RINGING).
         if raw_state == "CONNECTED" and not answer_window_ready and fused_state != "HUMAN":
-            state = "RINGING" if self._state != "CONNECTED" else "CONNECTED"
+            if self._state in ("RINGING", "DIALING"):
+                state = self._state
+            else:
+                state = "RINGING" if self._state != "CONNECTED" else "CONNECTED"
+
 
         if state == "CONNECTED" and self._state != "CONNECTED":
             self._emit_log("Live answer detected — person answered")
@@ -1119,6 +1799,8 @@ class GVController(QObject):
         # Promote DIALING → RINGING when in-call UI appears
         if state == "RINGING" and self._state == "DIALING":
             self._emit_log("Ringing…")
+        if state == "ANSWERED_PENDING" and self._state not in {"ANSWERED_PENDING", "CONNECTED"}:
+            self._emit_log("Answer detected — classifying human vs voicemail…")
 
         # Map ENDED back to IDLE after a brief pause
         if state == "ENDED":

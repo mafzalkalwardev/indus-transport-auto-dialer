@@ -383,6 +383,9 @@ class CRMDatabase:
     def get_completed_phones(self) -> set[str]:
         with self._conn() as c:
             rows = c.execute(
-                "SELECT DISTINCT phone FROM call_records WHERE status='ENDED'"
+                "SELECT DISTINCT phone FROM call_records "
+                "WHERE status IN ("
+                "'ENDED','ENDED_MANUALLY','VOICEMAIL','NO_ANSWER','BUSY','FAILED'"
+                ")"
             ).fetchall()
         return {r["phone"] for r in rows}

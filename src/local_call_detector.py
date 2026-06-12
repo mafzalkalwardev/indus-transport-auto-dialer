@@ -257,6 +257,9 @@ class LocalCallDetector:
             self._emit(DecisionState.ENDED, 0.9, "dom indicates ended")
             return self._build(DecisionState.ENDED, 0.9, "dom indicates ended")
 
+        if self._current_state == DecisionState.HUMAN:
+            return self._build(DecisionState.HUMAN, 0.95, "human pickup already detected")
+
         # 3) DIALING
         if elapsed_seconds <= 1.0 and dom_state in ("IDLE", "DIALING"):
             return self._transition(DecisionState.DIALING, 0.45, "initial dialing window")
@@ -311,6 +314,12 @@ class LocalCallDetector:
         speech_duration_seconds = float(_get("speech_duration_seconds", 0.0) or 0.0)
         silence_duration_seconds = float(_get("silence_duration_seconds", 0.0) or 0.0)
         voicemail_keywords_detected_count = int(_get("voicemail_keywords_detected_count", 0) or 0)
+        dom_voicemail_keywords = self._voicemail_detector.keyword_count(evidence.callText)
+        if dom_voicemail_keywords:
+            voicemail_keywords_detected_count = max(
+                voicemail_keywords_detected_count,
+                dom_voicemail_keywords,
+            )
         human_greeting_detected = bool(_get("human_greeting_detected", False) or False)
         short_speech_burst_detected = bool(_get("short_speech_burst_detected", False) or False)
         continuous_greeting_duration_seconds = float(_get("continuous_greeting_duration_seconds", 0.0) or 0.0)
@@ -601,6 +610,32 @@ class LocalCallDetector:
                 voicemail_conf=voicemail_score,
             )
 
+        no_machine_signal = (
+            not f_continuous
+            and not f_keywords
+            and not f_beep
+            and not f_repeated_pattern
+            and not f_dom_voicemail
+        )
+
+        # Vicidial-style AMD fallback: after the answer analysis window, a
+        # picked-up call with no machine signals is treated as human pickup.
+        if (
+            answer_elapsed_seconds >= self.config.answered_pending_seconds
+            and no_machine_signal
+            and (evidence.hasTimer or evidence.hasEnabledAnswerControl)
+        ):
+            reason = "answer analysis window completed without machine signals"
+            decision_debug["debug_reason"] = reason
+            self._emit(DecisionState.HUMAN, max(0.85, human_conf), reason, **decision_debug)
+            return self._build(
+                DecisionState.HUMAN,
+                max(0.85, human_conf),
+                reason,
+                **decision_debug,
+                human_conf=human_conf,
+            )
+
         # Human wins if above threshold and no strong voicemail signal.
         if human_conf >= self.config.human_confidence_threshold:
             reason = "human confidence threshold met (human-first)"
@@ -653,7 +688,8 @@ class LocalCallDetector:
         return self._build(state, confidence, reason, **debug)
 
     def _emit(self, final_state: DecisionState, confidence: float, reason: str, **debug: Any) -> None:
-        self._final_emitted = final_state
+        if final_state != DecisionState.HUMAN:
+            self._final_emitted = final_state
         self._current_state = final_state
         self._history.append((0.0, final_state, confidence, reason))
 

@@ -108,16 +108,21 @@ class CallStateEngine:
         has_ringing = bool(evidence.get("hasRingingText") or evidence.get("hasRingingNode"))
         has_timer = bool(evidence.get("hasTimer"))
         has_enabled_answer_control = bool(evidence.get("hasEnabledAnswerControl"))
+        has_answer_evidence = has_timer or has_enabled_answer_control
 
         # Google Voice can render disabled transfer/hold/add buttons while it
         # still says Calling. Do not promote that to pickup.
-        if has_ringing and not has_timer:
+        if has_ringing and not has_answer_evidence:
             return CallStateDecision("RINGING", "ringing/calling text still visible", evidence)
 
-        if self._is_strong_voicemail(text) or (
-            evidence.get("hasVoicemailCue") and not self._is_weak_only(text)
+        if has_answer_evidence and (
+            self._is_strong_voicemail(text)
+            or (evidence.get("hasVoicemailCue") and not self._is_weak_only(text))
         ):
             return CallStateDecision("VOICEMAIL", "strong voicemail phrase/cue", evidence)
+
+        if state == "VOICEMAIL" and not has_answer_evidence:
+            return CallStateDecision("RINGING", "voicemail cue before answer evidence", evidence)
 
         if state == "CONNECTED" and has_timer:
             return CallStateDecision("CONNECTED", "live call timer", evidence)

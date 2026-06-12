@@ -32,11 +32,14 @@ def main() -> None:
         with open(CONFIG_FILE, encoding="utf-8") as f:
             cfg = json.load(f)
     cfg["excel_path"] = xlsx.replace("\\", "/")
+    cfg["n_slots"] = len(TEST_NUMBERS)
+    cfg.setdefault("call_timeout", 45)
+    cfg.setdefault("dial_stagger_sec", 0.8)
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
 
     print("Test list written:", xlsx)
-    print("dialer_config.json excel_path updated.\n")
+    print("dialer_config.json test list and slot count updated.\n")
     for raw, name in TEST_NUMBERS:
         d10 = clean_phone(raw)
         if not d10:

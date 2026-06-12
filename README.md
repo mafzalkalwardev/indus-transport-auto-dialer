@@ -114,6 +114,56 @@ Passwords are stored only in `data/gv_accounts.json` on this PC (not committed t
    - **Voicemail** — app hangs up and moves on automatically
    - **Next number** / **End call** — manual control
 
+## Confirmed call-state pipeline
+
+The dialer follows a VICIdial-style state pipeline:
+
+```text
+IDLE
+-> DIALING
+-> RINGING
+-> ANSWERED_PENDING
+-> CONNECTED / VOICEMAIL / BUSY / NO_ANSWER / FAILED
+-> LOG_RESULT
+-> NEXT_LEAD
+```
+
+Important safety rules in the current implementation:
+
+- `RINGING` is never treated as `VOICEMAIL`, `FAILED`, or `ENDED`.
+- Voicemail detection is allowed only after answer evidence such as a call timer
+  or enabled in-call controls.
+- The app does not hang up during ringing before the configured call timeout.
+- Human/live answer is promoted only after the local decision engine classifies
+  the call as human/live, not merely because the outbound call is ringing.
+- Each final state is logged once, then the slot cools down and moves to the
+  next lead.
+
+Google Voice dialing uses DOM/BOM control inside the embedded browser. The
+automation refuses stale call buttons whose label contains a different phone
+number than the current lead. If Google Voice already opened a call panel, the
+recovery path starts call-state polling instead of reloading the page.
+
+## Dry-run and approved live testing
+
+For scheduler testing without placing calls, set this in `dialer_config.json`:
+
+```json
+"dry_run_mode": true
+```
+
+Dry-run simulates `DIALING -> RINGING -> NO_ANSWER` and lets you verify queueing,
+logging, retries, cooldown, and UI behavior without touching Google Voice. Keep
+it `false` for real calling.
+
+Live smoke tests must use only owner-approved test or CRM numbers:
+
+```bash
+python scripts/live_call_smoke.py --from-crm --crm-limit 2 --call-timeout 45
+```
+
+Do not mass dial or call random numbers for verification.
+
 ## Live line panel
 
 On **Live Calls**, click **Listen** on any line to open its embedded Google Voice view. When a person answers, the app automatically switches to **Live Calls**, highlights the picked-up line, and opens that same panel. Use the panel to talk through the computer mic/speakers, then choose **Release slot / next** or **End call**.
@@ -205,6 +255,20 @@ Output: `dist/FTSolutions_AutoDialer.exe`
 Full troubleshooting: **[docs/RUNBOOK.md](docs/RUNBOOK.md)** (stuck slots, client install, GV login, config keys).
 
 ## Troubleshooting
+
+### JavaScript confirm: "Are you sure you want to leave this page?"
+
+This appears when Google Voice thinks the app is navigating away from an active
+call panel. The controller auto-cancels that confirm and, before any dialpad
+recovery reload, checks whether a call panel is already active. If active, it
+does not reload; it switches into call-state polling.
+
+If this message still appears repeatedly, collect:
+
+- the last 50 lines from the on-screen log,
+- `logs/dialer.log`,
+- whether `dry_run_mode` is `true` or `false`,
+- the visible Google Voice button text/number in the monitor.
 
 ### “Google Voice is not ready”
 

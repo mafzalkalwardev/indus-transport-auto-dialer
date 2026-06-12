@@ -1,7 +1,7 @@
 {
-  "excel_path": "C:/Users/pc/Desktop/contacts.xlsx",
+  "excel_path": "D:/Auto Dialer/phones_test.xlsx",
   "theme": "light",
-  "n_slots": 2,
+  "n_slots": 1,
   "call_timeout": 45,
   "cooldown": 1.0,
   "voicemail_hangup_sec": 4,
@@ -20,5 +20,6 @@
   "dial_stagger_sec": 0.8,
   "enable_ai_audio": true,
   "audio_device": "25",
-  "live_debug_mode": false
+  "live_debug_mode": false,
+  "dry_run_mode": false
 }

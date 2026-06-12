@@ -53,6 +53,7 @@ if not os.path.exists("dialer_config.json"):
                 "enable_ai_audio": True,
                 "audio_device": "",
                 "live_debug_mode": False,
+                "dry_run_mode": False,
             },
             f,
             indent=2,

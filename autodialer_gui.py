@@ -9,6 +9,10 @@ import sys
 import json
 from datetime import datetime, timedelta
 
+from src.webengine_env import configure_webengine_environment
+
+configure_webengine_environment()
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QDialog, QVBoxLayout,
     QHBoxLayout, QLabel, QPushButton, QLineEdit, QStackedWidget,
@@ -86,6 +90,7 @@ def _load_cfg() -> dict:
         "enable_ai_audio": True,
         "audio_device": "",
         "live_debug_mode": False,
+        "dry_run_mode": False,
     }
     if os.path.exists(CONFIG_FILE):
         try:
@@ -952,6 +957,7 @@ class MainWindow(QMainWindow):
         self._manual_test_slots: set[int] = set()
         self._slot_call_token: dict[int, int] = {}
         self._slot_final_logged: set[int] = set()
+        self._campaign_generation: int = 0
         self._all_logs:    list = []
         self._retry_queue = DialRetryQueue(
             max_retries=int(cfg.get("max_retries", 3)),
@@ -994,6 +1000,25 @@ class MainWindow(QMainWindow):
         self._watchdog.start()
         log_info(f"Session started — user {user.get('email', '?')}")
 
+    def closeEvent(self, event) -> None:
+        self._watchdog.stop()
+        self._dial_timer.stop()
+        self._assign_debounce.stop()
+        self._elapsed_timer.stop()
+        self._headless_timer.stop()
+        for dialog in list(self._slot_monitors.values()):
+            try:
+                dialog.close()
+            except Exception:
+                pass
+        self._slot_monitors.clear()
+        for ctrl in list(self._controllers):
+            if ctrl is not None:
+                self._dispose_controller(ctrl)
+        self._controllers.clear()
+        QApplication.processEvents()
+        super().closeEvent(event)
+
     def _configure_watchdog(self) -> None:
         stuck = float(self.cfg.get(
             "watchdog_stuck_state_sec",
@@ -1031,6 +1056,7 @@ class MainWindow(QMainWindow):
         max_dim = 16777215
         view.setMinimumSize(400, 300)
         view.setMaximumSize(max_dim, max_dim)
+        view.setWindowFlag(Qt.WindowType.Tool, False)
         view.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
@@ -1059,12 +1085,14 @@ class MainWindow(QMainWindow):
 
     def _hide_browser_after_setup(self, view: QWebEngineView) -> None:
         """Return embedded browser to hidden 1×1 host after login setup."""
-        view.setParent(self._browser_host)
-        view.setMinimumSize(0, 0)
-        view.setMaximumSize(1, 1)
-        view.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
-        self._browser_layout.addWidget(view)
+        for ctrl in self._controllers:
+            if ctrl and ctrl.view is view:
+                ctrl.prepare_for_background_rendering()
+                return
+        view.setParent(None)
+        view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        view.resize(1280, 900)
+        view.show()
 
     def _dispose_controller(self, ctrl: GVController) -> None:
         """Remove a slot browser from the layout and tear down WebEngine safely."""
@@ -1076,6 +1104,7 @@ class MainWindow(QMainWindow):
                 view.setParent(None)
         ctrl.shutdown()
         ctrl.deleteLater()
+        QApplication.processEvents()
 
     def _refresh_slot_login_badges(self) -> None:
         if not hasattr(self, "_slot_cards"):
@@ -1124,9 +1153,7 @@ class MainWindow(QMainWindow):
         ctrl.login_detected.connect(self._on_slot_login)
         ctrl.log_message.connect(self._on_slot_log)
         ctrl.detection_update.connect(self._on_slot_detection)
-        ctrl.view.setParent(self._browser_host)
-        ctrl.view.setMaximumSize(1, 1)
-        self._browser_layout.addWidget(ctrl.view)
+        ctrl.prepare_for_background_rendering()
         self._controllers.append(ctrl)
         if gv_has_session_marker(ctrl.profile_dir):
             ctrl.mark_logged_in()
@@ -1265,6 +1292,17 @@ class MainWindow(QMainWindow):
                 f"{len(self._gv_accounts)} Google Voice account(s) are configured.\n\n"
                 "Add one signed-in Google Voice account for each slot. "
                 "For 5-slot dialing, configure 5 ready lines.")
+        distinct_lines = {
+            str(acct.get("email") or acct.get("profile") or "").strip().lower()
+            for acct in self._gv_accounts[:n]
+            if str(acct.get("email") or acct.get("profile") or "").strip()
+        }
+        if len(distinct_lines) < n:
+            return False, (
+                f"You selected {n} live slot(s), but only {len(distinct_lines)} "
+                "distinct Google Voice line(s) are configured.\n\n"
+                "Each realtime slot needs its own signed-in Google Voice account. "
+                "Duplicate browser profiles for the same email cannot dial concurrently.")
         missing: list[str] = []
         for i in range(n):
             acct = self._slot_account(i)
@@ -2207,9 +2245,7 @@ class MainWindow(QMainWindow):
             ctrl.login_detected.connect(self._on_slot_login)
             ctrl.log_message.connect(self._on_slot_log)
             ctrl.heartbeat.connect(self._on_slot_heartbeat)
-            ctrl.view.setParent(self._browser_host)
-            ctrl.view.setMaximumSize(1, 1)   # hidden but alive
-            self._browser_layout.addWidget(ctrl.view)
+            ctrl.prepare_for_background_rendering()
             self._controllers.append(ctrl)
             self._watchdog.register_slot(i)
             ctrl.load()
@@ -2218,6 +2254,15 @@ class MainWindow(QMainWindow):
             else:
                 QTimer.singleShot(2000, ctrl._check_login)
         self._refresh_slot_login_badges()
+
+    def _close_slot_monitor(self, slot_id: int) -> None:
+        """Close Listen/debug monitor so it does not hold a disposed WebEngine view."""
+        dlg = self._slot_monitors.pop(slot_id, None)
+        if dlg is not None:
+            try:
+                dlg.close()
+            except Exception:
+                pass
 
     def _on_slot_heartbeat(self, slot_id: int) -> None:
         self._watchdog.heartbeat(slot_id)
@@ -2241,6 +2286,8 @@ class MainWindow(QMainWindow):
         was_running = self._running
 
         self._update_card(slot_id, "RECOVERING", phone)
+
+        self._close_slot_monitor(slot_id)
 
         ctrl = self._get_ctrl(slot_id)
         if ctrl:
@@ -2293,9 +2340,7 @@ class MainWindow(QMainWindow):
         new_ctrl.log_message.connect(self._on_slot_log)
         new_ctrl.detection_update.connect(self._on_slot_detection)
         new_ctrl.heartbeat.connect(self._on_slot_heartbeat)
-        new_ctrl.view.setParent(self._browser_host)
-        new_ctrl.view.setMaximumSize(1, 1)
-        self._browser_layout.addWidget(new_ctrl.view)
+        new_ctrl.prepare_for_background_rendering()
 
         while len(self._controllers) <= slot_id:
             self._controllers.append(None)
@@ -2361,6 +2406,25 @@ class MainWindow(QMainWindow):
         wait = self._cooldown_sec() if seconds is None else max(0.0, seconds)
         self._slot_cooldown_until[slot_id] = _now() + wait
 
+    def _refresh_dialer_counts(self) -> None:
+        if not hasattr(self, "lbl_done"):
+            return
+        completed = self.db.get_completed_phones()
+        done = len(completed)
+        total = max(self.progress.maximum() if hasattr(self, "progress") else 0, done)
+        active = len(self._slot_phone)
+        remaining = max(
+            0,
+            len(self._contacts) - self._contact_idx
+            + self._retry_queue.pending_count()
+            + active,
+        )
+        self.lbl_done.setText(f"Completed: {done}")
+        self.lbl_rem.setText(f"Remaining: {remaining}")
+        if hasattr(self, "progress"):
+            self.progress.setMaximum(total)
+            self.progress.setValue(min(done, total))
+
     def _schedule_assign(self, delay_ms: int | None = None) -> None:
         """Debounced queue pull — avoids hammering all lines at once."""
         if not self._running:
@@ -2371,6 +2435,8 @@ class MainWindow(QMainWindow):
 
     def _finish_slot_call(self, slot_id: int) -> None:
         """Line is free: clear UI state, pause, then queue the next number."""
+        if not self._running and not self._slot_has_active_phone(slot_id):
+            return
         ctrl = self._get_ctrl(slot_id)
         if ctrl:
             ctrl.set_audio_muted(True)
@@ -2380,6 +2446,9 @@ class MainWindow(QMainWindow):
         self._slot_retry_attempt.pop(slot_id, None)
         self._manual_test_slots.discard(slot_id)
         self._update_card(slot_id, "IDLE", "")
+        self._refresh_dialer_counts()
+        if not self._running:
+            return
         self._begin_slot_cooldown(slot_id)
         self._schedule_assign()
 
@@ -2571,6 +2640,7 @@ class MainWindow(QMainWindow):
             self._init_controllers(n)
             self._rebuild_slot_cards(n)
 
+        self._campaign_generation += 1
         self._running      = True
         self._contact_idx  = 0
         self._retry_queue.clear()
@@ -2593,6 +2663,7 @@ class MainWindow(QMainWindow):
         self._schedule_assign(int(stagger * 1000))
 
     def _stop_dialing(self):
+        self._campaign_generation += 1
         self._running = False
         self._dial_timer.stop()
         self._assign_debounce.stop()
@@ -2617,6 +2688,7 @@ class MainWindow(QMainWindow):
             self._slot_cooldown_until.pop(sid, None)
             self._watchdog.record_state(sid, "IDLE")
             self._update_card(sid, "IDLE", "")
+        self._refresh_dialer_counts()
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.statusBar().showMessage("Dialing stopped")
@@ -2626,21 +2698,24 @@ class MainWindow(QMainWindow):
             f"log: {log_path()}")
 
     def _assign_pending_calls(self):
-        """Assign the next number to each idle line that finished its cooldown."""
+        """Assign retries first, then new contacts, to idle lines past cooldown."""
         if not self._running:
             return
 
         assigned = 0
         ready_retries = self._retry_queue.pop_ready()
-        for idx, (phone, name, attempt) in enumerate(ready_retries):
+        deferred_retries: list[tuple[str, str, int]] = []
+
+        for phone, name, attempt in ready_retries:
             ctrl = self._idle_controller()
             if ctrl is None:
-                for p, n, a in ready_retries[idx:]:
-                    self._retry_queue.requeue(p, n, a, 2.0)
-                break
+                deferred_retries.append((phone, name, attempt))
+                continue
             self._dial_on_slot(ctrl, phone, name, attempt)
             assigned += 1
-            break
+
+        for phone, name, attempt in deferred_retries:
+            self._retry_queue.requeue(phone, name, attempt, 2.0)
 
         for ctrl in self._controllers:
             if not self._controller_available(ctrl):
@@ -2698,10 +2773,11 @@ class MainWindow(QMainWindow):
         ctrl.dial(phone)
         timeout_ms = int(self.cfg.get("call_timeout", 60) * 1000)
         started_at = self._slot_start[sid]
+        campaign_generation = self._campaign_generation
         QTimer.singleShot(
             timeout_ms,
-            lambda sid=sid, p=phone, st=started_at, tok=token:
-            self._timeout_call(sid, p, st, tok),
+            lambda sid=sid, p=phone, st=started_at, tok=token, gen=campaign_generation:
+            self._timeout_call(sid, p, st, tok, gen),
         )
 
     def _release_slot(self, slot_id: int):
@@ -2744,8 +2820,17 @@ class MainWindow(QMainWindow):
             self._begin_slot_cooldown(slot_id, pause)
             self._schedule_assign(int(pause * 1000))
 
-    def _voicemail_hangup_and_next(self, slot_id: int) -> None:
+    def _voicemail_hangup_and_next(
+        self,
+        slot_id: int,
+        campaign_generation: int | None = None,
+        token: int | None = None,
+    ) -> None:
         """Hang up voicemail and advance the power dialer queue."""
+        if campaign_generation is not None and campaign_generation != self._campaign_generation:
+            return
+        if token is not None and self._slot_call_token.get(slot_id) != token:
+            return
         ctrl = self._get_ctrl(slot_id)
         if ctrl and ctrl.current_state == "VOICEMAIL":
             ctrl.set_audio_muted(True)
@@ -2762,9 +2847,11 @@ class MainWindow(QMainWindow):
             self._schedule_assign()
 
     def _timeout_call(self, slot_id: int, phone: str, started_at: float,
-                      token: int):
+                      token: int, campaign_generation: int):
         """Auto-cut an unanswered call once the configured timeout expires."""
         if not self._running:
+            return
+        if campaign_generation != self._campaign_generation:
             return
         if self._slot_call_token.get(slot_id) != token:
             return
@@ -2814,6 +2901,7 @@ class MainWindow(QMainWindow):
         )
         self._slot_final_logged.add(slot_id)
         self._refresh_logs()
+        self._refresh_dialer_counts()
         return True
 
     def _handle_slot_failure(self, slot_id: int, phone: str) -> None:
@@ -2824,7 +2912,8 @@ class MainWindow(QMainWindow):
         if ctrl:
             try:
                 ctrl.set_audio_muted(True)
-                ctrl.hangup()
+                if ctrl.current_state in ("RINGING", "ANSWERED_PENDING", "CONNECTED", "VOICEMAIL"):
+                    ctrl.hangup()
             except Exception:
                 pass
         if phone:
@@ -2847,6 +2936,12 @@ class MainWindow(QMainWindow):
             self._schedule_assign()
 
     def _on_slot_state(self, slot_id: int, state: str):
+        if not self._running and not self._slot_has_active_phone(slot_id):
+            if state == "IDLE":
+                self._watchdog.record_state(slot_id, "IDLE")
+                self._update_card(slot_id, "IDLE", "")
+            return
+
         if state == "IDLE" and self._slot_has_active_phone(slot_id):
             ctrl = self._get_ctrl(slot_id)
             last = ctrl.current_state if ctrl else "DIALING"
@@ -2872,9 +2967,12 @@ class MainWindow(QMainWindow):
                 f"[Slot {slot_id}] 📭 Voicemail — auto-hangup in {vm_sec}s, then next number")
             self._log_final_call(slot_id, "VOICEMAIL", phone)
             self._watchdog.record_call_completed(slot_id)
+            campaign_generation = self._campaign_generation
+            token = self._slot_call_token.get(slot_id, 0)
             QTimer.singleShot(
                 vm_sec * 1000,
-                lambda sid=slot_id: self._voicemail_hangup_and_next(sid),
+                lambda sid=slot_id, gen=campaign_generation, tok=token:
+                self._voicemail_hangup_and_next(sid, gen, tok),
             )
         elif state == "FAILED":
             self._handle_slot_failure(slot_id, phone)
@@ -3393,21 +3491,6 @@ def _now() -> float:
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    # WebEngine: disable GPU on Windows to avoid blank white login pages
-    _we_flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
-    for _flag in (
-        "--disable-gpu",
-        "--disable-gpu-compositing",
-        "--disable-software-rasterizer",
-        "--autoplay-policy=no-user-gesture-required",
-        "--use-fake-ui-for-media-stream",
-    ):
-        if _flag not in _we_flags:
-            _we_flags = f"{_we_flags} {_flag}".strip()
-    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = _we_flags or "--disable-gpu"
-    os.environ.setdefault("QT_LOGGING_RULES",
-                          "*.debug=false;qt.webenginecontext*=false")
-
     app = QApplication(sys.argv)
     os.makedirs(LOGS_DIR, exist_ok=True)
     app_lock = QLockFile(os.path.join(LOGS_DIR, "ftsolutions_autodialer.lock"))

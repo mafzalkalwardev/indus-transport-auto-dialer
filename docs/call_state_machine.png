@@ -1,0 +1,55 @@
+---
+State Machine
+---
+stateDiagram-v2
+  direction LR
+  classDef s_default fill:white,color:black
+  classDef s_inactive fill:white,color:black
+  classDef s_parallel color:black,fill:white
+  classDef s_active color:red,fill:darksalmon
+  classDef s_previous color:blue,fill:azure
+  
+  state "IDLE" as IDLE
+  Class IDLE s_active
+  state "DIALING" as DIALING
+  Class DIALING s_default
+  state "RINGING" as RINGING
+  Class RINGING s_default
+  state "ANSWER_DETECTED" as ANSWER_DETECTED
+  Class ANSWER_DETECTED s_default
+  state "EARLY_ANALYSIS" as EARLY_ANALYSIS
+  Class EARLY_ANALYSIS s_default
+  state "HUMAN_CANDIDATE" as HUMAN_CANDIDATE
+  Class HUMAN_CANDIDATE s_default
+  state "VOICEMAIL_CANDIDATE" as VOICEMAIL_CANDIDATE
+  Class VOICEMAIL_CANDIDATE s_default
+  state "IVR_CANDIDATE" as IVR_CANDIDATE
+  Class IVR_CANDIDATE s_default
+  state "HUMAN" as HUMAN
+  Class HUMAN s_default
+  state "VOICEMAIL" as VOICEMAIL
+  Class VOICEMAIL s_default
+  state "IVR" as IVR
+  Class IVR s_default
+  state "BUSY" as BUSY
+  Class BUSY s_default
+  state "NO_ANSWER" as NO_ANSWER
+  Class NO_ANSWER s_default
+  state "FAILED" as FAILED
+  Class FAILED s_default
+  state "ENDED" as ENDED
+  Class ENDED s_default
+  
+  IDLE --> DIALING: start_call
+  DIALING --> RINGING: ringing_detected
+  RINGING --> ANSWER_DETECTED: answer_detected
+  RINGING --> BUSY: busy_detected
+  RINGING --> NO_ANSWER: ring_timeout
+  ANSWER_DETECTED --> EARLY_ANALYSIS: begin_analysis
+  EARLY_ANALYSIS --> HUMAN_CANDIDATE: human_candidate
+  EARLY_ANALYSIS --> VOICEMAIL_CANDIDATE: voicemail_candidate
+  EARLY_ANALYSIS --> IVR_CANDIDATE: ivr_candidate
+  HUMAN_CANDIDATE --> HUMAN: confirm_human
+  VOICEMAIL_CANDIDATE --> VOICEMAIL: confirm_voicemail
+  IVR_CANDIDATE --> IVR: confirm_ivr
+  [*] --> IDLE

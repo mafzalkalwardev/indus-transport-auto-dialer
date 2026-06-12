@@ -17,15 +17,9 @@ from glob import glob
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-_we_flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
-for _flag in (
-    "--autoplay-policy=no-user-gesture-required",
-    "--use-fake-ui-for-media-stream",
-):
-    if _flag not in _we_flags:
-        _we_flags = f"{_we_flags} {_flag}".strip()
-os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = _we_flags
-os.environ.setdefault("QT_LOGGING_RULES", "*.debug=false;qt.webenginecontext*=false")
+from src.webengine_env import configure_webengine_environment
+
+configure_webengine_environment()
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
@@ -125,6 +119,23 @@ def _load_recent_report_numbers(hours: float) -> set[str]:
     return numbers
 
 
+def select_smoke_numbers(args: argparse.Namespace, account_count: int) -> list[str]:
+    if args.numbers:
+        return _parse_numbers(args.numbers)
+    if args.from_crm:
+        limit = args.crm_limit or max(1, account_count)
+        return _load_crm_numbers(limit)
+    return _parse_numbers(DEFAULT_NUMBERS)
+
+
+def distinct_line_count(accounts: list[dict], requested: int) -> int:
+    return len({
+        str(acct.get("email") or acct.get("profile") or "").strip().lower()
+        for acct in accounts[:requested]
+        if str(acct.get("email") or acct.get("profile") or "").strip()
+    })
+
+
 class LiveCallSmoke:
     def __init__(
         self,
@@ -166,6 +177,16 @@ class LiveCallSmoke:
             )
             self.finish()
             return
+        distinct_lines = distinct_line_count(self.accounts, len(self.numbers))
+        if distinct_lines < len(self.numbers):
+            self.log(
+                None,
+                f"BLOCKED: {distinct_lines} distinct Google Voice line(s) for "
+                f"{len(self.numbers)} requested concurrent live calls.",
+            )
+            self.log(None, "Use one signed-in Google Voice account/email per realtime slot.")
+            self.finish()
+            return
 
         for idx, phone in enumerate(self.numbers):
             acct = self.accounts[idx]
@@ -175,6 +196,7 @@ class LiveCallSmoke:
                 profile_key=str(acct.get("profile", f"slot_{idx}")),
                 login_email=str(acct.get("email", "")),
                 login_password=str(acct.get("password", "")),
+                runtime_cfg={"call_timeout": self.call_timeout},
             )
             ctrl.state_changed.connect(self.on_state)
             ctrl.login_detected.connect(lambda sid, i=idx: self.log(i, "Google Voice ready"))
@@ -460,13 +482,7 @@ def main() -> None:
     if args.target_voicemails or args.target_live:
         raise SystemExit(_run_crm_campaign(args, accounts))
 
-    if args.numbers:
-        numbers = _parse_numbers(args.numbers)
-    elif args.from_crm or accounts:
-        limit = args.crm_limit or max(1, len(accounts))
-        numbers = _load_crm_numbers(limit)
-    else:
-        numbers = _parse_numbers(DEFAULT_NUMBERS)
+    numbers = select_smoke_numbers(args, len(accounts))
     app = QApplication(sys.argv)
     smoke = LiveCallSmoke(
         numbers,
