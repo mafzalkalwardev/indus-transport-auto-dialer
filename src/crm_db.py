@@ -118,6 +118,9 @@ class CRMDatabase:
             "detection_reason": "TEXT DEFAULT ''",
             "confidence": "REAL DEFAULT 0",
             "state_history": "TEXT DEFAULT ''",
+            "dialed_at": "TEXT DEFAULT ''",
+            "ringing_at": "TEXT DEFAULT ''",
+            "connected_at": "TEXT DEFAULT ''",
         }
         for name, ddl in additions.items():
             if name not in cols:
@@ -318,19 +321,23 @@ class CRMDatabase:
                  contact_name: str = "", duration_s: float = 0.0,
                  slot_id: int = 0, detection_reason: str = "",
                  confidence: float = 0.0, state_history: str = "",
-                 final_outcome: str = "") -> None:
+                 final_outcome: str = "",
+                 dialed_at: str = "", ringing_at: str = "",
+                 connected_at: str = "") -> None:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         final_outcome = final_outcome or status
         with self._conn() as c:
             c.execute(
                 "INSERT INTO call_records "
                 "(user_id,phone,contact_name,status,duration_s,slot_id,"
-                "final_outcome,detection_reason,confidence,state_history,timestamp) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "final_outcome,detection_reason,confidence,state_history,"
+                "dialed_at,ringing_at,connected_at,timestamp) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     user_id, phone, contact_name, status, duration_s, slot_id,
                     final_outcome, detection_reason, float(confidence or 0.0),
-                    state_history, now,
+                    state_history,
+                    dialed_at or now, ringing_at, connected_at, now,
                 )
             )
             c.execute(

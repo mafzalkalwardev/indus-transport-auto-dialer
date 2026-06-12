@@ -52,10 +52,25 @@ POLL_MS = 1000   # state-detection poll interval (active calls)
 
 
 def _gv_direct_call_url(phone: str) -> str:
+    return _gv_dial_url_variants(phone)[0]
+
+
+def _gv_dial_url_variants(phone: str) -> list[str]:
+    """Google Voice dial entry points (official web URL schemes)."""
     digits = re.sub(r"\D", "", phone or "")
     if not digits:
-        return GV_CALLS_URL
-    return f"{GV_CALLS_URL}?a=nc,%2B{digits}"
+        return [GV_CALLS_URL]
+    if len(digits) == 10:
+        e164 = f"1{digits}"
+    elif len(digits) == 11 and digits.startswith("1"):
+        e164 = digits
+    else:
+        e164 = digits
+    return [
+        f"{GV_CALLS_URL}?a=nc,%2B{e164}",
+        f"https://voice.google.com/dial/+{e164}",
+        GV_CALLS_URL,
+    ]
 
 _JS_FORCE_VISIBLE = """
 (function(){
@@ -345,6 +360,19 @@ _JS_ACTIVE_CALL_PRESENT = """
     var s=getComputedStyle(el), r=el.getBoundingClientRect();
     return s.display!=='none' && s.visibility!=='hidden' && r.width>0 && r.height>0;
   }
+  function qsa(sel){
+    var found=[];
+    function walk(root){
+      try{ found=found.concat(Array.from(root.querySelectorAll(sel))); }catch(e){}
+      try{
+        Array.from(root.querySelectorAll('*')).forEach(function(n){
+          if(n.shadowRoot) walk(n.shadowRoot);
+        });
+      }catch(e){}
+    }
+    walk(document);
+    return found;
+  }
   var hangSels=[
     'button[aria-label*="Hang up" i]',
     'button[aria-label*="End call" i]',
@@ -366,6 +394,12 @@ _JS_ACTIVE_CALL_PRESENT = """
   for(var c=0;c<controlSels.length;c++){
     var ctrl=document.querySelector(controlSels[c]);
     if(vis(ctrl)) return true;
+  }
+  var body=(document.body&&document.body.innerText||'').toLowerCase();
+  if(body.indexOf('ringing')!==-1 || body.indexOf('calling')!==-1) return true;
+  var timers=qsa('[aria-label*="timer" i], .call-duration, [data-e2eid*="timer"]');
+  for(var t=0;t<timers.length;t++){
+    if(vis(timers[t])) return true;
   }
   return false;
 })();
@@ -868,6 +902,14 @@ def _js_dial(phone: str) -> str:
   var clickedAria=(btn.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim();
   var clickedText=(btn.innerText||btn.textContent||'').replace(/\\s+/g,' ').trim();
   if(fireClick(btn)) {{
+    try{{
+      if(inp){{
+        inp.focus();
+        ['keydown','keypress','keyup'].forEach(function(type){{
+          inp.dispatchEvent(new KeyboardEvent(type,{{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}}));
+        }});
+      }}
+    }}catch(e){{}}
     window.__gvDialStatus='call_button_clicked_js|x='+Math.round(br.left+br.width/2)+
       '|y='+Math.round(br.top+br.height/2)+
       '|aria='+clickedAria.slice(0,80)+'|text='+clickedText.slice(0,80);
@@ -877,6 +919,58 @@ def _js_dial(phone: str) -> str:
     '|y='+Math.round(br.top+br.height/2)+
     '|aria='+clickedAria.slice(0,80)+'|text='+clickedText.slice(0,80);
   return window.__gvDialStatus;
+}})();
+"""
+
+
+def _js_retry_start_call(phone: str) -> str:
+    """Re-click Call + Enter when the first click did not start the outbound call."""
+    safe = phone.replace("'", "")
+    return f"""
+(function(){{
+  var phone='{safe}';
+  function vis(el){{
+    if(!el) return false;
+    var r=el.getBoundingClientRect(), s=getComputedStyle(el);
+    return r.width>0 && r.height>0 && s.display!=='none' && s.visibility!=='hidden';
+  }}
+  function fireClick(el){{
+    if(!el) return false;
+    try{{ el.scrollIntoView({{block:'center'}}); }}catch(e){{}}
+    try{{
+      if(typeof el.click==='function') el.click();
+      el.dispatchEvent(new MouseEvent('click',{{bubbles:true,cancelable:true,view:window}}));
+      return true;
+    }}catch(e){{ return false; }}
+  }}
+  function digitsOf(t){{ return (t||'').replace(/\\D/g,''); }}
+  var wanted=phone.replace(/\\D/g,'');
+  var buttons=Array.from(document.querySelectorAll('button,[role="button"],gv-icon-button'));
+  var callBtn=null;
+  for(var i=0;i<buttons.length;i++){{
+    var b=buttons[i];
+    if(!vis(b)) continue;
+    var aria=(b.getAttribute('aria-label')||'').toLowerCase();
+    var text=(b.innerText||b.textContent||'').trim().toLowerCase();
+    var icon=(b.getAttribute('icon-name')||'').toLowerCase();
+    if(aria.indexOf('call')!==-1 || text==='call' || icon==='call'){{
+      var bd=digitsOf(aria+' '+text);
+      if(!bd || bd.slice(-10)===wanted.slice(-10)){{ callBtn=b; break; }}
+    }}
+  }}
+  var inp=document.querySelector('input[placeholder*="number" i],input[placeholder*="name" i],[role="combobox"],[contenteditable="true"]');
+  if(inp && vis(inp)){{
+    inp.focus();
+    ['keydown','keypress','keyup'].forEach(function(type){{
+      inp.dispatchEvent(new KeyboardEvent(type,{{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}}));
+    }});
+  }}
+  if(callBtn && !callBtn.disabled && callBtn.getAttribute('aria-disabled')!=='true'){{
+    fireClick(callBtn);
+    var br=callBtn.getBoundingClientRect();
+    return 'retry_clicked|x='+Math.round(br.left+br.width/2)+'|y='+Math.round(br.top+br.height/2);
+  }}
+  return 'retry_no_button';
 }})();
 """
 
@@ -929,7 +1023,8 @@ class GVController(QObject):
         )
         self._audio_monitor = CallAudioMonitor(
             enabled=audio_enabled,
-            device=self._runtime_cfg.get("audio_device", None),
+            device=self._runtime_cfg.get("audio_device") or None,
+            parent=self,
         )
         self._logged_in  = False
         self._login_email = login_email
@@ -985,16 +1080,17 @@ class GVController(QObject):
 
         self.view = QWebEngineView()
         self.view.setPage(self._page)
-        self.view.resize(1280, 900)
-        self.view.setMinimumSize(1024, 720)
+        self.view.resize(800, 600)
+        self.view.setMinimumSize(1, 1)
         if hasattr(self._page, "setViewportSize"):
             try:
-                self._page.setViewportSize(QSize(1280, 900))
+                self._page.setViewportSize(QSize(800, 600))
             except Exception:
                 pass
         self._page.setBackgroundColor(QColor("#ffffff"))
         self.view.setStyleSheet("background-color: #ffffff;")
         self._load_ok = False
+        self._load_retry_count = 0
         self._page.loadStarted.connect(self._on_load_started)
         self._page.loadFinished.connect(self._on_load_finished_page)
         if has_session_marker(profile_dir):
@@ -1026,6 +1122,7 @@ class GVController(QObject):
         self._pending_dial_phone = ""
         self._current_call_phone = ""
         self._dial_step_attempts = 0
+        self._dial_url_variant = 0
         self._calls_ready_attempts = 0
         self._native_key_attempted = False
         self._native_key_attempts = 0
@@ -1042,6 +1139,20 @@ class GVController(QObject):
                 return json.load(f)
         except Exception:
             return {}
+
+    def apply_runtime_cfg(self, runtime_cfg: dict) -> None:
+        """Apply dialer settings without recreating the WebEngine view."""
+        self._runtime_cfg.update(runtime_cfg or {})
+        audio_enabled = bool(self._runtime_cfg.get("enable_ai_audio", False))
+        self._decision_engine = CallDecisionEngine(
+            detector_config=DetectionConfig(
+                max_ring_seconds=float(self._runtime_cfg.get("call_timeout", 60)),
+                enable_audio_detection=audio_enabled,
+            )
+        )
+        self._audio_monitor.set_enabled(audio_enabled)
+        if self._page_alive():
+            self._page.setAudioMuted(not audio_enabled)
 
     def clear_http_cache(self) -> None:
         """Reduce WebEngine disk/memory pressure between long campaigns."""
@@ -1064,6 +1175,8 @@ class GVController(QObject):
             self._dial_stuck_timer.stop()
             self._dial_stuck_timer = None
         self._active_call = False
+        if getattr(self, "_audio_monitor", None) is not None:
+            self._audio_monitor.shutdown()
 
         page = getattr(self, "_page", None)
         view = getattr(self, "view", None)
@@ -1104,6 +1217,13 @@ class GVController(QObject):
         if not self._page_alive():
             return
         self.view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
+        self.view.setMinimumSize(640, 480)
+        self.view.resize(1024, 720)
+        if hasattr(self._page, "setViewportSize"):
+            try:
+                self._page.setViewportSize(QSize(1024, 720))
+            except Exception:
+                pass
         self.view.show()
         self.view.updateGeometry()
         self.view.repaint()
@@ -1167,18 +1287,18 @@ class GVController(QObject):
         self._login_fill_timer.stop()
 
     def prepare_for_background_rendering(self) -> None:
-        """Keep Google Voice rendered without showing the browser to the user."""
+        """Keep Google Voice rendered off-screen with a small footprint."""
         max_dim = 16777215
         self.view.setParent(None)
         self.view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
         self.view.setWindowFlag(Qt.WindowType.Tool, True)
-        self.view.setMinimumSize(1024, 720)
+        self.view.setMinimumSize(1, 1)
         self.view.setMaximumSize(max_dim, max_dim)
-        self.view.resize(1280, 900)
-        self.view.move(-20000, -20000)
+        self.view.resize(800, 600)
+        self.view.move(-24000, -24000)
         if hasattr(self._page, "setViewportSize"):
             try:
-                self._page.setViewportSize(QSize(1280, 900))
+                self._page.setViewportSize(QSize(800, 600))
             except Exception:
                 pass
         self.view.show()
@@ -1205,6 +1325,7 @@ class GVController(QObject):
         self._pending_dial_phone = phone
         self._current_call_phone = phone
         self._dial_step_attempts = 0
+        self._dial_url_variant = 0
         self._calls_ready_attempts = 0
         self._native_key_attempted = False
         self._native_key_attempts = 0
@@ -1246,18 +1367,24 @@ class GVController(QObject):
             self._active_call = False
             self._set_state("NO_ANSWER")
 
+    def _current_dial_url(self) -> str:
+        phone = self._pending_dial_phone or self._current_call_phone
+        variants = _gv_dial_url_variants(phone)
+        return variants[self._dial_url_variant % len(variants)]
+
     def _ensure_calls_page_then_dial(self) -> None:
         if not self._active_call or not self._page_alive() or not self._pending_dial_phone:
             return
         url = self._page.url().toString()
-        if "voice.google.com" not in url or "/calls" not in url:
+        dial_url = self._current_dial_url()
+        if "voice.google.com" not in url:
             self._emit_log("Opening Google Voice calls page…")
-            self._page.load(QUrl(_gv_direct_call_url(self._pending_dial_phone)))
+            self._page.load(QUrl(dial_url))
             QTimer.singleShot(2500, self._ensure_calls_page_then_dial)
             return
-        if self._dial_step_attempts == 0 and "a=nc" not in url:
-            self._emit_log("Opening Google Voice direct dial link...")
-            self._page.load(QUrl(_gv_direct_call_url(self._pending_dial_phone)))
+        if self._dial_step_attempts == 0 and "a=nc" not in url and "/dial/" not in url:
+            self._emit_log(f"Opening Google Voice dial link ({self._dial_url_variant + 1})…")
+            self._page.load(QUrl(dial_url))
             QTimer.singleShot(2500, self._ensure_calls_page_then_dial)
             return
         self._page.runJavaScript(_JS_REFRESH_LAYOUT)
@@ -1285,6 +1412,7 @@ class GVController(QObject):
             self._pending_dial_phone = ""
             QTimer.singleShot(700, lambda s=status: self._retry_native_click_if_no_panel(s))
             QTimer.singleShot(1700, lambda s=status: self._retry_native_click_if_no_panel(s))
+            QTimer.singleShot(3500, lambda s=status: self._retry_native_click_if_no_panel(s))
             QTimer.singleShot(800, self._poll_once)
             QTimer.singleShot(1600, self._poll_once)
             QTimer.singleShot(2400, self.start_polling)
@@ -1354,8 +1482,11 @@ class GVController(QObject):
                 return
 
             if status_base in ("number_input_missing", "call_button_wrong_number") and self._dial_step_attempts in (8, 18):
-                self._emit_log("Dialpad did not appear - reloading Google Voice direct dial link...")
-                self._page.load(QUrl(_gv_direct_call_url(self._pending_dial_phone or self._current_call_phone)))
+                self._dial_url_variant += 1
+                self._emit_log(
+                    f"Dialpad did not appear - trying alternate GV URL "
+                    f"({self._dial_url_variant + 1})…")
+                self._page.load(QUrl(self._current_dial_url()))
                 QTimer.singleShot(2500, self._ensure_calls_page_then_dial)
                 return
             if self._dial_step_attempts < 30:
@@ -1372,15 +1503,34 @@ class GVController(QObject):
     def _retry_native_click_if_no_panel(self, status: str) -> None:
         if not self._active_call or not self._page_alive():
             return
+        phone = self._current_call_phone or self._pending_dial_phone
 
         def after_active_check(active: object) -> None:
             if not self._active_call or bool(active):
+                if bool(active):
+                    QTimer.singleShot(400, self.start_polling)
                 return
+            self._page.runJavaScript(
+                _js_retry_start_call(phone),
+                self._on_retry_start_call_result,
+            )
             if self._click_call_button_from_status(status):
                 self._call_clicked_at = time.monotonic()
-                self._emit_log("Dial UI status: native_call_click_retry")
+                self._emit_log("Dial UI status: view_call_click_retry")
+            QTimer.singleShot(1200, self._poll_once)
 
         self._page.runJavaScript(_JS_ACTIVE_CALL_PRESENT, after_active_check)
+
+    def _on_retry_start_call_result(self, result: object) -> None:
+        if not self._active_call:
+            return
+        status = str(result or "")
+        if status.startswith("retry_clicked"):
+            self._emit_log(f"Dial UI status: {status}")
+            if self._click_call_button_from_status(status):
+                self._call_clicked_at = time.monotonic()
+            QTimer.singleShot(800, self._poll_once)
+            QTimer.singleShot(1800, self.start_polling)
 
     def _type_number_from_status(self, status: str) -> bool:
         if getattr(self, "_native_key_attempts", 0) >= 3:
@@ -1404,21 +1554,12 @@ class GVController(QObject):
                 return False
             self._native_key_attempts = getattr(self, "_native_key_attempts", 0) + 1
             self._native_key_attempted = self._native_key_attempts >= 3
-            self.view.activateWindow()
-            self.view.setFocus()
-            global_pos = self.view.mapToGlobal(QPoint(x, y))
-            target = QApplication.widgetAt(global_pos) or self.view.focusProxy() or self.view
-            local_pos = target.mapFromGlobal(global_pos)
-            QTest.mouseClick(
-                target,
-                Qt.MouseButton.LeftButton,
-                Qt.KeyboardModifier.NoModifier,
-                local_pos,
-            )
-            QTest.keyClick(target, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
-            QTest.keyClick(target, Qt.Key.Key_Backspace)
-            QTest.keyClicks(target, digits)
-            QTest.keyClick(target, Qt.Key.Key_Return)
+            if not self._click_view_coords(x, y):
+                return False
+            QTest.keyClick(self.view, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+            QTest.keyClick(self.view, Qt.Key.Key_Backspace)
+            QTest.keyClicks(self.view, digits)
+            QTest.keyClick(self.view, Qt.Key.Key_Return)
             self._emit_log("Dial UI status: native_number_typed")
             return True
         except Exception as exc:
@@ -1438,25 +1579,37 @@ class GVController(QObject):
         min_len = min(len(wanted), len(label_digits))
         return min_len < 7 or label_digits[-min_len:] == wanted[-min_len:]
 
+    def _click_view_coords(self, x: int, y: int) -> bool:
+        """Click inside the WebEngine view (JS coords = view-local, not screen)."""
+        try:
+            if x < 0 or y < 0:
+                return False
+            if x > self.view.width() or y > self.view.height():
+                return False
+            self.view.setFocus()
+            self.view.activateWindow()
+            QTest.mouseClick(
+                self.view,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                QPoint(x, y),
+            )
+            return True
+        except Exception as exc:
+            self._emit_log(f"View click failed: {exc}")
+            return False
+
     def _click_call_button_from_status(self, status: str) -> bool:
         try:
             mx = re.search(r"(?:^|\|)x=(\d+)", status)
-            my = re.search(r"(?:^|\|)y=(\d+)", status)
+            my = re.search(r"(?:^|\|)y=(-?\d+)", status)
             if not mx or not my:
                 return False
             x = int(mx.group(1))
             y = int(my.group(1))
-            self.view.activateWindow()
-            self.view.setFocus()
-            global_pos = self.view.mapToGlobal(QPoint(x, y))
-            target = QApplication.widgetAt(global_pos) or self.view.focusProxy() or self.view
-            local_pos = target.mapFromGlobal(global_pos)
-            QTest.mouseClick(
-                target,
-                Qt.MouseButton.LeftButton,
-                Qt.KeyboardModifier.NoModifier,
-                local_pos,
-            )
+            if not self._click_view_coords(x, y):
+                return False
+            QTest.keyClick(self.view, Qt.Key.Key_Return)
             return True
         except Exception as exc:
             self._emit_log(f"Dial UI mouse click failed: {exc}")
@@ -1526,14 +1679,33 @@ class GVController(QObject):
     def _on_load_finished_page(self, ok: bool) -> None:
         self._load_ok = ok
         self._pulse_heartbeat()
+        if not self._page_alive():
+            return
         self._page.runJavaScript(_JS_FORCE_VISIBLE)
         if ok:
+            self._load_retry_count = 0
             QTimer.singleShot(400, self._try_auto_login)
             QTimer.singleShot(800, self._check_login)
             if self._setup_mode:
                 QTimer.singleShot(1200, self._maybe_redirect_signin)
         else:
-            self._emit_log("Page failed to load — click Reload")
+            self._load_retry_count += 1
+            if self._load_retry_count <= 3:
+                wait_ms = 1500 * self._load_retry_count
+                self._emit_log(
+                    f"Page load failed — retry {self._load_retry_count}/3 in "
+                    f"{wait_ms // 1000}s…")
+                QTimer.singleShot(wait_ms, self._retry_page_load)
+            else:
+                self._emit_log("Page failed to load — check internet, then Reload")
+
+    def _retry_page_load(self) -> None:
+        if not self._page_alive() or self._load_ok:
+            return
+        if self._setup_mode:
+            self._page.load(QUrl(SIGNIN_URL))
+        else:
+            self._page.load(QUrl(GV_URL))
 
     def _grant_permission(self, url, feature) -> None:
         """Auto-grant mic + camera permissions so GV calls work."""
@@ -1655,7 +1827,9 @@ class GVController(QObject):
         decision = self._call_state_engine.classify(raw)
         dom_payload = decision.evidence if isinstance(decision.evidence, dict) else {}
         dom_payload["state"] = decision.state or "IDLE"
-        audio_features = self._audio_monitor.poll()
+        audio_features = self._audio_monitor.last_features
+        if self._state in ("RINGING", "ANSWERED_PENDING", "CONNECTED", "DIALING"):
+            audio_features = self._audio_monitor.poll()
         elapsed = time.monotonic() - self._dial_started_at if self._dial_started_at else 0.0
         fused = self._decision_engine.update(
             dom_evidence=dom_payload,

@@ -1,3 +1,5 @@
+from PyQt6.QtWidgets import QApplication, QWidget
+
 from src.gv_controller import GVController
 
 
@@ -14,6 +16,12 @@ class _FakeView:
 
     def height(self):
         return 800
+
+    def setFocus(self):
+        pass
+
+    def activateWindow(self):
+        pass
 
 
 def test_call_button_status_rejects_stale_different_number():
@@ -46,6 +54,27 @@ def test_js_clicked_call_button_status_accepts_matching_number():
     assert ctrl._call_button_status_matches_pending(
         "call_button_clicked_js|x=1220|y=164|aria=Call + 1 7 0 8 5 6 8 1 7 9 4|text=call"
     )
+
+
+def test_click_view_coords_uses_webengine_view():
+    app = QApplication.instance() or QApplication([])
+    ctrl = _controller_for("+19097202727")
+    ctrl.view = QWidget()
+    ctrl.view.resize(1200, 800)
+    ctrl._emit_log = lambda _msg: None
+
+    assert ctrl._click_view_coords(400, 300)
+    assert not ctrl._click_view_coords(-1, 300)
+    assert not ctrl._click_view_coords(2000, 300)
+    assert app is not None
+
+
+def test_gv_dial_url_variants():
+    from src.gv_controller import _gv_dial_url_variants
+
+    urls = _gv_dial_url_variants("+19097202727")
+    assert any("a=nc" in u for u in urls)
+    assert any("/dial/" in u for u in urls)
 
 
 def test_offscreen_native_key_target_does_not_consume_attempt():

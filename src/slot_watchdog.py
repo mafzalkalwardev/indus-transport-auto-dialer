@@ -9,16 +9,39 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from src.dialer_logging import log_info, log_warning
 
+_MEMORY_CACHE: tuple[float, int] = (0.0, 0)
+_MEMORY_CACHE_TTL_SEC = 4.0
 
-def webengine_total_memory_mb() -> int:
-    """Sum RSS of QtWebEngine / Chromium helper processes (Windows)."""
+
+def webengine_total_memory_mb(*, force_refresh: bool = False) -> int:
+    """Sum RSS of QtWebEngine helper processes; cached to avoid UI stalls."""
+    global _MEMORY_CACHE
+    now = time.time()
+    cached_at, cached_mb = _MEMORY_CACHE
+    if not force_refresh and cached_at and (now - cached_at) < _MEMORY_CACHE_TTL_SEC:
+        return cached_mb
     try:
         import psutil
     except ImportError:
-        return 0
+        return cached_mb
     total = 0
     try:
-        processes = psutil.process_iter(["name", "memory_info"])
+        for proc in psutil.process_iter(["name", "memory_info"]):
+            try:
+                name = (proc.info.get("name") or "").lower()
+                if "qtwebengine" not in name:
+                    continue
+                mi = proc.info.get("memory_info")
+                if mi:
+                    total += int(mi.rss / (1024 * 1024))
+            except (
+                psutil.NoSuchProcess,
+                psutil.AccessDenied,
+                getattr(psutil, "ZombieProcess", psutil.NoSuchProcess),
+                PermissionError,
+                OSError,
+            ):
+                continue
     except (
         psutil.NoSuchProcess,
         psutil.AccessDenied,
@@ -26,24 +49,8 @@ def webengine_total_memory_mb() -> int:
         PermissionError,
         OSError,
     ):
-        return 0
-    for proc in processes:
-        try:
-            name = (proc.info.get("name") or "").lower()
-            if "qtwebengine" in name or (
-                "chrome" in name and "qt" in name
-            ):
-                mi = proc.info.get("memory_info")
-                if mi:
-                    total += int(mi.rss / (1024 * 1024))
-        except (
-            psutil.NoSuchProcess,
-            psutil.AccessDenied,
-            getattr(psutil, "ZombieProcess", psutil.NoSuchProcess),
-            PermissionError,
-            OSError,
-        ):
-            continue
+        return cached_mb
+    _MEMORY_CACHE = (now, total)
     return total
 
 
@@ -73,6 +80,7 @@ class SlotWatchdog(QObject):
         self._timer.timeout.connect(self._check_all)
         self._memory_getter: Optional[Callable[[], int]] = None
         self._running = False
+        self._last_memory_recycle_at = 0.0
 
     def configure(
         self,
@@ -138,22 +146,28 @@ class SlotWatchdog(QObject):
         now = time.time()
         mem_mb = self._memory_getter() if self._memory_getter else webengine_total_memory_mb()
         mem_high = mem_mb > self.memory_limit_mb if mem_mb > 0 else False
+        memory_recycle_due = (
+            mem_high
+            and (now - self._last_memory_recycle_at) >= 300.0
+        )
+        recycle_candidate: tuple[int, int] | None = None
 
         for slot_id, h in list(self._slots.items()):
             if h.current_state in (
                 "IDLE", "ENDED", "ENDED_MANUALLY", "VOICEMAIL", "NO_ANSWER",
                 "BUSY", "FAILED",
             ):
-                if mem_high and h.calls_completed > 10:
-                    self._request_restart(
-                        slot_id,
-                        f"WebEngine memory high ({mem_mb} MB)",
-                    )
-                elif h.calls_completed >= self.recycle_after_calls:
+                if h.calls_completed >= self.recycle_after_calls:
                     self._request_restart(
                         slot_id,
                         f"recycle after {h.calls_completed} calls",
                     )
+                elif memory_recycle_due and h.calls_completed >= 25:
+                    if (
+                        recycle_candidate is None
+                        or h.calls_completed > recycle_candidate[1]
+                    ):
+                        recycle_candidate = (slot_id, h.calls_completed)
                 continue
 
             elapsed_hb = now - h.last_heartbeat
@@ -171,6 +185,14 @@ class SlotWatchdog(QObject):
                         slot_id,
                         f"stuck in {h.current_state} for {elapsed_st:.0f}s",
                     )
+
+        if recycle_candidate is not None:
+            slot_id, count = recycle_candidate
+            self._last_memory_recycle_at = now
+            self._request_restart(
+                slot_id,
+                f"WebEngine memory high ({mem_mb} MB, {count} calls on line)",
+            )
 
     def _request_restart(self, slot_id: int, reason: str) -> None:
         log_warning(f"Watchdog slot {slot_id}: {reason}")

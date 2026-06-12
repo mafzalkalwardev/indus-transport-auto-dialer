@@ -178,6 +178,12 @@ For long campaigns (many numbers, several lines):
 
 Tune in `dialer_config.json` — see [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
+**First-time setup:** copy `dialer_config.example.json` to `dialer_config.json` (defaults: 1 line, 6s cooldown). Local config is not tracked in git. On the **Dialer** tab, use **Apply stable mode** for safe settings on 8 GB PCs.
+
+**Dev cycle (test + optional push):** `.\scripts\dev_cycle.ps1` or `.\scripts\dev_cycle.ps1 -Push`
+
+See [docs/GV_DIAL_RESEARCH.md](docs/GV_DIAL_RESEARCH.md) for Google Voice web dialing notes.
+
 Load testing: [docs/LOAD_TEST.md](docs/LOAD_TEST.md) and `python scripts/generate_load_test_list.py`.
 
 ## How call detection works

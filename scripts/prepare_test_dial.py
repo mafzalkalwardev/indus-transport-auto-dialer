@@ -32,9 +32,11 @@ def main() -> None:
         with open(CONFIG_FILE, encoding="utf-8") as f:
             cfg = json.load(f)
     cfg["excel_path"] = xlsx.replace("\\", "/")
-    cfg["n_slots"] = len(TEST_NUMBERS)
-    cfg.setdefault("call_timeout", 45)
-    cfg.setdefault("dial_stagger_sec", 0.8)
+    cfg["n_slots"] = 1
+    cfg.setdefault("call_timeout", 60)
+    cfg.setdefault("cooldown", 6.0)
+    cfg.setdefault("dial_stagger_sec", 1.2)
+    cfg.setdefault("enable_ai_audio", False)
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
 
@@ -46,8 +48,8 @@ def main() -> None:
             print(f"  INVALID  {raw}")
             continue
         print(f"  OK  {name}: {fmt_display(d10)}  ({fmt_e164(d10)})")
-    print("\nIn the app: Dialer -> Load Test List -> Start Power Dial (3 slots).")
-    print("Use only if you own these lines or consent to test calls.")
+    print("\nIn the app: Dialer -> Load Test List -> Apply stable mode -> Start dialing.")
+    print("Test list has 3 numbers; on 8 GB RAM use 1 line at a time.")
 
 
 if __name__ == "__main__":

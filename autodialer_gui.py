@@ -49,6 +49,10 @@ from src.client_deploy import export_client_package, is_client_deployment
 from src.slot_watchdog import SlotWatchdog, webengine_total_memory_mb
 from src.retry_queue import DialRetryQueue
 from src.dialer_logging import setup_dialer_logging, log_info, log_warning, log_path
+from src.process_cleanup import cleanup_stale_webengine_processes
+from src.system_profile import (
+    recommended_slots, low_resource_reason, system_ram_gb, chrome_process_count,
+)
 from src.gv_accounts import (
     load_accounts as load_gv_accounts,
     save_accounts as save_gv_accounts,
@@ -73,7 +77,7 @@ WA_NUMBER    = "+92 307 967 0503"
 def _load_cfg() -> dict:
     defaults = {
         "theme": DEFAULT_THEME,
-        "n_slots": 5,
+        "n_slots": 1,
         "call_timeout": 60,
         "cooldown": 4.0,
         "dial_stagger_sec": 0.8,
@@ -84,10 +88,10 @@ def _load_cfg() -> dict:
         "retry_backoff_sec": [5, 15, 45],
         "watchdog_heartbeat_timeout_sec": 45,
         "watchdog_stuck_state_sec": 90,
-        "slot_memory_limit_mb": 700,
+        "slot_memory_limit_mb": 1200,
         "slot_recycle_after_calls": 75,
         "watchdog_check_interval_sec": 5,
-        "enable_ai_audio": True,
+        "enable_ai_audio": False,
         "audio_device": "",
         "live_debug_mode": False,
         "dry_run_mode": False,
@@ -957,6 +961,11 @@ class MainWindow(QMainWindow):
         self._manual_test_slots: set[int] = set()
         self._slot_call_token: dict[int, int] = {}
         self._slot_final_logged: set[int] = set()
+        self._slot_call_times: dict[int, dict[str, str]] = {}
+        self._recovering_slots: set[int] = set()
+        self._controllers_ready: bool = False
+        self._controllers_boot_remaining: int = 0
+        self._effective_slots: int = 1
         self._campaign_generation: int = 0
         self._all_logs:    list = []
         self._retry_queue = DialRetryQueue(
@@ -989,15 +998,22 @@ class MainWindow(QMainWindow):
         self._headless_timer.setInterval(2000)
         self._headless_timer.timeout.connect(self._tick_headless_logins)
 
+        self._health_timer = QTimer(self)
+        self._health_timer.setInterval(5000)
+        self._health_timer.timeout.connect(self._update_health_panel)
+
         # ── Build UI ──────────────────────────────────────────────────────────
         self._build_hidden_browser_container()
         self._build_header()
         self._build_tabs()
         self._build_status_bar()
 
-        # ── Boot controllers ──────────────────────────────────────────────────
-        self._init_controllers(cfg.get("n_slots", 5))
-        self._watchdog.start()
+        # ── Boot controllers (deferred — UI shows first) ─────────────────────
+        requested = int(cfg.get("n_slots", 1))
+        self._effective_slots = recommended_slots(requested)
+        self.statusBar().showMessage("Starting — Google Voice loads in a few seconds…")
+        QTimer.singleShot(1800, self._deferred_boot_controllers)
+        self._health_timer.start()
         log_info(f"Session started — user {user.get('email', '?')}")
 
     def closeEvent(self, event) -> None:
@@ -1006,6 +1022,7 @@ class MainWindow(QMainWindow):
         self._assign_debounce.stop()
         self._elapsed_timer.stop()
         self._headless_timer.stop()
+        self._health_timer.stop()
         for dialog in list(self._slot_monitors.values()):
             try:
                 dialog.close()
@@ -1019,6 +1036,53 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
         super().closeEvent(event)
 
+    def _deferred_boot_controllers(self) -> None:
+        """Load Google Voice after the UI is visible (prevents startup freeze)."""
+        requested = int(self.cfg.get("n_slots", 1))
+        self._effective_slots = recommended_slots(requested)
+        reason = low_resource_reason(requested, self._effective_slots)
+        if reason:
+            log_warning(reason)
+            self._log(reason)
+            if hasattr(self, "spin_slots"):
+                self.spin_slots.setValue(self._effective_slots)
+            QMessageBox.information(
+                self,
+                "Low-resource mode",
+                f"{reason}\n\n"
+                "You do NOT need a new PC — close extra Chrome windows "
+                "and use 1 line at a time on 8 GB RAM.\n\n"
+                f"Chrome tabs/processes now: {chrome_process_count()}\n"
+                f"System RAM: ~{system_ram_gb():.0f} GB",
+            )
+        self._controllers_boot_remaining = self._effective_slots
+        self._init_controllers(self._effective_slots)
+
+    def _on_controller_booted(self) -> None:
+        self._controllers_boot_remaining = max(0, self._controllers_boot_remaining - 1)
+        if self._controllers_boot_remaining == 0 and not self._controllers_ready:
+            self._controllers_ready = True
+            if not self._watchdog._running:
+                self._watchdog.start()
+            self._update_health_panel()
+            self.statusBar().showMessage("Google Voice lines ready")
+            self._refresh_slot_login_badges()
+            log_info("All voice line browsers loaded")
+
+    def _gv_runtime_cfg(self) -> dict:
+        return {
+            "call_timeout": int(self.cfg.get("call_timeout", 60)),
+            "enable_ai_audio": bool(self.cfg.get("enable_ai_audio", False)),
+            "audio_device": self.cfg.get("audio_device", ""),
+            "live_debug_mode": bool(self.cfg.get("live_debug_mode", False)),
+        }
+
+    def _apply_runtime_cfg_to_controllers(self) -> None:
+        runtime = self._gv_runtime_cfg()
+        for ctrl in self._controllers:
+            if ctrl is not None:
+                ctrl.apply_runtime_cfg(runtime)
+
     def _configure_watchdog(self) -> None:
         stuck = float(self.cfg.get(
             "watchdog_stuck_state_sec",
@@ -1028,7 +1092,7 @@ class MainWindow(QMainWindow):
             heartbeat_timeout_sec=float(
                 self.cfg.get("watchdog_heartbeat_timeout_sec", 45)),
             stuck_state_sec=stuck,
-            memory_limit_mb=int(self.cfg.get("slot_memory_limit_mb", 700)),
+            memory_limit_mb=int(self.cfg.get("slot_memory_limit_mb", 1200)),
             recycle_after_calls=int(self.cfg.get("slot_recycle_after_calls", 75)),
             check_interval_ms=int(
                 float(self.cfg.get("watchdog_check_interval_sec", 5)) * 1000),
@@ -1148,6 +1212,7 @@ class MainWindow(QMainWindow):
             profile_key=acct["profile"],
             login_email=acct.get("email", ""),
             login_password=acct.get("password", ""),
+            runtime_cfg=self._gv_runtime_cfg(),
         )
         ctrl.state_changed.connect(self._on_slot_state)
         ctrl.login_detected.connect(self._on_slot_login)
@@ -1431,6 +1496,63 @@ class MainWindow(QMainWindow):
         self._build_crm_tab()
         self._build_settings_tab()
 
+    def _apply_stable_mode(self) -> None:
+        """Recommended settings for smooth dialing on most PCs."""
+        slots = 1 if system_ram_gb() < 12 else 2
+        self.spin_slots.setValue(slots)
+        self.spin_timeout.setValue(60)
+        self.spin_cooldown.setValue(6.0)
+        self.spin_vm_hangup.setValue(4)
+        self.cfg.update({
+            "n_slots": slots,
+            "call_timeout": 60,
+            "cooldown": 6.0,
+            "voicemail_hangup_sec": 4,
+            "enable_ai_audio": False,
+        })
+        _save_cfg(self.cfg)
+        self._effective_slots = recommended_slots(slots)
+        self._apply_runtime_cfg_to_controllers()
+        self._log(
+            f"Stable mode applied — {self._effective_slots} line(s), "
+            "60s timeout, 6s cooldown, AI audio off")
+        QMessageBox.information(
+            self,
+            "Stable mode",
+            f"Dialing options set for stability on your PC (~{system_ram_gb():.0f} GB RAM):\n\n"
+            f"• {self._effective_slots} line(s) at once\n"
+            "• 60 second call timeout\n"
+            "• 6 second cooldown between calls\n"
+            "• 4 second voicemail hangup\n"
+            "• AI audio detection off\n\n"
+            "Close extra Chrome windows before dialing.\n"
+            "Restart the app to apply line count.",
+        )
+
+    def _update_health_panel(self) -> None:
+        mb = webengine_total_memory_mb()
+        limit = int(self.cfg.get("slot_memory_limit_mb", 700))
+        recovering = len(self._recovering_slots) + len(self._pending_slot_restarts)
+        active = sum(
+            1 for c in self._controllers
+            if c and c.current_state not in (
+                "IDLE", "ENDED", "ENDED_MANUALLY", "FAILED", "NO_ANSWER", "BUSY")
+        )
+        parts = [f"WebEngine ~{mb} MB (limit {limit} MB)", f"Active lines: {active}"]
+        if recovering:
+            parts.append(f"Recovering {recovering} line(s)")
+        if mb > limit:
+            parts.append("High memory — consider fewer lines or restart")
+        self.lbl_health_status.setText(" · ".join(parts))
+        lp = log_path()
+        if lp:
+            self.lbl_health_log.setText(f"Operations log: {lp}")
+
+    def _mark_call_time(self, slot_id: int, field: str) -> None:
+        times = self._slot_call_times.setdefault(slot_id, {})
+        if field not in times:
+            times[field] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     def _build_status_bar(self):
         self.statusBar().showMessage("Ready")
 
@@ -1471,7 +1593,7 @@ class MainWindow(QMainWindow):
         slay.addWidget(QLabel("Lines at once:"))
         self.spin_slots = QSpinBox()
         self.spin_slots.setRange(1, 5)
-        self.spin_slots.setValue(self.cfg.get("n_slots", 5))
+        self.spin_slots.setValue(self.cfg.get("n_slots", 1))
         slay.addWidget(self.spin_slots)
         slay.addSpacing(20)
         slay.addWidget(QLabel("Call Timeout (sec):"))
@@ -1496,6 +1618,23 @@ class MainWindow(QMainWindow):
         slay.addWidget(self.spin_vm_hangup)
         slay.addStretch()
         lay.addWidget(grp_settings)
+
+        grp_health = QGroupBox("System health")
+        hlay = QVBoxLayout(grp_health)
+        health_row = QHBoxLayout()
+        self.lbl_health_status = _label("Checking…", "muted")
+        self.lbl_health_status.setWordWrap(True)
+        health_row.addWidget(self.lbl_health_status, stretch=1)
+        stable_btn = _btn("Apply stable mode", "secondary")
+        stable_btn.setToolTip(
+            "Sets 3 lines, 60s timeout, 5s cooldown — recommended for daily use")
+        stable_btn.clicked.connect(self._apply_stable_mode)
+        health_row.addWidget(stable_btn)
+        hlay.addLayout(health_row)
+        self.lbl_health_log = _label("", "muted")
+        self.lbl_health_log.setWordWrap(True)
+        hlay.addWidget(self.lbl_health_log)
+        lay.addWidget(grp_health)
 
         # Progress
         grp_prog = QGroupBox("Campaign progress")
@@ -2149,6 +2288,7 @@ class MainWindow(QMainWindow):
                 profile_key=acct["profile"],
                 login_email=acct.get("email", ""),
                 login_password=acct.get("password", ""),
+                runtime_cfg=self._gv_runtime_cfg(),
             )
             ctrl.login_detected.connect(self._on_slot_login)
             ctrl.log_message.connect(self._on_slot_log)
@@ -2240,7 +2380,8 @@ class MainWindow(QMainWindow):
             ctrl = GVController(i, profile_dir, parent=self,
                                 profile_key=profile_name,
                                 login_email=login_email,
-                                login_password=login_password)
+                                login_password=login_password,
+                                runtime_cfg=self._gv_runtime_cfg())
             ctrl.state_changed.connect(self._on_slot_state)
             ctrl.login_detected.connect(self._on_slot_login)
             ctrl.log_message.connect(self._on_slot_log)
@@ -2248,12 +2389,26 @@ class MainWindow(QMainWindow):
             ctrl.prepare_for_background_rendering()
             self._controllers.append(ctrl)
             self._watchdog.register_slot(i)
-            ctrl.load()
-            if has_session_marker(profile_dir):
-                ctrl.mark_logged_in()
-            else:
-                QTimer.singleShot(2000, ctrl._check_login)
+            delay_ms = i * 2500
+            QTimer.singleShot(
+                delay_ms,
+                lambda c=ctrl, pdir=profile_dir: self._boot_controller(c, pdir),
+            )
         self._refresh_slot_login_badges()
+
+    def _boot_controller(self, ctrl: GVController, profile_dir: str) -> None:
+        """Load Google Voice for one line (staggered so startup does not freeze)."""
+        if (
+            ctrl.slot_id >= len(self._controllers)
+            or self._controllers[ctrl.slot_id] is not ctrl
+        ):
+            return
+        ctrl.load()
+        if has_session_marker(profile_dir):
+            ctrl.mark_logged_in()
+        else:
+            QTimer.singleShot(2000, ctrl._check_login)
+        self._on_controller_booted()
 
     def _close_slot_monitor(self, slot_id: int) -> None:
         """Close Listen/debug monitor so it does not hold a disposed WebEngine view."""
@@ -2287,6 +2442,7 @@ class MainWindow(QMainWindow):
 
         self._update_card(slot_id, "RECOVERING", phone)
 
+        self._recovering_slots.add(slot_id)
         self._close_slot_monitor(slot_id)
 
         ctrl = self._get_ctrl(slot_id)
@@ -2334,6 +2490,7 @@ class MainWindow(QMainWindow):
             profile_key=profile_name,
             login_email=login_email,
             login_password=login_password,
+            runtime_cfg=self._gv_runtime_cfg(),
         )
         new_ctrl.state_changed.connect(self._on_slot_state)
         new_ctrl.login_detected.connect(self._on_slot_login)
@@ -2357,8 +2514,10 @@ class MainWindow(QMainWindow):
         self._slot_name.pop(slot_id, None)
         self._slot_retry_attempt.pop(slot_id, None)
         self._manual_test_slots.discard(slot_id)
+        self._recovering_slots.discard(slot_id)
         self._update_card(slot_id, "IDLE", "")
         self._refresh_slot_login_badges()
+        self._update_health_panel()
 
         phone = ctx.get("phone", "")
         name = ctx.get("name", "")
@@ -2394,7 +2553,10 @@ class MainWindow(QMainWindow):
     def _controller_available(self, ctrl: GVController | None) -> bool:
         if ctrl is None:
             return False
-        if not self._slot_account(ctrl.slot_id):
+        sid = ctrl.slot_id
+        if sid in self._recovering_slots or sid in self._pending_slot_restarts:
+            return False
+        if not self._slot_account(sid):
             return False
         if self._slot_has_active_phone(ctrl.slot_id):
             return False
@@ -2763,6 +2925,8 @@ class MainWindow(QMainWindow):
         token = self._slot_call_token.get(sid, 0) + 1
         self._slot_call_token[sid] = token
         self._slot_final_logged.discard(sid)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._slot_call_times[sid] = {"dialed_at": now}
         self._update_card(sid, "DIALING", phone)
         if retry_attempt > 0:
             self._log(
@@ -2880,6 +3044,7 @@ class MainWindow(QMainWindow):
                         *, duration_s: float = 0.0, contact_name: str = "") -> bool:
         if not phone or slot_id in self._slot_final_logged:
             return False
+        times = self._slot_call_times.get(slot_id, {})
         debug = self._slot_detection_debug.get(slot_id, {})
         history = json.dumps({
             "dom_state": debug.get("dom_state"),
@@ -2898,7 +3063,11 @@ class MainWindow(QMainWindow):
             confidence=float(debug.get("confidence") or 0.0),
             state_history=history,
             final_outcome=status,
+            dialed_at=times.get("dialed_at", ""),
+            ringing_at=times.get("ringing_at", ""),
+            connected_at=times.get("connected_at", ""),
         )
+        self._slot_call_times.pop(slot_id, None)
         self._slot_final_logged.add(slot_id)
         self._refresh_logs()
         self._refresh_dialer_counts()
@@ -2952,6 +3121,10 @@ class MainWindow(QMainWindow):
 
         self._watchdog.record_state(slot_id, state)
         phone = self._slot_phone.get(slot_id, "")
+        if state in ("RINGING", "ANSWERED_PENDING"):
+            self._mark_call_time(slot_id, "ringing_at")
+        elif state == "CONNECTED":
+            self._mark_call_time(slot_id, "connected_at")
         disp  = fmt_display(phone[2:]) if phone.startswith("+1") and len(phone) == 12 \
             else phone
         self._update_card(slot_id, state, phone)
@@ -3491,17 +3664,24 @@ def _now() -> float:
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
     os.makedirs(LOGS_DIR, exist_ok=True)
+    cleanup_stale_webengine_processes()
+
+    app = QApplication(sys.argv)
     app_lock = QLockFile(os.path.join(LOGS_DIR, "ftsolutions_autodialer.lock"))
-    app_lock.setStaleLockTime(0)
-    if not app_lock.tryLock(100):
-        QMessageBox.warning(
-            None,
-            "FT Solutions Auto Dialer is already open",
-            "Close the existing Auto Dialer window before opening another one.",
-        )
-        sys.exit(1)
+    app_lock.setStaleLockTime(30_000)
+    if not app_lock.tryLock(800):
+        cleanup_stale_webengine_processes()
+        app_lock.removeStaleLockFile()
+        if not app_lock.tryLock(800):
+            QMessageBox.warning(
+                None,
+                "FT Solutions Auto Dialer is already open",
+                "Close the existing Auto Dialer window before opening another one.\n\n"
+                "If no window is visible, open Task Manager and end "
+                "QtWebEngineProcess.exe, then try again.",
+            )
+            sys.exit(1)
     app.setApplicationName("FTSolutions AutoDialer")
     app.setOrganizationName("FT Solutions")
     setup_dialer_logging()

@@ -1,0 +1,21 @@
+{
+  "theme": "light",
+  "n_slots": 1,
+  "call_timeout": 60,
+  "cooldown": 6.0,
+  "dial_stagger_sec": 1.2,
+  "voicemail_hangup_sec": 4,
+  "excel_path": "",
+  "deployment_mode": "admin",
+  "max_retries": 3,
+  "retry_backoff_sec": [5, 15, 45],
+  "watchdog_heartbeat_timeout_sec": 45,
+  "watchdog_stuck_state_sec": 90,
+  "slot_memory_limit_mb": 1200,
+  "slot_recycle_after_calls": 75,
+  "watchdog_check_interval_sec": 5,
+  "enable_ai_audio": false,
+  "audio_device": "",
+  "live_debug_mode": false,
+  "dry_run_mode": false
+}

@@ -65,6 +65,10 @@ class AudioAnalyzer:
         self._recent_voice: list[bool] = []
         self._backend_error = ""
         self._vad = VoiceActivityDetector()
+        self._last_capture_at = 0.0
+        self._cached_features: AudioFeatures | None = None
+        self._capture_failures = 0
+        self._disabled_until = 0.0
 
     def analyze_from_pcm(
         self,
@@ -167,12 +171,26 @@ class AudioAnalyzer:
         if not self.enable_audio:
             self.backend_status = "OFF"
             return self._features(reason="audio disabled", backend_status="OFF")
+
+        now = time.monotonic()
+        if now < self._disabled_until:
+            if self._cached_features is not None:
+                return self._cached_features
+            return self._features(
+                reason="audio capture paused after repeated failures",
+                backend_status="NO_BACKEND",
+            )
+        if self._cached_features is not None and (now - self._last_capture_at) < 0.75:
+            return self._cached_features
+
         try:
             import sounddevice as sd  # type: ignore
         except Exception as exc:
             self.backend_status = "NO_BACKEND"
             self._backend_error = str(exc)
-            return self._features(reason="sounddevice not installed", backend_status="NO_BACKEND")
+            features = self._features(reason="sounddevice not installed", backend_status="NO_BACKEND")
+            self._cached_features = features
+            return features
 
         try:
             candidates = self._capture_candidates(sd)
@@ -181,6 +199,9 @@ class AudioAnalyzer:
             for candidate in dict.fromkeys(candidates):
                 try:
                     features = self._capture_device(sd, candidate)
+                    self._capture_failures = 0
+                    self._last_capture_at = now
+                    self._cached_features = features
                     if (
                         features.has_speech_like
                         or features.ringback_cadence_confidence >= 0.45
@@ -194,48 +215,37 @@ class AudioAnalyzer:
                 except Exception as exc:
                     last_error = exc
             if best_silent is not None:
+                self._last_capture_at = now
+                self._cached_features = best_silent
                 return best_silent
             raise last_error or RuntimeError("no audio capture device worked")
         except Exception as exc:
+            self._capture_failures += 1
+            if self._capture_failures >= 3:
+                self._disabled_until = now + 45.0
             self.backend_status = "NO_BACKEND"
             self._backend_error = str(exc)
-            return self._features(reason=f"audio capture unavailable: {exc}", backend_status="NO_BACKEND")
+            features = self._features(
+                reason=f"audio capture unavailable: {exc}",
+                backend_status="NO_BACKEND",
+            )
+            self._cached_features = features
+            return features
 
     def _capture_candidates(self, sd) -> list[int | str | None]:
-        candidates: list[int | str | None] = []
+        """Keep candidate list short — probing many devices blocks the UI thread."""
         resolved = self._resolve_device(sd)
-        candidates.append(resolved)
+        if resolved is not None:
+            return [resolved]
         try:
             default_output = sd.default.device[1]
             if default_output is not None and default_output >= 0:
-                candidates.append(int(default_output))
+                return [int(default_output)]
         except Exception:
             pass
-
-        devices = list(sd.query_devices())
-
-        def add_matching(*phrases: str, needs_input: bool | None = None, limit: int = 2) -> None:
-            added = 0
-            for idx, dev in enumerate(devices):
-                name = str(dev.get("name", "")).lower()
-                if not any(phrase in name for phrase in phrases):
-                    continue
-                if needs_input is True and int(dev.get("max_input_channels", 0) or 0) <= 0:
-                    continue
-                if needs_input is False and int(dev.get("max_output_channels", 0) or 0) <= 0:
-                    continue
-                candidates.append(idx)
-                added += 1
-                if added >= limit:
-                    break
-
-        add_matching("speaker", "headphone", needs_input=False, limit=2)
-        add_matching("cable output", "stereo mix", "what u hear", needs_input=True, limit=3)
-        add_matching("cable in", "virtual cable", needs_input=False, limit=2)
-        return candidates
+        return [None]
 
     def _capture_device(self, sd, device: int | str | None) -> AudioFeatures:
-            frames = max(256, int(self.sample_rate * self.chunk_seconds))
             channels = 1
             try:
                 info = sd.query_devices(device)
@@ -256,7 +266,8 @@ class AudioAnalyzer:
                     extra = sd.WasapiSettings(loopback=True)
                 except Exception:
                     raise RuntimeError("output loopback is not supported by installed sounddevice")
-            frames = max(256, int(sample_rate * self.chunk_seconds))
+            poll_seconds = min(self.chunk_seconds, 0.12)
+            frames = max(256, int(sample_rate * poll_seconds))
             data = sd.rec(
                 frames,
                 samplerate=sample_rate,

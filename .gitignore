@@ -13,3 +13,4 @@ chrome_profiles/
 logs/
 data/gv_accounts.json
 phones_test.xlsx
+dialer_config.json
