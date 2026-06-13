@@ -1,17 +1,45 @@
-# FT Solutions — Auto Dialer Pro
+<div align="center">
 
 <p align="center">
   <img src="ftsolutionslogo.jpg" alt="FT Solutions logo" width="120" />
 </p>
 
-<p align="center">
-  <a href="https://github.com/mafzalkalwardev/indus-transport-auto-dialer/actions/workflows/test.yml"><img src="https://github.com/mafzalkalwardev/indus-transport-auto-dialer/actions/workflows/test.yml/badge.svg" alt="Tests" /></a>
-  <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+" />
-  <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Windows" />
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License" />
-</p>
+# 📞 Indus Transport Auto Dialer
+
+**Professional Windows auto dialer — Google Voice, AMD, predictive pacing.**
+
+Multi-line dialing · AMD · CRM · Excel lists · Predictive pacing
+
+[![Tests](https://github.com/mafzalkalwardev/indus-transport-auto-dialer/actions/workflows/test.yml/badge.svg)](https://github.com/mafzalkalwardev/indus-transport-auto-dialer/actions/workflows/test.yml)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://www.microsoft.com/windows)
+[![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?style=for-the-badge)](https://www.riverbankcomputing.com/software/pyqt/)
+[![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
+[![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen?style=for-the-badge)](CONTRIBUTING.md)
+
+[Features](#features) · [Quick Start](#quick-start) · [Documentation](#documentation) · [Screenshots](#-screenshots) · [Contributing](CONTRIBUTING.md)
+
+</div>
+
+---
 
 Professional Windows desktop dialer for FT Solutions. Agents use a simple branded app while Google Voice runs in the background on each line.
+
+## 🖼 Screenshots
+
+![Auto Dialer screenshot](docs/screenshots/placeholder.svg)
+
+*Add real captures to `docs/screenshots/` — replace the placeholder above.*
+
+## 🐍 Contribution graph
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mafzalkalwardev/indus-transport-auto-dialer/output/snake-dark.svg" />
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/mafzalkalwardev/indus-transport-auto-dialer/output/snake.svg" />
+  <img alt="Contribution snake" src="https://raw.githubusercontent.com/mafzalkalwardev/indus-transport-auto-dialer/output/snake.svg" />
+</picture>
+
+---
 
 ## Documentation
 
