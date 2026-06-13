@@ -20,12 +20,8 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: snake-${{ github.repository }}
-  cancel-in-progress: true
-
 jobs:
-  build:
+  generate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,16 +30,16 @@ jobs:
         with:
           github_user_name: mafzalkalwardev
           outputs: |
-            dist/snake.svg
-            dist/snake-dark.svg?palette=github-dark
-      - name: Deploy snake to gh-pages
-        uses: peaceiris/actions-gh-pages@v4
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+            dist/github-contribution-grid-snake.svg
+            dist/github-contribution-grid-snake-dark.svg?palette=github-dark
+      - name: Push snake SVGs to output branch
+        uses: crazy-max/ghaction-github-pages@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./dist
-          destination_dir: output
-          keep_files: true
+          target_branch: output
+          build_dir: dist
+          commit_message: "update contribution snake"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 """
 
 PYTHON_CI = """name: CI
