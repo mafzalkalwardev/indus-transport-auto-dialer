@@ -1,4 +1,42 @@
-# FT Solutions — Auto Dialer Pro
+<div align="center">
+
+# 📞 Indus Transport Auto Dialer
+
+**Professional Windows auto dialer — Google Voice, AMD, predictive pacing.**
+
+Multi-line dialing · AMD · CRM · Excel lists
+
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?style=for-the-badge)
+![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?style=for-the-badge)
+[![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
+[![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen?style=for-the-badge)](CONTRIBUTING.md)
+
+[Features](#-features) · [Quick Start](#-quick-start) · [Screenshots](#-screenshots) · [Contributing](CONTRIBUTING.md)
+
+</div>
+
+---
+
+## 🖼 Screenshots
+
+![Indus Transport Auto Dialer screenshot](docs/screenshots/placeholder.svg)
+
+*Replace `docs/screenshots/placeholder.svg` with real app screenshots.*
+
+---
+
+## 🐍 Contribution graph
+
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mafzalkalwardev/indus-transport-auto-dialer/output/snake-dark.svg" />
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/mafzalkalwardev/indus-transport-auto-dialer/output/snake.svg" />
+  <img alt="Contribution snake" src="https://raw.githubusercontent.com/mafzalkalwardev/indus-transport-auto-dialer/output/snake.svg" />
+</picture>
+
+
+---
 
 Professional Windows desktop dialer for FT Solutions. Agents use a simple branded app while Google Voice runs in the background on each line.
 
