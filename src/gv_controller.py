@@ -522,12 +522,14 @@ def _js_autofill_login(email: str, password: str) -> str:
 """
 
 
-def _js_dial(phone: str) -> str:
+def _js_dial(phone: str, *, click_only: bool = False) -> str:
     """Build the JS dial sequence for a given E.164 phone number."""
     safe = phone.replace("'", "")
+    click_only_lit = "true" if click_only else "false"
     return f"""
 (function(){{
   var phone='{safe}';
+  var clickOnly={click_only_lit};
 
   function setNativeVal(el,val){{
     try{{
@@ -810,24 +812,45 @@ def _js_dial(phone: str) -> str:
 
   var digits=phone.replace(/\\D/g,'');
   var dialDigits=(digits.length===11 && digits.charAt(0)==='1') ? digits.slice(1) : digits;
-  setNativeVal(inp,phone);
-  var current=editableValue(inp).replace(/\\D/g,'');
-  var numberEntered = current.length >= Math.min(7, digits.length) &&
-    (current.indexOf(digits)!==-1 || digits.indexOf(current)!==-1 ||
-     current.slice(-10)===digits.slice(-10));
-  if(!numberEntered){{
-    setNativeVal(inp,'');
-    if(clickKeypadDigits(dialDigits)){{
-      current=editableValue(inp).replace(/\\D/g,'');
-      numberEntered = current.length >= Math.min(7, digits.length) &&
-        (current.indexOf(digits)!==-1 || digits.indexOf(current)!==-1 ||
-         current.slice(-10)===digits.slice(-10) ||
-         current.slice(-10)===dialDigits.slice(-10));
-    }}
+
+  function numberLooksEntered(current){{
+    return current.length >= Math.min(7, digits.length) &&
+      (sameNumber(current, digits) || sameNumber(current, dialDigits));
   }}
-  if(!numberEntered){{
-    window.__gvDialStatus='number_not_entered|value='+editableValue(inp).slice(0,40);
-    return window.__gvDialStatus;
+
+  function clearIfGarbled(){{
+    var current=editableValue(inp).replace(/\\D/g,'');
+    if(!current) return current;
+    if(current.length > dialDigits.length + 2 ||
+       (current.length >= 7 && !numberLooksEntered(current))){{
+      setNativeVal(inp,'');
+      return '';
+    }}
+    return current;
+  }}
+
+  if(clickOnly){{
+    var readyDigits=clearIfGarbled();
+    if(!numberLooksEntered(readyDigits)){{
+      window.__gvDialStatus='number_not_entered|value='+editableValue(inp).slice(0,40);
+      return window.__gvDialStatus;
+    }}
+  }} else {{
+    clearIfGarbled();
+    setNativeVal(inp,phone);
+    var current=editableValue(inp).replace(/\\D/g,'');
+    var numberEntered = numberLooksEntered(current);
+    if(!numberEntered){{
+      setNativeVal(inp,'');
+      if(clickKeypadDigits(dialDigits)){{
+        current=editableValue(inp).replace(/\\D/g,'');
+        numberEntered = numberLooksEntered(current);
+      }}
+    }}
+    if(!numberEntered){{
+      window.__gvDialStatus='number_not_entered|value='+editableValue(inp).slice(0,40);
+      return window.__gvDialStatus;
+    }}
   }}
 
   function fallbackToKeypad(){{
@@ -956,6 +979,56 @@ def _js_dial(phone: str) -> str:
     '|aria='+clickedAria.slice(0,80)+'|text='+clickedText.slice(0,80);
   return window.__gvDialStatus;
 }})();
+"""
+
+
+_JS_CLEAR_DIAL_FIELD = """
+(function(){
+  function visible(el){
+    if(!el) return false;
+    var r=el.getBoundingClientRect(), s=getComputedStyle(el);
+    return r.width>0 && r.height>0 && s.display!=='none' && s.visibility!=='hidden';
+  }
+  function editableValue(el){
+    if(!el) return '';
+    if('value' in el) return el.value || '';
+    return el.innerText || el.textContent || '';
+  }
+  function setNativeVal(el,val){
+    try{
+      if(el.isContentEditable || !('value' in el)){
+        el.focus();
+        if(document.execCommand){
+          document.execCommand('selectAll', false, null);
+          document.execCommand('delete', false, null);
+          if(val) document.execCommand('insertText', false, val);
+        }
+        if(!val){ el.textContent=''; }
+        el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:val||''}));
+        return;
+      }
+      var proto=el.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;
+      var setter=Object.getOwnPropertyDescriptor(proto,'value').set;
+      setter.call(el, val || '');
+      el.dispatchEvent(new Event('input',{bubbles:true}));
+      el.dispatchEvent(new Event('change',{bubbles:true}));
+    }catch(e){ if('value' in el) el.value=val||''; }
+  }
+  var inputs=Array.from(document.querySelectorAll('input,textarea,[contenteditable="true"],[role="textbox"],[role="combobox"]'));
+  for(var i=0;i<inputs.length;i++){
+    var el=inputs[i];
+    if(!visible(el)) continue;
+    var bits=(el.getAttribute('aria-label')||'')+(el.getAttribute('placeholder')||'');
+    if(bits.toLowerCase().indexOf('call as')!==-1) continue;
+    if((el.getAttribute('type')||'').toLowerCase()==='tel' ||
+       bits.toLowerCase().indexOf('number')!==-1 ||
+       bits.toLowerCase().indexOf('name')!==-1){
+      setNativeVal(el,'');
+      return 'cleared';
+    }
+  }
+  return 'no_input';
+})();
 """
 
 
@@ -1454,12 +1527,15 @@ class GVController(QObject):
         self._page.runJavaScript(_JS_REFRESH_LAYOUT)
         QTimer.singleShot(700, self._dial_step)
 
-    def _dial_step(self) -> None:
+    def _dial_step(self, *, click_only: bool = False) -> None:
         if not self._active_call or not self._page_alive() or not self._pending_dial_phone:
             return
         self._dial_step_attempts += 1
         phone = self._pending_dial_phone
-        self._page.runJavaScript(_js_dial(phone), self._on_dial_step_result)
+        self._page.runJavaScript(
+            _js_dial(phone, click_only=click_only),
+            self._on_dial_step_result,
+        )
 
     def _on_dial_step_result(self, status: str) -> None:
         if not self._active_call:
@@ -1506,12 +1582,12 @@ class GVController(QObject):
             return
         if status_base == "input_needs_native_keys":
             if self._type_number_from_status(status):
-                QTimer.singleShot(900, self._dial_step)
+                QTimer.singleShot(900, lambda: self._dial_step(click_only=True))
                 return
             status_base = "call_button_missing"
         if status_base == "keypad_needs_native_clicks":
             if self._click_keypad_from_status(status):
-                QTimer.singleShot(900, self._dial_step)
+                QTimer.singleShot(900, lambda: self._dial_step(click_only=True))
                 return
             status_base = "call_button_missing"
         if status_base in (
@@ -1574,7 +1650,7 @@ class GVController(QObject):
                 QTimer.singleShot(2500, self._ensure_calls_page_then_dial)
                 return
             if self._dial_step_attempts < 30:
-                QTimer.singleShot(900, self._dial_step)
+                QTimer.singleShot(900, lambda: self._dial_step(click_only=False))
                 return
 
             self._emit_log("Dial UI did not accept the number")
@@ -1634,8 +1710,13 @@ class GVController(QObject):
                 return False
             phone = self._pending_dial_phone or self._current_call_phone
             digits = re.sub(r"\D", "", phone)
+            if len(digits) == 11 and digits.startswith("1"):
+                digits = digits[1:]
             if not digits:
                 return False
+            if self._page_alive():
+                self._page.runJavaScript(_JS_CLEAR_DIAL_FIELD)
+                QTest.qWait(120)
             self._native_key_attempts = getattr(self, "_native_key_attempts", 0) + 1
             self._native_key_attempted = self._native_key_attempts >= 3
             if not self._click_view_coords(x, y):
@@ -1661,12 +1742,23 @@ class GVController(QObject):
             items = [item for item in match.group(1).split(";") if item]
             if not items:
                 return False
+            phone = self._pending_dial_phone or self._current_call_phone
+            dial_digits = re.sub(r"\D", "", phone)
+            if len(dial_digits) == 11 and dial_digits.startswith("1"):
+                dial_digits = dial_digits[1:]
             parsed: list[tuple[str, int, int]] = []
             for item in items:
                 parts = item.split(",")
                 if len(parts) != 3:
                     return False
                 digit, x_raw, y_raw = parts
+                if digit != dial_digits[len(parsed)]:
+                    self._emit_log(
+                        f"Dial UI keypad mismatch at digit {len(parsed)+1}; clearing and retrying"
+                    )
+                    if self._page_alive():
+                        self._page.runJavaScript(_JS_CLEAR_DIAL_FIELD)
+                    return False
                 x = int(x_raw)
                 y = int(y_raw)
                 if x < 0 or y < 0 or x > self.view.width() or y > self.view.height():
@@ -1675,6 +1767,9 @@ class GVController(QObject):
                     )
                     return False
                 parsed.append((digit, x, y))
+            if self._page_alive():
+                self._page.runJavaScript(_JS_CLEAR_DIAL_FIELD)
+                QTest.qWait(120)
             self._native_key_attempts = getattr(self, "_native_key_attempts", 0) + 1
             self._native_key_attempted = self._native_key_attempts >= 3
             if self.__dict__.get("_allow_os_input", False):
@@ -1819,7 +1914,6 @@ class GVController(QObject):
             _js_retry_start_call(phone),
             self._on_retry_start_call_result,
         )
-        QTimer.singleShot(900, self._dial_step)
         QTimer.singleShot(1500, self._poll_once)
 
     def hangup(self, *, manual: bool = False) -> None:
