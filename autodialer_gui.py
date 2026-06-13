@@ -180,6 +180,7 @@ class SlotCard(QGroupBox):
     cut_clicked = pyqtSignal(int)
     listen_clicked = pyqtSignal(int)
     monitor_clicked = pyqtSignal(int)
+    test_clicked = pyqtSignal(int)
     redial_clicked = pyqtSignal(int)
 
     MIN_WIDTH = 248
