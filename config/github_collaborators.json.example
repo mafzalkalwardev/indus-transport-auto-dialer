@@ -1,0 +1,5 @@
+{
+  "collaborators": [],
+  "default_permission": "push",
+  "note": "Add GitHub usernames to invite automatically. Example: [\"teammate1\", \"teammate2\"]. Agent github_username fields in data/agents.json are merged when present."
+}

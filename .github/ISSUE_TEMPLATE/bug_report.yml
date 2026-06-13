@@ -1,0 +1,36 @@
+name: Bug report
+description: Report a dialer bug or stability issue
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to report an issue.
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: What did you click? Which tab? How many lines?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: ram
+    attributes:
+      label: System RAM
+      options: ["8 GB", "16 GB", "32 GB+"]
+  - type: input
+    id: version
+    attributes:
+      label: Commit or release (if known)

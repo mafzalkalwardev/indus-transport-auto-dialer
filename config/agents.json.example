@@ -1,3 +1,8 @@
 [
-  {"id": "agent1", "name": "Agent 1", "available_for_calls": true}
+  {
+    "id": "agent1",
+    "name": "Agent 1",
+    "available_for_calls": true,
+    "github_username": ""
+  }
 ]

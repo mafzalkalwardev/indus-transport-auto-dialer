@@ -1,6 +1,28 @@
 # FT Solutions — Auto Dialer Pro
 
+<p align="center">
+  <img src="ftsolutionslogo.jpg" alt="FT Solutions logo" width="120" />
+</p>
+
+<p align="center">
+  <a href="https://github.com/mafzalkalwardev/indus-transport-auto-dialer/actions/workflows/test.yml"><img src="https://github.com/mafzalkalwardev/indus-transport-auto-dialer/actions/workflows/test.yml/badge.svg" alt="Tests" /></a>
+  <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+" />
+  <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Windows" />
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License" />
+</p>
+
 Professional Windows desktop dialer for FT Solutions. Agents use a simple branded app while Google Voice runs in the background on each line.
+
+## Documentation
+
+| Doc | Purpose |
+|-----|---------|
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup and PR guidelines |
+| [SECURITY.md](SECURITY.md) | Vulnerability reporting |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Community standards |
+| [docs/RUNBOOK.md](docs/RUNBOOK.md) | Operator runbook |
+| [docs/AMD_TESTING.md](docs/AMD_TESTING.md) | AMD / pacing test guide |
+
 
 ## Who uses what
 
