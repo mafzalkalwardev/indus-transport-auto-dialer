@@ -1,5 +1,7 @@
 from PyQt6.QtWidgets import QApplication, QWidget
 
+from PyQt6.QtCore import QUrl
+
 from src.gv_controller import GVController
 
 
@@ -22,6 +24,35 @@ class _FakeView:
 
     def activateWindow(self):
         pass
+
+
+class _FakeUrl:
+    def __init__(self, value):
+        self._value = value
+
+    def toString(self):
+        return self._value
+
+
+class _FakePage:
+    def __init__(self, url):
+        self._url = url
+        self.loaded = []
+        self.js = []
+
+    def url(self):
+        return _FakeUrl(self._url)
+
+    def load(self, url):
+        if isinstance(url, QUrl):
+            self.loaded.append(url.toString())
+        else:
+            self.loaded.append(str(url))
+
+    def runJavaScript(self, js, callback=None):
+        self.js.append(js)
+        if callback:
+            callback(None)
 
 
 def test_call_button_status_rejects_stale_different_number():
@@ -89,3 +120,42 @@ def test_offscreen_native_key_target_does_not_consume_attempt():
     )
     assert ctrl._native_key_attempts == 0
     assert ctrl._native_key_attempted is False
+
+
+def test_first_dial_attempt_reuses_loaded_calls_page(monkeypatch):
+    scheduled = []
+    monkeypatch.setattr(
+        "src.gv_controller.QTimer.singleShot",
+        lambda ms, fn: scheduled.append((ms, fn)),
+    )
+    ctrl = _controller_for("+17085681794")
+    ctrl._active_call = True
+    ctrl._pending_dial_phone = "+17085681794"
+    ctrl._dial_step_attempts = 0
+    ctrl._page = _FakePage("https://voice.google.com/u/0/calls")
+    ctrl._emit_log = lambda _msg: None
+
+    ctrl._ensure_calls_page_then_dial()
+
+    assert ctrl._page.loaded == []
+    assert ctrl._page.js
+    assert scheduled and scheduled[-1][0] == 700
+
+
+def test_first_dial_attempt_loads_calls_page_only_when_off_voice(monkeypatch):
+    scheduled = []
+    monkeypatch.setattr(
+        "src.gv_controller.QTimer.singleShot",
+        lambda ms, fn: scheduled.append((ms, fn)),
+    )
+    ctrl = _controller_for("+17085681794")
+    ctrl._active_call = True
+    ctrl._pending_dial_phone = "+17085681794"
+    ctrl._dial_step_attempts = 0
+    ctrl._page = _FakePage("about:blank")
+    ctrl._emit_log = lambda _msg: None
+
+    ctrl._ensure_calls_page_then_dial()
+
+    assert ctrl._page.loaded == ["https://voice.google.com/u/0/calls"]
+    assert scheduled and scheduled[-1][0] == 2500

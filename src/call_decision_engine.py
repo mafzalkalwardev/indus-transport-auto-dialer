@@ -58,6 +58,11 @@ class CallDecisionEngine:
     ) -> CallDecisionResult:
         if not self._in_call:
             self.start_call()
+        detector_decision = self.detector.decide(
+            dom_evidence=dom_evidence,
+            audio_features=audio_features,
+            elapsed_seconds=elapsed_seconds,
+        )
         self.state_machine.update_dom(dom_evidence)
         self.state_machine.update_audio(audio_features)
         transcript = str(getattr(audio_features, "transcript", "") or "")
@@ -69,20 +74,30 @@ class CallDecisionEngine:
 
         snapshot = self.state_machine.get_debug_snapshot()
         fsm_state = self.state_machine.get_current_state()
-        state = self._compat_state(fsm_state)
-        reason = str(snapshot.get("last_transition_reason") or "collecting evidence")
+        detector_state = str(detector_decision.state.value)
+        state = self._compat_state(detector_state)
+        reason = str(detector_decision.reason or snapshot.get("last_transition_reason") or "collecting evidence")
         return CallDecisionResult(
             state=state,
-            confidence=self.state_machine.get_confidence(),
+            confidence=float(detector_decision.confidence),
             reason=reason,
             debug={
                 **snapshot,
+                **detector_decision.debug,
                 "fsm_state": fsm_state,
-                "candidate_state": fsm_state,
+                "detector_state": detector_state,
+                "candidate_state": detector_decision.debug.get("candidate_state", detector_state),
                 "audio_state": self._audio_state(audio_features),
-                "voicemail_score": snapshot.get("voicemail_score", 0.0),
-                "human_conf": snapshot.get("human_score", 0.0),
-                "voicemail_conf": snapshot.get("voicemail_score", 0.0),
+                "fsm_confidence": snapshot.get("confidence", 0.0),
+                "voicemail_score": detector_decision.debug.get(
+                    "voicemail_score",
+                    detector_decision.debug.get("voicemail_conf", snapshot.get("voicemail_score", 0.0)),
+                ),
+                "human_conf": detector_decision.debug.get("human_conf", snapshot.get("human_score", 0.0)),
+                "voicemail_conf": detector_decision.debug.get(
+                    "voicemail_conf",
+                    snapshot.get("voicemail_score", 0.0),
+                ),
             },
         )
 

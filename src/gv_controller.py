@@ -1376,15 +1376,14 @@ class GVController(QObject):
         if not self._active_call or not self._page_alive() or not self._pending_dial_phone:
             return
         url = self._page.url().toString()
-        dial_url = self._current_dial_url()
         if "voice.google.com" not in url:
             self._emit_log("Opening Google Voice calls page…")
-            self._page.load(QUrl(dial_url))
+            self._page.load(QUrl(GV_CALLS_URL))
             QTimer.singleShot(2500, self._ensure_calls_page_then_dial)
             return
-        if self._dial_step_attempts == 0 and "a=nc" not in url and "/dial/" not in url:
-            self._emit_log(f"Opening Google Voice dial link ({self._dial_url_variant + 1})…")
-            self._page.load(QUrl(dial_url))
+        if "/calls" not in url and "a=nc" not in url and "/dial/" not in url:
+            self._emit_log("Opening Google Voice calls page…")
+            self._page.load(QUrl(GV_CALLS_URL))
             QTimer.singleShot(2500, self._ensure_calls_page_then_dial)
             return
         self._page.runJavaScript(_JS_REFRESH_LAYOUT)
