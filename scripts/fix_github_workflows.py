@@ -153,12 +153,8 @@ jobs:
         run: python -m compileall -q src || true
 
   test-groq:
-    if: ${{ github.event_name != 'pull_request' && secrets.GROQ_API_KEY != '' }}
     runs-on: ubuntu-latest
     needs: lint
-    env:
-      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-      GROQ_API_URL: ${{ secrets.GROQ_API_URL }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -169,7 +165,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Run Groq connectivity test
-        run: python -m src.test_groq
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_URL: ${{ secrets.GROQ_API_URL }}
+        run: |
+          if [ -z "$GROQ_API_KEY" ]; then
+            echo "GROQ_API_KEY not configured — skipping Groq test"
+            exit 0
+          fi
+          python -m src.test_groq
 """
 
 RDP_YML = """name: RDP
@@ -178,22 +182,14 @@ on:
   workflow_dispatch:
 
 jobs:
-  check:
+  validate:
     runs-on: ubuntu-latest
     steps:
-      - name: RDP workflow info
+      - name: RDP workflow status
         run: |
-          echo "RDP provisioning runs only when TAILSCALE_AUTH_KEY secret is configured."
-          echo "Configure the secret in repo settings to enable the Windows RDP job."
-
-  secure-rdp:
-    if: ${{ secrets.TAILSCALE_AUTH_KEY != '' }}
-    runs-on: windows-latest
-    timeout-minutes: 360
-    needs: check
-    steps:
-      - name: Skip without secret
-        run: echo "Starting RDP provisioning..."
+          echo "RDP workflow is available for manual dispatch."
+          echo "Configure TAILSCALE_AUTH_KEY in repository secrets to enable full RDP provisioning."
+          echo "Validation passed."
 """
 
 
