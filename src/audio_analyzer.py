@@ -13,6 +13,7 @@ import re
 import time
 from typing import Any
 
+from .detection.tone_detector import detect_tones
 from .vad import VoiceActivityDetector
 
 
@@ -69,6 +70,7 @@ class AudioAnalyzer:
         self._cached_features: AudioFeatures | None = None
         self._capture_failures = 0
         self._disabled_until = 0.0
+        self._last_pcm: list[float] = []
 
     def analyze_from_pcm(
         self,
@@ -89,6 +91,8 @@ class AudioAnalyzer:
         peak = max(abs(v) for v in x) or 1.0
         if peak > 2.0:
             x = [v / 32768.0 for v in x]
+
+        self._last_pcm = x[-8000:]
 
         rms = math.sqrt(sum(v * v for v in x) / len(x))
         mean = sum(x) / len(x)
@@ -126,7 +130,13 @@ class AudioAnalyzer:
         self._recent_voice = (self._recent_voice + [has_speech_like])[-12:]
         ring_conf = self._cadence_confidence(target_voice=False)
         busy_conf = self._busy_confidence()
-        beep_conf = self._tone_confidence(x, sample_rate, 1000.0) if self.enable_beep_detection else 0.0
+        tone = (
+            detect_tones(x, sample_rate=sample_rate)
+            if self.enable_beep_detection
+            else None
+        )
+        beep_conf = tone.beep_confidence if tone else 0.0
+        sit_conf = tone.sit_confidence if tone else 0.0
         greeting = self._has_human_greeting(transcript)
         short_burst = 0.15 <= speech_duration <= 2.5 and has_speech_like
         vm_keywords = self._voicemail_keyword_count(transcript)
@@ -139,8 +149,11 @@ class AudioAnalyzer:
             reason_parts.append("ringback cadence")
         if busy_conf >= 0.75:
             reason_parts.append("busy cadence")
-        if beep_conf >= 0.6:
-            reason_parts.append("900-1100Hz beep")
+        if tone and tone.sit_detected:
+            reason_parts.append("SIT tone pattern")
+        if beep_conf >= 0.55:
+            freq = int(tone.beep_frequency_hz) if tone and tone.beep_frequency_hz else 1000
+            reason_parts.append(f"{freq}Hz beep")
         if not reason_parts:
             reason_parts.append("silence/noise")
 
@@ -158,7 +171,7 @@ class AudioAnalyzer:
             voicemail_keywords_detected_count=vm_keywords,
             background_noise_level=max(0.0, rms - (0.08 if has_speech_like else 0.0)),
             busy_tone_cadence_confidence=busy_conf,
-            beep_detected=beep_conf >= 0.6,
+            beep_detected=bool(tone and (tone.beep_detected or tone.sit_detected)),
             confidence=min(1.0, conf),
             reason=", ".join(reason_parts),
             backend_status=self.backend_status,

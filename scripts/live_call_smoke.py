@@ -146,6 +146,7 @@ class LiveCallSmoke:
         stagger_ms: int,
         report_path: str | None = None,
         print_debug: bool = True,
+        visible: bool = False,
     ) -> None:
         self.numbers = numbers
         self.call_timeout = call_timeout
@@ -161,6 +162,7 @@ class LiveCallSmoke:
         self.finished = False
         self.report_path = report_path
         self.print_debug = print_debug
+        self.visible = visible
 
     def log(self, slot: int | None, message: str) -> None:
         stamp = datetime.now().isoformat(timespec="seconds")
@@ -196,13 +198,20 @@ class LiveCallSmoke:
                 profile_key=str(acct.get("profile", f"slot_{idx}")),
                 login_email=str(acct.get("email", "")),
                 login_password=str(acct.get("password", "")),
-                runtime_cfg={"call_timeout": self.call_timeout},
+                runtime_cfg={
+                    "call_timeout": self.call_timeout,
+                    "allow_os_input": bool(self.visible),
+                },
             )
             ctrl.state_changed.connect(self.on_state)
             ctrl.login_detected.connect(lambda sid, i=idx: self.log(i, "Google Voice ready"))
             ctrl.log_message.connect(self.on_controller_log)
             ctrl.detection_update.connect(self.on_detection)
             ctrl.load()
+            if self.visible:
+                ctrl.prepare_for_visible_display()
+            else:
+                ctrl.prepare_for_background_rendering()
             self.controllers.append(ctrl)
             self.results[idx] = {
                 "slot": idx,
@@ -281,6 +290,7 @@ class LiveCallSmoke:
         for key in (
             "phone", "slot", "elapsed", "dom_state", "audio_state",
             "fused_state", "confidence", "reason", "rms", "ringback",
+            "detection_time_ms", "ui_state",
             "speech_duration", "silence_duration", "beep_detected",
             "human_greeting_detected", "voicemail_confirmations",
             "should_hangup", "audio_backend_name", "vad_backend", "vad_confidence",
@@ -472,6 +482,7 @@ def main() -> None:
     parser.add_argument("--report-path", default="", help="Write this wave's report to a fixed path")
     parser.add_argument("--quiet-debug", action="store_true", help="Store detection debug in JSON without printing every poll")
     parser.add_argument("--print-debug", action="store_true", help="Print every child wave detection debug block during CRM campaigns")
+    parser.add_argument("--visible", action="store_true", help="Show the WebEngine slot while running the live smoke test")
     parser.add_argument("--call-timeout", type=int, default=45)
     parser.add_argument("--connected-hold", type=int, default=8)
     parser.add_argument("--voicemail-hold", type=int, default=4)
@@ -492,6 +503,7 @@ def main() -> None:
         stagger_ms=args.stagger_ms,
         report_path=args.report_path or None,
         print_debug=not args.quiet_debug,
+        visible=bool(args.visible),
     )
     QTimer.singleShot(0, smoke.start)
     sys.exit(app.exec())

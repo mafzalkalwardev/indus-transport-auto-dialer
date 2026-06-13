@@ -57,7 +57,10 @@ class DetectionConfig:
     answered_pending_safe_min_seconds: float = 5.0
 
     # New: human-first window after answer.
-    human_first_seconds: float = 8.0
+    human_first_seconds: float = 5.0
+
+    # Beep tone triggers immediate VM after this many seconds post-answer.
+    beep_immediate_vm_seconds: float = 0.3
 
     # Human/voicemail heuristic thresholds.
     human_short_speech_max_duration_seconds: float = 2.5
@@ -351,9 +354,22 @@ class LocalCallDetector:
 
             # 1) ANSWERED_PENDING safe window: never classify VOICEMAIL during first 5 seconds after answer evidence.
             if answer_elapsed_seconds < self.config.answered_pending_safe_min_seconds:
-                # 2) Human-first rule during first 5-8 seconds
-                # If there's a short human burst / greeting keyword evidence, classify HUMAN.
                 if (
+                    self.config.enable_beep_detection
+                    and (beep_detected or beep_conf >= 0.55)
+                    and answer_elapsed_seconds > self.config.beep_immediate_vm_seconds
+                    and not human_greeting_detected
+                    and not short_speech_burst_detected
+                ):
+                    vm_conf = min(0.98, max(0.88, beep_conf + 0.15))
+                    return self._transition(
+                        DecisionState.VOICEMAIL,
+                        vm_conf,
+                        "beep tone detected — immediate voicemail",
+                        **{**current_debug_base, "ui_state": "CLASSIFYING"},
+                    )
+
+                if answer_elapsed_seconds <= self.config.human_first_seconds and (
                     human_greeting_detected
                     or short_speech_burst_detected
                     or (speech_duration_seconds > 0.0 and speech_duration_seconds <= self.config.human_short_speech_max_duration_seconds)
@@ -370,7 +386,23 @@ class LocalCallDetector:
                     DecisionState.ANSWERED_PENDING,
                     min(0.9, max(answered_pending_conf, 0.45)),
                     "answered pending safe window (no voicemail allowed yet)",
-                    **current_debug_base,
+                    **{**current_debug_base, "ui_state": "CLASSIFYING"},
+                )
+
+            # Fast beep path after safe window starts.
+            if (
+                self.config.enable_beep_detection
+                and (beep_detected or beep_conf >= 0.55)
+                and answer_elapsed_seconds > self.config.beep_immediate_vm_seconds
+                and not human_greeting_detected
+                and not short_speech_burst_detected
+            ):
+                vm_conf = min(0.98, max(0.88, beep_conf + 0.15))
+                return self._transition(
+                    DecisionState.VOICEMAIL,
+                    vm_conf,
+                    "beep tone detected — immediate voicemail",
+                    **{**current_debug_base, "ui_state": "CLASSIFYING"},
                 )
 
             # 3) After safe window, if audio looks clearly human, promote HUMAN.
@@ -519,7 +551,7 @@ class LocalCallDetector:
 
         # 3) beep tone detected around 900–1100Hz
         # If only beep_hz_confidence exists, treat beep_detected as already validated by analyzer.
-        f_beep = bool(beep_detected) or (self.config.enable_beep_detection and beep_conf >= 0.6)
+        f_beep = bool(beep_detected) or (self.config.enable_beep_detection and beep_conf >= 0.55)
         factors_true += int(f_beep)
 
         # 4) repeated machine greeting pattern

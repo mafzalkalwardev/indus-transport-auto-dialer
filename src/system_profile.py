@@ -39,6 +39,26 @@ def recommended_slots(requested: int) -> int:
     return min(requested, 3)
 
 
+def recommended_amd_audio(requested: bool) -> bool:
+    """Return whether local AMD audio should run on this PC."""
+    if not requested:
+        return False
+    ram = system_ram_gb()
+    chrome = chrome_process_count()
+    if ram < 10 or chrome >= 25:
+        return False
+    return True
+
+
+def effective_enable_ai_audio(cfg: dict) -> bool:
+    """Apply system caps to enable_ai_audio from config."""
+    requested = bool(cfg.get("enable_ai_audio", False))
+    amd_mode = str(cfg.get("amd_mode", "heuristic") or "heuristic").lower()
+    if amd_mode == "off":
+        return False
+    return recommended_amd_audio(requested)
+
+
 def low_resource_reason(requested: int, effective: int) -> str:
     if effective >= requested:
         return ""

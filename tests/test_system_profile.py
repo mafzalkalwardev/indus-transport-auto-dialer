@@ -17,3 +17,12 @@ def test_recommended_slots_allows_two_on_mid_ram(monkeypatch):
     monkeypatch.setattr("src.system_profile.system_ram_gb", lambda: 12.0)
     monkeypatch.setattr("src.system_profile.chrome_process_count", lambda: 5)
     assert recommended_slots(3) == 2
+
+
+def test_effective_enable_ai_audio_respects_low_ram(monkeypatch):
+    monkeypatch.setattr("src.system_profile.system_ram_gb", lambda: 8.0)
+    monkeypatch.setattr("src.system_profile.chrome_process_count", lambda: 30)
+    from src.system_profile import effective_enable_ai_audio
+
+    assert effective_enable_ai_audio({"enable_ai_audio": True, "amd_mode": "heuristic"}) is False
+    assert effective_enable_ai_audio({"enable_ai_audio": True, "amd_mode": "off"}) is False

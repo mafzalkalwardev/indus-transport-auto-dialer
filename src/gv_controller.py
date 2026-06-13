@@ -809,6 +809,7 @@ def _js_dial(phone: str) -> str:
   if(!inp){{ window.__gvDialStatus='number_input_missing'; return window.__gvDialStatus; }}
 
   var digits=phone.replace(/\\D/g,'');
+  var dialDigits=(digits.length===11 && digits.charAt(0)==='1') ? digits.slice(1) : digits;
   setNativeVal(inp,phone);
   var current=editableValue(inp).replace(/\\D/g,'');
   var numberEntered = current.length >= Math.min(7, digits.length) &&
@@ -816,11 +817,12 @@ def _js_dial(phone: str) -> str:
      current.slice(-10)===digits.slice(-10));
   if(!numberEntered){{
     setNativeVal(inp,'');
-    if(clickKeypadDigits(digits)){{
+    if(clickKeypadDigits(dialDigits)){{
       current=editableValue(inp).replace(/\\D/g,'');
       numberEntered = current.length >= Math.min(7, digits.length) &&
         (current.indexOf(digits)!==-1 || digits.indexOf(current)!==-1 ||
-         current.slice(-10)===digits.slice(-10));
+         current.slice(-10)===digits.slice(-10) ||
+         current.slice(-10)===dialDigits.slice(-10));
     }}
   }}
   if(!numberEntered){{
@@ -830,12 +832,13 @@ def _js_dial(phone: str) -> str:
 
   function fallbackToKeypad(){{
     setNativeVal(inp,'');
-    var clickedDigits=clickKeypadDigits(digits);
+    var clickedDigits=clickKeypadDigits(dialDigits);
     if(!clickedDigits) return false;
     current=editableValue(inp).replace(/\\D/g,'');
     var inputReflectsDigits = current.length >= Math.min(7, digits.length) &&
       (current.indexOf(digits)!==-1 || digits.indexOf(current)!==-1 ||
-       current.slice(-10)===digits.slice(-10));
+       current.slice(-10)===digits.slice(-10) ||
+       current.slice(-10)===dialDigits.slice(-10));
     return clickedDigits || inputReflectsDigits;
   }}
 
@@ -855,12 +858,45 @@ def _js_dial(phone: str) -> str:
     }}
   }}
 
+  function nativeKeypadStatus(reason){{
+    try{{
+      var coords=[];
+      var buttons=qsa('button,[role="button"],gv-icon-button');
+      for(var d=0; d<dialDigits.length; d++){{
+        var digit=dialDigits.charAt(d);
+        var found=null;
+        for(var i=0;i<buttons.length;i++){{
+          var btn=buttons[i];
+          var aria=(btn.getAttribute('aria-label')||'').toLowerCase();
+          var text=(btn.innerText||btn.textContent||'').replace(/\\s+/g,' ').trim();
+          if(!visible(btn) || disabled(btn)) continue;
+          if(text===digit || text.indexOf(digit+' ')===0 ||
+             aria.indexOf(\"'\"+digit+\"'\")!==-1 || aria===digit ||
+             aria.indexOf(digit)===0) {{
+            found=btn;
+            break;
+          }}
+        }}
+        if(!found) return nativeKeyStatus(reason + '_no_keypad');
+        var r=found.getBoundingClientRect();
+        coords.push(digit+','+Math.round(r.left+r.width/2)+','+Math.round(r.top+r.height/2));
+      }}
+      var ir=inp.getBoundingClientRect();
+      return 'keypad_needs_native_clicks|reason='+reason+
+        '|input='+Math.round(ir.left+Math.max(4, Math.min(ir.width/2, 30)))+','+
+          Math.round(ir.top+ir.height/2)+
+        '|coords='+coords.join(';');
+    }}catch(e){{
+      return nativeKeyStatus(reason + '_keypad_error');
+    }}
+  }}
+
   var btn=findCallButton(digits);
   if(btn && btn.disabledButton && fallbackToKeypad()){{
     btn=findCallButton(digits);
   }}
   if(btn && btn.disabledButton){{
-    window.__gvDialStatus = nativeKeyStatus('disabled');
+    window.__gvDialStatus = nativeKeypadStatus('disabled');
     return window.__gvDialStatus;
   }}
   if(btn && btn.wrongNumber){{
@@ -884,14 +920,14 @@ def _js_dial(phone: str) -> str:
         (aria.indexOf('call')!==-1 || text==='call' || icon==='call' || data==='call');
     }})[0];
     if(anyCall && disabled(anyCall)){{
-      window.__gvDialStatus = nativeKeyStatus('disabled');
+      window.__gvDialStatus = nativeKeypadStatus('disabled');
       return window.__gvDialStatus;
     }}
     window.__gvDialStatus = nativeKeyStatus('missing');
     return window.__gvDialStatus;
   }}
   if(btn && btn.disabledButton){{
-    window.__gvDialStatus = nativeKeyStatus('disabled');
+    window.__gvDialStatus = nativeKeypadStatus('disabled');
     return window.__gvDialStatus;
   }}
   if(btn && btn.wrongNumber){{
@@ -1014,12 +1050,13 @@ class GVController(QObject):
         self._ctrl_count = 0   # debounce for answered-controls
         self._call_state_engine = CallStateEngine()
         self._runtime_cfg = runtime_cfg or self._load_runtime_cfg()
+        self._allow_os_input = bool(self._runtime_cfg.get("allow_os_input", False))
         audio_enabled = bool(self._runtime_cfg.get("enable_ai_audio", True))
+        amd_mode = str(self._runtime_cfg.get("amd_mode", "heuristic") or "heuristic").lower()
+        if amd_mode == "off":
+            audio_enabled = False
         self._decision_engine = CallDecisionEngine(
-            detector_config=DetectionConfig(
-                max_ring_seconds=float(self._runtime_cfg.get("call_timeout", 60)),
-                enable_audio_detection=audio_enabled,
-            )
+            detector_config=self._detection_config_from_runtime(),
         )
         self._audio_monitor = CallAudioMonitor(
             enabled=audio_enabled,
@@ -1127,6 +1164,10 @@ class GVController(QObject):
         self._native_key_attempted = False
         self._native_key_attempts = 0
         self._call_clicked_at = 0.0
+        self._amd_answer_at = 0.0
+        self._amd_decision_ms = 0
+        self._whisper_pending = False
+        self._whisper_thread = None
         self._min_answer_seconds = 10.0
         self.prepare_for_background_rendering()
 
@@ -1140,17 +1181,38 @@ class GVController(QObject):
         except Exception:
             return {}
 
+    def _detection_config_from_runtime(self) -> DetectionConfig:
+        amd_mode = str(self._runtime_cfg.get("amd_mode", "heuristic") or "heuristic").lower()
+        audio_enabled = bool(self._runtime_cfg.get("enable_ai_audio", False)) and amd_mode != "off"
+        max_decision_s = float(self._runtime_cfg.get("amd_max_decision_ms", 2500)) / 1000.0
+        return DetectionConfig(
+            max_ring_seconds=float(self._runtime_cfg.get("call_timeout", 60)),
+            enable_audio_detection=audio_enabled,
+            enable_beep_detection=amd_mode != "off",
+            human_first_seconds=float(self._runtime_cfg.get("amd_human_first_seconds", 5)),
+            answered_pending_seconds=max(4.0, max_decision_s),
+        )
+
     def apply_runtime_cfg(self, runtime_cfg: dict) -> None:
         """Apply dialer settings without recreating the WebEngine view."""
         self._runtime_cfg.update(runtime_cfg or {})
         audio_enabled = bool(self._runtime_cfg.get("enable_ai_audio", False))
+        amd_mode = str(self._runtime_cfg.get("amd_mode", "heuristic") or "heuristic").lower()
+        if amd_mode == "off":
+            audio_enabled = False
         self._decision_engine = CallDecisionEngine(
-            detector_config=DetectionConfig(
-                max_ring_seconds=float(self._runtime_cfg.get("call_timeout", 60)),
-                enable_audio_detection=audio_enabled,
-            )
+            detector_config=self._detection_config_from_runtime(),
         )
         self._audio_monitor.set_enabled(audio_enabled)
+        if amd_mode == "whisper" and self._whisper_thread is None:
+            try:
+                from src.detection.whisper_worker import WhisperTranscriptionThread
+                self._whisper_thread = WhisperTranscriptionThread(parent=self)
+            except Exception:
+                self._whisper_thread = None
+        elif amd_mode != "whisper" and self._whisper_thread is not None:
+            self._whisper_thread.shutdown()
+            self._whisper_thread = None
         if self._page_alive():
             self._page.setAudioMuted(not audio_enabled)
 
@@ -1333,6 +1395,9 @@ class GVController(QObject):
         self._vm_count = 0
         self._idle_count = 0
         self._ctrl_count = 0
+        self._amd_answer_at = 0.0
+        self._amd_decision_ms = 0
+        self._whisper_pending = False
         self._decision_engine.start_call()
         self._set_state("DIALING")
         if bool(self._runtime_cfg.get("dry_run_mode", False)):
@@ -1444,6 +1509,11 @@ class GVController(QObject):
                 QTimer.singleShot(900, self._dial_step)
                 return
             status_base = "call_button_missing"
+        if status_base == "keypad_needs_native_clicks":
+            if self._click_keypad_from_status(status):
+                QTimer.singleShot(900, self._dial_step)
+                return
+            status_base = "call_button_missing"
         if status_base in (
             "number_input_missing",
             "number_not_entered",
@@ -1478,6 +1548,21 @@ class GVController(QObject):
                 QTimer.singleShot(200, self._poll_once)
                 QTimer.singleShot(1000, self._poll_once)
                 QTimer.singleShot(1800, self.start_polling)
+                return
+
+            if (
+                status_base in ("call_button_missing", "call_button_disabled")
+                and getattr(self, "_native_key_attempted", False)
+                and self._dial_url_variant < len(_gv_dial_url_variants(
+                    self._pending_dial_phone or self._current_call_phone
+                )) - 1
+            ):
+                self._dial_url_variant += 1
+                self._emit_log(
+                    f"Native dial field stayed disabled - trying alternate GV URL "
+                    f"({self._dial_url_variant + 1})…")
+                self._page.load(QUrl(self._current_dial_url()))
+                QTimer.singleShot(2500, self._ensure_calls_page_then_dial)
                 return
 
             if status_base in ("number_input_missing", "call_button_wrong_number") and self._dial_step_attempts in (8, 18):
@@ -1565,6 +1650,76 @@ class GVController(QObject):
             self._emit_log(f"Native number typing failed: {exc}")
             return False
 
+    def _click_keypad_from_status(self, status: str) -> bool:
+        if getattr(self, "_native_key_attempts", 0) >= 3:
+            self._native_key_attempted = True
+            return False
+        try:
+            match = re.search(r"(?:^|\|)coords=([^|]+)", status)
+            if not match:
+                return False
+            items = [item for item in match.group(1).split(";") if item]
+            if not items:
+                return False
+            parsed: list[tuple[str, int, int]] = []
+            for item in items:
+                parts = item.split(",")
+                if len(parts) != 3:
+                    return False
+                digit, x_raw, y_raw = parts
+                x = int(x_raw)
+                y = int(y_raw)
+                if x < 0 or y < 0 or x > self.view.width() or y > self.view.height():
+                    self._emit_log(
+                        f"Dial UI keypad target off-screen ({x},{y}); waiting for dialpad"
+                    )
+                    return False
+                parsed.append((digit, x, y))
+            self._native_key_attempts = getattr(self, "_native_key_attempts", 0) + 1
+            self._native_key_attempted = self._native_key_attempts >= 3
+            if self.__dict__.get("_allow_os_input", False):
+                if self._type_number_os_from_status(status):
+                    return True
+            for _digit, x, y in parsed:
+                if not self._click_view_coords(x, y):
+                    return False
+                QTest.qWait(35)
+            self._emit_log("Dial UI status: native_keypad_clicked")
+            return True
+        except Exception as exc:
+            self._emit_log(f"Native keypad click failed: {exc}")
+            return False
+
+    def _type_number_os_from_status(self, status: str) -> bool:
+        try:
+            match = re.search(r"(?:^|\|)input=(\d+),(-?\d+)", status)
+            if not match:
+                return False
+            x = int(match.group(1))
+            y = int(match.group(2))
+            if x < 0 or y < 0 or x > self.view.width() or y > self.view.height():
+                return False
+            phone = self._pending_dial_phone or self._current_call_phone
+            digits = re.sub(r"\D", "", phone)
+            if len(digits) == 11 and digits.startswith("1"):
+                digits = digits[1:]
+            if not digits:
+                return False
+            if not self._click_view_coords_os(x, y):
+                self._emit_log("OS number typing skipped: input coordinate not clickable")
+                return False
+            import pyautogui
+
+            pyautogui.hotkey("ctrl", "a")
+            pyautogui.press("backspace")
+            pyautogui.write(digits, interval=0.02)
+            pyautogui.press("enter")
+            self._emit_log("Dial UI status: os_number_typed")
+            return True
+        except Exception as exc:
+            self._emit_log(f"OS number typing failed: {exc}")
+            return False
+
     def _call_button_status_matches_pending(self, status: str) -> bool:
         wanted = re.sub(r"\D", "", self._pending_dial_phone or self._current_call_phone)
         if not wanted:
@@ -1593,9 +1748,31 @@ class GVController(QObject):
                 Qt.KeyboardModifier.NoModifier,
                 QPoint(x, y),
             )
+            if self.__dict__.get("_allow_os_input", False):
+                self._click_view_coords_os(x, y)
             return True
         except Exception as exc:
             self._emit_log(f"View click failed: {exc}")
+            return False
+
+    def _click_view_coords_os(self, x: int, y: int) -> bool:
+        try:
+            try:
+                self.view.raise_()
+                self.view.activateWindow()
+                QApplication.processEvents()
+            except Exception:
+                pass
+            screen_pos = self.view.mapToGlobal(QPoint(x, y))
+            gx = int(round(screen_pos.x()))
+            gy = int(round(screen_pos.y()))
+            import pyautogui
+
+            pyautogui.moveTo(gx, gy, duration=0)
+            pyautogui.click(gx, gy)
+            return True
+        except Exception as exc:
+            self._emit_log(f"OS click fallback failed: {exc}")
             return False
 
     def _click_call_button_from_status(self, status: str) -> bool:
@@ -1651,6 +1828,9 @@ class GVController(QObject):
         self._active_call = False
         self._pending_dial_phone = ""
         self._call_clicked_at = 0.0
+        self._amd_answer_at = 0.0
+        self._amd_decision_ms = 0
+        self._whisper_pending = False
         if self._dial_stuck_timer is not None:
             self._dial_stuck_timer.stop()
         self._page.runJavaScript(_JS_HANGUP, lambda r: self._emit_log(
@@ -1856,6 +2036,11 @@ class GVController(QObject):
             elapsed_seconds=elapsed,
         )
         fused_state = fused.state or decision.state or "IDLE"
+        if fused_state in {"HUMAN", "VOICEMAIL"} and self._amd_answer_at > 0 and self._amd_decision_ms <= 0:
+            self._amd_decision_ms = int((time.monotonic() - self._amd_answer_at) * 1000)
+        if fused_state in {"ANSWERED_PENDING", "HUMAN"} and self._amd_answer_at <= 0:
+            if bool(dom_payload.get("hasTimer")) or fused_state == "HUMAN":
+                self._amd_answer_at = time.monotonic()
         state = {
             "HUMAN": "CONNECTED",
             "ANSWERED_PENDING": "ANSWERED_PENDING",
@@ -1879,6 +2064,8 @@ class GVController(QObject):
             "fused_state": fused_state,
             "confidence": round(float(fused.confidence), 3),
             "reason": fused.reason,
+            "ui_state": fused.debug.get("ui_state") or fused_state,
+            "detection_time_ms": self._amd_decision_ms,
             "rms": float(getattr(audio_features, "rms", 0.0) or 0.0),
             "ringback": float(getattr(audio_features, "ringback_cadence_confidence", 0.0) or 0.0),
             "speech_duration": float(getattr(audio_features, "speech_duration_seconds", 0.0) or 0.0),

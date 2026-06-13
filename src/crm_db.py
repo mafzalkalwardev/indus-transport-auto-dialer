@@ -121,6 +121,7 @@ class CRMDatabase:
             "dialed_at": "TEXT DEFAULT ''",
             "ringing_at": "TEXT DEFAULT ''",
             "connected_at": "TEXT DEFAULT ''",
+            "detection_time_ms": "INTEGER DEFAULT 0",
         }
         for name, ddl in additions.items():
             if name not in cols:
@@ -323,7 +324,7 @@ class CRMDatabase:
                  confidence: float = 0.0, state_history: str = "",
                  final_outcome: str = "",
                  dialed_at: str = "", ringing_at: str = "",
-                 connected_at: str = "") -> None:
+                 connected_at: str = "", detection_time_ms: int = 0) -> None:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         final_outcome = final_outcome or status
         with self._conn() as c:
@@ -331,13 +332,14 @@ class CRMDatabase:
                 "INSERT INTO call_records "
                 "(user_id,phone,contact_name,status,duration_s,slot_id,"
                 "final_outcome,detection_reason,confidence,state_history,"
-                "dialed_at,ringing_at,connected_at,timestamp) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "dialed_at,ringing_at,connected_at,detection_time_ms,timestamp) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     user_id, phone, contact_name, status, duration_s, slot_id,
                     final_outcome, detection_reason, float(confidence or 0.0),
                     state_history,
-                    dialed_at or now, ringing_at, connected_at, now,
+                    dialed_at or now, ringing_at, connected_at,
+                    int(detection_time_ms or 0), now,
                 )
             )
             c.execute(
@@ -396,3 +398,30 @@ class CRMDatabase:
                 ")"
             ).fetchall()
         return {r["phone"] for r in rows}
+
+    def recent_pacing_stats(self, *, limit: int = 100) -> dict:
+        """Rolling connect/abandon rates from recent call_records."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT status, final_outcome FROM call_records "
+                "ORDER BY id DESC LIMIT ?",
+                (max(10, int(limit)),),
+            ).fetchall()
+        if not rows:
+            return {"connect_rate": 0.15, "abandon_rate": 0.0, "sample_size": 0}
+        connected = 0
+        abandons = 0
+        for row in rows:
+            status = str(row["status"] or row["final_outcome"] or "")
+            if status in ("ENDED", "ENDED_MANUALLY", "CONNECTED", "HUMAN"):
+                connected += 1
+            elif status == "ABANDONED":
+                abandons += 1
+        total = len(rows)
+        connect_rate = max(0.05, connected / total) if total else 0.15
+        abandon_rate = (abandons / total) if total else 0.0
+        return {
+            "connect_rate": connect_rate,
+            "abandon_rate": abandon_rate,
+            "sample_size": total,
+        }

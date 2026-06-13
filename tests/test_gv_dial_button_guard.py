@@ -159,3 +159,42 @@ def test_first_dial_attempt_loads_calls_page_only_when_off_voice(monkeypatch):
 
     assert ctrl._page.loaded == ["https://voice.google.com/u/0/calls"]
     assert scheduled and scheduled[-1][0] == 2500
+
+
+def test_disabled_native_field_falls_back_to_direct_dial_url(monkeypatch):
+    scheduled = []
+    monkeypatch.setattr(
+        "src.gv_controller.QTimer.singleShot",
+        lambda ms, fn: scheduled.append((ms, fn)),
+    )
+    ctrl = _controller_for("+17085681794")
+    ctrl._active_call = True
+    ctrl._pending_dial_phone = "+17085681794"
+    ctrl._current_call_phone = "+17085681794"
+    ctrl._dial_url_variant = 0
+    ctrl._native_key_attempted = True
+    ctrl._dial_step_attempts = 4
+    ctrl._page = _FakePage("https://voice.google.com/u/0/calls")
+    ctrl._emit_log = lambda _msg: None
+
+    ctrl._handle_retryable_dial_status("call_button_missing")
+
+    assert ctrl._dial_url_variant == 1
+    assert ctrl._page.loaded == ["https://voice.google.com/dial/+17085681794"]
+    assert scheduled and scheduled[-1][0] == 2500
+
+
+def test_native_keypad_status_clicks_each_digit():
+    ctrl = _controller_for("+17085681794")
+    ctrl.view = _FakeView()
+    ctrl._native_key_attempts = 0
+    ctrl._native_key_attempted = False
+    ctrl._emit_log = lambda _msg: None
+    clicked = []
+    ctrl._click_view_coords = lambda x, y: clicked.append((x, y)) or True
+
+    assert ctrl._click_keypad_from_status(
+        "keypad_needs_native_clicks|reason=disabled|input=4,5|coords=1,10,20;2,30,40;3,50,60"
+    )
+    assert clicked == [(10, 20), (30, 40), (50, 60)]
+    assert ctrl._native_key_attempts == 1

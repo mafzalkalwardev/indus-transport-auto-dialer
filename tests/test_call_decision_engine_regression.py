@@ -40,8 +40,7 @@ def test_engine_uses_hardened_detector_not_eager_fsm_for_voicemail():
     }
     audio = DummyAudio(
         continuous_greeting_duration_seconds=8.0,
-        beep_detected=True,
-        beep_hz_confidence=0.8,
+        voicemail_keywords_detected_count=1,
     )
 
     first = engine.update(dom_evidence=dom, audio_features=audio, elapsed_seconds=8)
@@ -53,6 +52,22 @@ def test_engine_uses_hardened_detector_not_eager_fsm_for_voicemail():
     assert second.state == "ANSWERED_PENDING"
     assert third.state == "ANSWERED_PENDING"
     assert fourth.state == "VOICEMAIL"
+
+
+def test_engine_fast_beep_path_after_safe_window():
+    engine = CallDecisionEngine(
+        detector_config=DetectionConfig(decision_stability_window=1)
+    )
+    engine.start_call()
+    dom = {
+        "state": "CONNECTED",
+        "hasTimer": True,
+        "hasEnabledAnswerControl": True,
+    }
+    audio = DummyAudio(beep_detected=True, beep_hz_confidence=0.85)
+    engine.update(dom_evidence=dom, audio_features=audio, elapsed_seconds=8)
+    second = engine.update(dom_evidence=dom, audio_features=audio, elapsed_seconds=13.5)
+    assert second.state == "VOICEMAIL"
 
 
 def test_engine_keeps_ringing_until_ring_timeout():

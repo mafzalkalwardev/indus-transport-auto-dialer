@@ -52,7 +52,10 @@ from src.dialer_logging import setup_dialer_logging, log_info, log_warning, log_
 from src.process_cleanup import cleanup_stale_webengine_processes
 from src.system_profile import (
     recommended_slots, low_resource_reason, system_ram_gb, chrome_process_count,
+    effective_enable_ai_audio,
 )
+from src.pacing.engine import PredictivePacingEngine, PacingMetrics, PacingConfig
+from src.pacing.agents import available_agent_count
 from src.gv_accounts import (
     load_accounts as load_gv_accounts,
     save_accounts as save_gv_accounts,
@@ -91,10 +94,21 @@ def _load_cfg() -> dict:
         "slot_memory_limit_mb": 1200,
         "slot_recycle_after_calls": 75,
         "watchdog_check_interval_sec": 5,
-        "enable_ai_audio": False,
+        "enable_ai_audio": True,
+        "amd_mode": "heuristic",
+        "amd_early_decision_ms": 800,
+        "amd_max_decision_ms": 2500,
+        "amd_human_first_seconds": 5,
         "audio_device": "",
         "live_debug_mode": False,
         "dry_run_mode": False,
+        "predictive_mode": False,
+        "max_concurrent_dials": 3,
+        "target_agent_wait_seconds": 3,
+        "pacing_interval_sec": 2.5,
+        "websocket_enabled": False,
+        "websocket_port": 8765,
+        "ui": {"auto_open_panel_on_human": False},
     }
     if os.path.exists(CONFIG_FILE):
         try:
@@ -340,12 +354,15 @@ class SlotCard(QGroupBox):
             self.lbl_ai_audio.setText("AI Audio: NO BACKEND")
         else:
             self.lbl_ai_audio.setText("AI Audio: OFF")
-        fused = str(debug.get("fused_state") or "--")
+        fused = str(debug.get("fused_state") or debug.get("ui_state") or "--")
         conf = debug.get("confidence", 0)
         reason = str(debug.get("reason") or debug.get("audio_reason") or "")
+        latency = int(debug.get("detection_time_ms") or 0)
         if len(reason) > 72:
             reason = reason[:69] + "..."
-        self.lbl_ai_decision.setText(f"Decision: {fused} ({conf}) {reason}")
+        latency_txt = f" {latency}ms" if latency > 0 else ""
+        self.lbl_ai_decision.setText(f"Decision: {fused} ({conf}){latency_txt} {reason}")
+        self.set_dial_detail(f"AMD: {fused}{latency_txt} — {reason}" if reason else f"AMD: {fused}{latency_txt}")
 
     def set_ai_audio_enabled(self, enabled: bool) -> None:
         self.lbl_ai_audio.setText("AI Audio: ON" if enabled else "AI Audio: OFF")
@@ -999,6 +1016,15 @@ class MainWindow(QMainWindow):
         self._configure_watchdog()
         self._gv_accounts: list[dict] = load_gv_accounts()
         self._headless_login_queue: list[dict] = []
+        self._pacing_engine = PredictivePacingEngine(
+            PacingConfig(
+                max_dials_per_interval=int(cfg.get("max_concurrent_dials", 3)),
+                pacing_interval_sec=float(cfg.get("pacing_interval_sec", 2.5)),
+            )
+        )
+        self._pacing_dial_history: list[int] = []
+        self._slot_agent_handled: set[int] = set()
+        self._ws_thread = None
 
         # ── Timers ────────────────────────────────────────────────────────────
         self._dial_timer   = QTimer(self)    # fires to assign next number to free slot
@@ -1095,9 +1121,14 @@ class MainWindow(QMainWindow):
             log_info("All voice line browsers loaded")
 
     def _gv_runtime_cfg(self) -> dict:
+        audio_on = effective_enable_ai_audio(self.cfg)
         return {
             "call_timeout": int(self.cfg.get("call_timeout", 60)),
-            "enable_ai_audio": bool(self.cfg.get("enable_ai_audio", False)),
+            "enable_ai_audio": audio_on,
+            "amd_mode": str(self.cfg.get("amd_mode", "heuristic") or "heuristic"),
+            "amd_early_decision_ms": int(self.cfg.get("amd_early_decision_ms", 800)),
+            "amd_max_decision_ms": int(self.cfg.get("amd_max_decision_ms", 2500)),
+            "amd_human_first_seconds": float(self.cfg.get("amd_human_first_seconds", 5)),
             "audio_device": self.cfg.get("audio_device", ""),
             "live_debug_mode": bool(self.cfg.get("live_debug_mode", False)),
         }
@@ -1300,6 +1331,7 @@ class MainWindow(QMainWindow):
         self._refresh_slot_login_badges()
 
     def _open_slot_monitor(self, slot_id: int, debug_monitor: bool = False) -> None:
+        self._slot_agent_handled.add(slot_id)
         ctrl = self._get_ctrl(slot_id)
         if not ctrl:
             QMessageBox.information(
@@ -1660,6 +1692,20 @@ class MainWindow(QMainWindow):
         self.lbl_health_log.setWordWrap(True)
         hlay.addWidget(self.lbl_health_log)
         lay.addWidget(grp_health)
+
+        grp_pacing = QGroupBox("Predictive pacing")
+        play = QHBoxLayout(grp_pacing)
+        self.chk_predictive = QCheckBox("Predictive mode")
+        self.chk_predictive.setChecked(bool(self.cfg.get("predictive_mode", False)))
+        play.addWidget(self.chk_predictive)
+        self.lbl_connect_rate = _label("Connect: —", "muted")
+        self.lbl_abandon_rate = _label("Abandon: —", "muted")
+        self.lbl_dials_interval = _label("Dials/interval: —", "muted")
+        for w in (self.lbl_connect_rate, self.lbl_abandon_rate, self.lbl_dials_interval):
+            play.addWidget(w)
+            play.addSpacing(12)
+        play.addStretch()
+        lay.addWidget(grp_pacing)
 
         # Progress
         grp_prog = QGroupBox("Campaign progress")
@@ -2879,8 +2925,10 @@ class MainWindow(QMainWindow):
             "call_timeout": self.spin_timeout.value(),
             "cooldown":     self.spin_cooldown.value(),
             "voicemail_hangup_sec": self.spin_vm_hangup.value(),
+            "predictive_mode": self.chk_predictive.isChecked() if hasattr(self, "chk_predictive") else False,
         })
         _save_cfg(self.cfg)
+        self._maybe_start_websocket()
         cd = self._cooldown_sec()
         self._dial_timer.setInterval(max(2500, int(cd * 650)))
 
@@ -2957,10 +3005,40 @@ class MainWindow(QMainWindow):
             return
 
         assigned = 0
+        max_assign = 999
+        if bool(self.cfg.get("predictive_mode", False)):
+            stats = self.db.recent_pacing_stats()
+            agents = max(1, available_agent_count())
+            in_progress = sum(
+                1 for c in self._controllers
+                if c and c.current_state in (
+                    "DIALING", "RINGING", "ANSWERED_PENDING", "CONNECTED", "VOICEMAIL")
+            )
+            metrics = PacingMetrics(
+                agents_available=agents,
+                connect_rate=float(stats.get("connect_rate", 0.15)),
+                abandon_rate=float(stats.get("abandon_rate", 0.0)),
+                calls_in_progress=in_progress,
+            )
+            max_assign = self._pacing_engine.smoothed_dials_needed(
+                metrics, samples=self._pacing_dial_history[-4:],
+            )
+            self._pacing_dial_history.append(max_assign)
+            self._update_pacing_panel(stats, max_assign)
+            if hasattr(self, "_ws_thread") and self._ws_thread is not None:
+                self._ws_thread.broadcast("pacing_update", {
+                    "connect_rate": metrics.connect_rate,
+                    "abandon_rate": metrics.abandon_rate,
+                    "dials_needed": max_assign,
+                })
+
         ready_retries = self._retry_queue.pop_ready()
         deferred_retries: list[tuple[str, str, int]] = []
 
         for phone, name, attempt in ready_retries:
+            if assigned >= max_assign:
+                deferred_retries.append((phone, name, attempt))
+                continue
             ctrl = self._idle_controller()
             if ctrl is None:
                 deferred_retries.append((phone, name, attempt))
@@ -2972,6 +3050,8 @@ class MainWindow(QMainWindow):
             self._retry_queue.requeue(phone, name, attempt, 2.0)
 
         for ctrl in self._controllers:
+            if assigned >= max_assign:
+                break
             if not self._controller_available(ctrl):
                 continue
             if self._contact_idx >= len(self._contacts):
@@ -3001,6 +3081,33 @@ class MainWindow(QMainWindow):
                 self._dial_timer.stop()
                 self._elapsed_timer.stop()
                 self._on_all_done()
+
+    def _update_pacing_panel(self, stats: dict, dials_needed: int) -> None:
+        if not hasattr(self, "lbl_connect_rate"):
+            return
+        cr = float(stats.get("connect_rate", 0.0)) * 100
+        ar = float(stats.get("abandon_rate", 0.0)) * 100
+        self.lbl_connect_rate.setText(f"Connect: {cr:.0f}%")
+        self.lbl_abandon_rate.setText(f"Abandon: {ar:.1f}%")
+        self.lbl_dials_interval.setText(f"Dials/interval: {dials_needed}")
+
+    def _maybe_start_websocket(self) -> None:
+        if not bool(self.cfg.get("websocket_enabled", False)):
+            return
+        if self._ws_thread is not None:
+            return
+        try:
+            from src.ui.websocket_manager import WebSocketServerThread
+            port = int(self.cfg.get("websocket_port", 8765))
+            self._ws_thread = WebSocketServerThread(port=port, parent=self)
+            self._ws_thread.start()
+        except Exception as exc:
+            log_warning(f"WebSocket dashboard unavailable: {exc}")
+
+    def _broadcast_amd_event(self, slot_id: int, debug: dict) -> None:
+        if self._ws_thread is None:
+            return
+        self._ws_thread.broadcast("amd_decision", {"slot_id": slot_id, **debug})
 
     def _idle_controller(self) -> GVController | None:
         for ctrl in self._controllers:
@@ -3163,6 +3270,7 @@ class MainWindow(QMainWindow):
             dialed_at=times.get("dialed_at", ""),
             ringing_at=times.get("ringing_at", ""),
             connected_at=times.get("connected_at", ""),
+            detection_time_ms=int(debug.get("detection_time_ms") or 0),
         )
         self._slot_call_times.pop(slot_id, None)
         self._slot_final_logged.add(slot_id)
@@ -3231,6 +3339,18 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"Live call — Line {slot_id + 1}: {disp}")
             self._focus_answered_slot(slot_id)
+            ui_cfg = self.cfg.get("ui") if isinstance(self.cfg.get("ui"), dict) else {}
+            auto_listen = bool(ui_cfg.get("auto_open_panel_on_human", False))
+            if auto_listen and effective_enable_ai_audio(self.cfg):
+                self._open_slot_monitor(slot_id)
+            wait_sec = float(self.cfg.get("target_agent_wait_seconds", 3))
+            token = self._slot_call_token.get(slot_id, 0)
+            gen = self._campaign_generation
+            QTimer.singleShot(
+                int(wait_sec * 1000),
+                lambda sid=slot_id, tok=token, g=gen:
+                self._check_abandoned_call(sid, tok, g),
+            )
         elif state == "VOICEMAIL":
             vm_sec = int(self.cfg.get("voicemail_hangup_sec", 3))
             self._log(
@@ -3303,10 +3423,36 @@ class MainWindow(QMainWindow):
         if "sign-in required" in msg.lower() or "google account detected" in msg.lower():
             self._refresh_slot_login_badges()
 
+    def _check_abandoned_call(self, slot_id: int, token: int, generation: int) -> None:
+        if generation != self._campaign_generation:
+            return
+        if token != self._slot_call_token.get(slot_id, 0):
+            return
+        if slot_id in self._slot_agent_handled:
+            return
+        ctrl = self._get_ctrl(slot_id)
+        if not ctrl or ctrl.current_state != "CONNECTED":
+            return
+        phone = self._slot_phone.get(slot_id, "")
+        self._pacing_engine.record_outcome(connected=True, abandoned=True)
+        self.db.log_call(
+            self.user["id"],
+            phone,
+            "ABANDONED",
+            contact_name=self._slot_name.get(slot_id, ""),
+            slot_id=slot_id,
+            detection_reason="human detected but agent not connected in time",
+        )
+        self._log(f"[Slot {slot_id}] Abandoned — no agent within wait window")
+
     def _on_slot_detection(self, slot_id: int, debug: dict) -> None:
         self._slot_detection_debug[slot_id] = debug
         if hasattr(self, "_slot_cards") and slot_id in self._slot_cards:
             self._slot_cards[slot_id].update_detection(debug)
+        if debug.get("fused_state") in ("HUMAN", "VOICEMAIL", "CONNECTED"):
+            self._broadcast_amd_event(slot_id, debug)
+            if debug.get("fused_state") == "HUMAN":
+                self._pacing_engine.record_outcome(connected=True, abandoned=False)
 
     def _update_card(self, slot_id: int, state: str, phone: str):
         if hasattr(self, "_slot_cards") and slot_id in self._slot_cards:
