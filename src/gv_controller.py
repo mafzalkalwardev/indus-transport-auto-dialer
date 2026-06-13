@@ -1626,6 +1626,26 @@ class GVController(QObject):
         if self._active_call:
             self._poll_state()
 
+    def retry_start_call(self) -> None:
+        """Re-press Call when the number is entered but the outbound call did not start."""
+        if not self._page_alive():
+            return
+        phone = self._pending_dial_phone or self._current_call_phone
+        if not phone:
+            return
+        if not self._active_call:
+            self._active_call = True
+        self._pending_dial_phone = phone
+        self._current_call_phone = phone
+        self._emit_log("Retrying Call button in Google Voice…")
+        self._page.runJavaScript(_JS_FORCE_VISIBLE)
+        self._page.runJavaScript(
+            _js_retry_start_call(phone),
+            self._on_retry_start_call_result,
+        )
+        QTimer.singleShot(900, self._dial_step)
+        QTimer.singleShot(1500, self._poll_once)
+
     def hangup(self, *, manual: bool = False) -> None:
         if not self._page_alive():
             return

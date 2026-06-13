@@ -17,5 +17,7 @@
   "enable_ai_audio": false,
   "audio_device": "",
   "live_debug_mode": false,
-  "dry_run_mode": false
+  "dry_run_mode": false,
+  "campaign_contact_idx": 0,
+  "campaign_excel_path": ""
 }

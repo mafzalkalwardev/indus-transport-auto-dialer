@@ -1,26 +1,24 @@
 # TODO
 
-## Call-state + voicemail/human pipeline fixes
+## Completed (recent)
 
-- [x] Step 1: Identify ringing hangup bug location in `src/gv_controller.py` and fix policy so ringing never triggers voicemail/failed/hangup before timeout.
+- [x] Low-RAM mode (1 line on 8 GB), deferred WebEngine boot, process cleanup
+- [x] Fix Call button click when Listen monitor is open (view-local coords)
+- [x] Alternate GV dial URLs (`?a=nc` + `/dial/+1…`)
+- [x] CRM timestamps: dialed_at / ringing_at / connected_at
+- [x] Campaign resume (saved contact index)
+- [x] Stuck-dial auto-retry + manual **Retry dial** button
+- [x] Sample list auto-creates via `prepare_test_dial.py`
+- [x] GitHub Actions pytest workflow + `scripts/dev_cycle.ps1`
+- [x] 49+ unit tests passing
 
-- [ ] Step 2: Enforce VICIdial-style state pipeline mapping (IDLE/DIALING/RINGING/CONNECTED/CLASSIFYING_AUDIO/HUMAN_DETECTED/VOICEMAIL_DETECTED/BUSY/NO_ANSWER/FAILED/ENDED) in controller glue.
+## Call-state pipeline (next)
 
-- [ ] Step 3: Add missing timestamps (dialed_at/ringing_started_at/connected_at) and ensure they feed call-logging.
+- [ ] Full VICIdial-style UI labels for CLASSIFYING_AUDIO / HUMAN_DETECTED states
+- [ ] Structured per-call JSON log line (single terminal event)
+- [ ] Confirm voicemail detector never runs during RINGING in fusion engine
 
-- [ ] Step 4: Improve per-call structured logging to include required fields exactly once per terminal state.
+## Deploy
 
-- [ ] Step 5: Ensure voicemail detector only runs after CONNECTED evidence and never during ringing (confirm in `src/local_call_detector.py`; adjust if needed).
-
-- [x] Step 6: Add/update unit tests for the required edge cases.
-
-- [x] Step 8: Run `pytest` and fix any regressions (40+ tests passing).
-
-- [ ] Step 2: Enforce full VICIdial-style state pipeline mapping in UI labels only (engine already fused).
-
-- [ ] Step 3: Add missing timestamps (dialed_at/ringing_started_at/connected_at) and ensure they feed call-logging.
-
-- [ ] Step 4: Improve per-call structured logging to include required fields exactly once per terminal state.
-
-- [ ] Step 9: Commit when ready: "Fix call state detection and human voicemail classification"
-
+- [ ] Push `main` to GitHub: `git push origin main` (1 commit ahead locally)
+- [ ] Rebuild EXE when stable on test PC

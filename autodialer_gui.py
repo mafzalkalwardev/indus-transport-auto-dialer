@@ -166,7 +166,7 @@ class SlotCard(QGroupBox):
     cut_clicked = pyqtSignal(int)
     listen_clicked = pyqtSignal(int)
     monitor_clicked = pyqtSignal(int)
-    test_clicked = pyqtSignal(int)
+    redial_clicked = pyqtSignal(int)
 
     MIN_WIDTH = 248
 
@@ -203,6 +203,10 @@ class SlotCard(QGroupBox):
         self.lbl_phone = _label("No active number", "muted")
         self.lbl_phone.setWordWrap(True)
         lay.addWidget(self.lbl_phone)
+
+        self.lbl_dial_detail = _label("", "muted")
+        self.lbl_dial_detail.setWordWrap(True)
+        lay.addWidget(self.lbl_dial_detail)
 
         self.lbl_pickup = _label("", "accent", bold=True)
         self.lbl_pickup.setWordWrap(True)
@@ -268,7 +272,21 @@ class SlotCard(QGroupBox):
             "Place one manual test call on this line without starting a campaign")
         self.btn_test.clicked.connect(lambda: self.test_clicked.emit(self.slot_id))
         btn_col.addWidget(self.btn_test)
+
+        self.btn_redial = _btn("Retry dial", "secondary")
+        self.btn_redial.setMinimumHeight(36)
+        self.btn_redial.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.btn_redial.setToolTip(
+            "Number entered but call did not start — click Call again in Google Voice")
+        self.btn_redial.setEnabled(False)
+        self.btn_redial.clicked.connect(
+            lambda: self.redial_clicked.emit(self.slot_id))
+        btn_col.addWidget(self.btn_redial)
         lay.addLayout(btn_col)
+
+    def set_dial_detail(self, text: str) -> None:
+        self.lbl_dial_detail.setText(text.strip())
 
     def _apply_status_style(self, key: str) -> None:
         c = status_color(key)
@@ -300,6 +318,7 @@ class SlotCard(QGroupBox):
         self.btn_listen.setEnabled(state == "CONNECTED")
         self.btn_monitor.setEnabled(state in ("DIALING", "RINGING", "CONNECTED", "ANSWERED_PENDING", "VOICEMAIL", "BUSY"))
         self.btn_test.setEnabled(not active)
+        self.btn_redial.setEnabled(state == "DIALING")
 
         self.setProperty("connected", state == "CONNECTED")
         self.style().unpolish(self)
@@ -998,6 +1017,10 @@ class MainWindow(QMainWindow):
         self._headless_timer.setInterval(2000)
         self._headless_timer.timeout.connect(self._tick_headless_logins)
 
+        self._stuck_dial_timer = QTimer(self)
+        self._stuck_dial_timer.setInterval(10000)
+        self._stuck_dial_timer.timeout.connect(self._check_stuck_dials)
+
         self._health_timer = QTimer(self)
         self._health_timer.setInterval(5000)
         self._health_timer.timeout.connect(self._update_health_panel)
@@ -1022,7 +1045,9 @@ class MainWindow(QMainWindow):
         self._assign_debounce.stop()
         self._elapsed_timer.stop()
         self._headless_timer.stop()
+        self._stuck_dial_timer.stop()
         self._health_timer.stop()
+        self._save_campaign_progress()
         for dialog in list(self._slot_monitors.values()):
             try:
                 dialog.close()
@@ -1627,7 +1652,7 @@ class MainWindow(QMainWindow):
         health_row.addWidget(self.lbl_health_status, stretch=1)
         stable_btn = _btn("Apply stable mode", "secondary")
         stable_btn.setToolTip(
-            "Sets 3 lines, 60s timeout, 5s cooldown — recommended for daily use")
+            "Safe settings for 8 GB RAM: 1 line, 6s cooldown, AI audio off")
         stable_btn.clicked.connect(self._apply_stable_mode)
         health_row.addWidget(stable_btn)
         hlay.addLayout(health_row)
@@ -1745,6 +1770,7 @@ class MainWindow(QMainWindow):
             card.listen_clicked.connect(self._open_slot_monitor)
             card.monitor_clicked.connect(self._open_slot_audio_monitor)
             card.test_clicked.connect(self._test_call)
+            card.redial_clicked.connect(self._retry_slot_dial)
             row, col = divmod(i, cols)
             self._cards_layout.addWidget(card, row, col)
             self._slot_cards[i] = card
@@ -1802,9 +1828,9 @@ class MainWindow(QMainWindow):
         lay.addLayout(frow)
 
         # Table
-        self.log_table = QTableWidget(0, 5)
+        self.log_table = QTableWidget(0, 7)
         self.log_table.setHorizontalHeaderLabels(
-            ["Time", "Phone", "Status", "Duration", "Slot"])
+            ["Logged", "Phone", "Status", "Duration", "Line", "Dialed", "Connected"])
         self.log_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
         self.log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -2614,6 +2640,57 @@ class MainWindow(QMainWindow):
         self._begin_slot_cooldown(slot_id)
         self._schedule_assign()
 
+    def _save_campaign_progress(self) -> None:
+        self.cfg["campaign_contact_idx"] = int(self._contact_idx)
+        path = self.excel_input.text().strip() if hasattr(self, "excel_input") else ""
+        self.cfg["campaign_excel_path"] = path.replace("\\", "/")
+        _save_cfg(self.cfg)
+
+    def _maybe_offer_campaign_resume(self) -> bool:
+        saved_idx = int(self.cfg.get("campaign_contact_idx", 0))
+        if saved_idx <= 0 or not self._contacts or saved_idx >= len(self._contacts):
+            return False
+        saved_path = str(self.cfg.get("campaign_excel_path", "")).replace("\\", "/")
+        current_path = self.excel_input.text().strip().replace("\\", "/")
+        if saved_path and current_path and saved_path != current_path:
+            return False
+        ans = QMessageBox.question(
+            self,
+            "Resume campaign?",
+            f"Continue from contact #{saved_idx + 1} of {len(self._contacts)}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ans == QMessageBox.StandardButton.Yes:
+            self._contact_idx = saved_idx
+            self._log(f"Resuming campaign at contact #{saved_idx + 1}")
+            return True
+        return False
+
+    def _check_stuck_dials(self) -> None:
+        if not self._running:
+            return
+        for sid, started in list(self._slot_start.items()):
+            if _now() - started < 35:
+                continue
+            ctrl = self._get_ctrl(sid)
+            if ctrl is None or ctrl.current_state != "DIALING":
+                continue
+            phone = self._slot_phone.get(sid, "")
+            if not phone:
+                continue
+            self._log(f"[Slot {sid}] Dial stuck 35s+ — auto retrying Call button…")
+            ctrl.retry_start_call()
+
+    def _retry_slot_dial(self, slot_id: int) -> None:
+        ctrl = self._get_ctrl(slot_id)
+        if ctrl is None:
+            return
+        self._log(f"[Slot {slot_id}] Manual retry dial")
+        ctrl.retry_start_call()
+        if slot_id in self._slot_cards:
+            self._slot_cards[slot_id].set_dial_detail("Retrying Call button…")
+
     def _browse(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select Excel File", "",
@@ -2628,11 +2705,21 @@ class MainWindow(QMainWindow):
         path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "phones_test.xlsx")
         if not os.path.exists(path):
-            QMessageBox.warning(
-                self, "Test List Missing",
-                f"Run once:\n  python scripts/prepare_test_dial.py\n\n"
-                f"Expected file:\n{path}")
-            return
+            import subprocess
+            script = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "scripts", "prepare_test_dial.py")
+            try:
+                subprocess.run(
+                    [sys.executable, script],
+                    check=True,
+                    cwd=os.path.dirname(os.path.abspath(__file__)),
+                )
+            except Exception as exc:
+                QMessageBox.warning(
+                    self, "Test List Missing",
+                    f"Could not create test list:\n{exc}")
+                return
         self.excel_input.setText(path)
         self.cfg["excel_path"] = path.replace("\\", "/")
         _save_cfg(self.cfg)
@@ -2804,7 +2891,9 @@ class MainWindow(QMainWindow):
 
         self._campaign_generation += 1
         self._running      = True
-        self._contact_idx  = 0
+        resume = self._maybe_offer_campaign_resume()
+        if not resume:
+            self._contact_idx = 0
         self._retry_queue.clear()
         self._slot_cooldown_until.clear()
         stagger = self._dial_stagger_sec()
@@ -2822,6 +2911,7 @@ class MainWindow(QMainWindow):
 
         self._dial_timer.start()
         self._elapsed_timer.start()
+        self._stuck_dial_timer.start()
         self._schedule_assign(int(stagger * 1000))
 
     def _stop_dialing(self):
@@ -2830,6 +2920,8 @@ class MainWindow(QMainWindow):
         self._dial_timer.stop()
         self._assign_debounce.stop()
         self._elapsed_timer.stop()
+        self._stuck_dial_timer.stop()
+        self._save_campaign_progress()
         pending = self._retry_queue.pending_count()
         self._retry_queue.clear()
         for ctrl in self._controllers:
@@ -2886,6 +2978,8 @@ class MainWindow(QMainWindow):
                 break
             phone, name = self._contacts[self._contact_idx]
             self._contact_idx += 1
+            if self._contact_idx % 3 == 0:
+                self._save_campaign_progress()
             self._dial_on_slot(ctrl, phone, name, 0)
             assigned += 1
 
@@ -3032,6 +3126,9 @@ class MainWindow(QMainWindow):
 
     def _on_all_done(self):
         self._running = False
+        self._stuck_dial_timer.stop()
+        self.cfg["campaign_contact_idx"] = 0
+        _save_cfg(self.cfg)
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.statusBar().showMessage("Campaign complete")
@@ -3200,6 +3297,9 @@ class MainWindow(QMainWindow):
 
     def _on_slot_log(self, slot_id: int, msg: str):
         self._log(f"[Slot {slot_id}] {msg}")
+        if "Dial UI status:" in msg and slot_id in getattr(self, "_slot_cards", {}):
+            detail = msg.split("Dial UI status:", 1)[-1].strip()
+            self._slot_cards[slot_id].set_dial_detail(detail[:80])
         if "sign-in required" in msg.lower() or "google account detected" in msg.lower():
             self._refresh_slot_login_badges()
 
@@ -3217,6 +3317,8 @@ class MainWindow(QMainWindow):
             disp = fmt_display(phone[2:]) if phone.startswith("+1") and len(phone)==12 \
                 else phone
             self._slot_cards[slot_id].update_state(state, disp, elapsed)
+            if state == "IDLE":
+                self._slot_cards[slot_id].set_dial_detail("")
 
     def _tick_elapsed(self):
         for ctrl in self._controllers:
@@ -3279,8 +3381,15 @@ class MainWindow(QMainWindow):
             self.log_table.insertRow(row)
             st  = r.get("status", "")
             dur = r.get("duration_s", 0) or 0
-            vals = [r.get("timestamp",""), r.get("phone",""),
-                    st, f"{dur:.0f}s", f"S{r.get('slot_id',0)}"]
+            vals = [
+                r.get("timestamp", ""),
+                r.get("phone", ""),
+                st,
+                f"{dur:.0f}s",
+                f"L{(r.get('slot_id', 0) or 0) + 1}",
+                r.get("dialed_at", "") or "—",
+                r.get("connected_at", "") or "—",
+            ]
             for col, val in enumerate(vals):
                 item = QTableWidgetItem(str(val))
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
