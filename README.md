@@ -75,6 +75,10 @@ python scripts/prepare_client_install.py --name "Jane Agent" --email jane@exampl
 
 If the client sees “Workstation not configured”, the `logs` folder from the package was not copied correctly.
 
+## Screenshots
+
+![Application screenshot](docs/screenshots/app.png)
+
 ## Features
 
 - Light, client-ready interface
