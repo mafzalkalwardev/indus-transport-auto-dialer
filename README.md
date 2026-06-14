@@ -27,9 +27,9 @@ Professional Windows desktop dialer for FT Solutions. Agents use a simple brande
 
 ## 🖼 Screenshots
 
-![Auto Dialer screenshot](docs/screenshots/placeholder.svg)
+![Live calls dashboard — dark theme](docs/screenshots/live-calls-dark.png)
 
-*Add real captures to `docs/screenshots/` — replace the placeholder above.*
+![Settings panel — light theme](docs/screenshots/settings-light.png)
 
 ## 🐍 Contribution graph
 
