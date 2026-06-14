@@ -12,29 +12,17 @@ Multi-line dialing · AMD · CRM · Excel lists
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen?style=for-the-badge)](CONTRIBUTING.md)
 
-[Features](#-features) · [Quick Start](#-quick-start) · [Screenshots](#-screenshots) · [Contributing](CONTRIBUTING.md)
-
 </div>
 
 ---
 
-## 🖼 Screenshots
-
-![Indus Transport Auto Dialer screenshot](docs/screenshots/placeholder.svg)
-
-*Replace `docs/screenshots/placeholder.svg` with real app screenshots.*
-
----
-
 ## 🐍 Contribution graph
-
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mafzalkalwardev/indus-transport-auto-dialer/output/snake-dark.svg" />
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/mafzalkalwardev/indus-transport-auto-dialer/output/snake.svg" />
   <img alt="Contribution snake" src="https://raw.githubusercontent.com/mafzalkalwardev/indus-transport-auto-dialer/output/snake.svg" />
 </picture>
-
 
 ---
 
@@ -86,10 +74,6 @@ python scripts/prepare_client_install.py --name "Jane Agent" --email jane@exampl
 4. Client signs in with the email/password you set during export.
 
 If the client sees “Workstation not configured”, the `logs` folder from the package was not copied correctly.
-
-## Screenshots
-
-![indus-transport-auto-dialer dashboard](docs/screenshots/app.png)
 
 ## Features
 
