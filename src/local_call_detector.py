@@ -34,6 +34,7 @@ class DecisionState(str, Enum):
     DIALING = "DIALING"
     RINGING = "RINGING"
     ANSWERED_PENDING = "ANSWERED_PENDING"
+    CONNECTED_AUDIO_EVIDENCE = "CONNECTED_AUDIO_EVIDENCE"
     HUMAN = "HUMAN"
     VOICEMAIL = "VOICEMAIL"
     NO_ANSWER = "NO_ANSWER"
@@ -267,7 +268,7 @@ class LocalCallDetector:
         # In real campaigns, some audio can appear briefly before GV updates the DOM
         # (or when UI/slots are transitioning), which causes early VOICEMAIL gating.
         timer_evidence0 = bool(getattr(evidence, "hasTimer", False))
-        ctrl_evidence0 = bool(getattr(evidence, "hasEnabledAnswerControl", False))
+        ctrl_evidence0 = bool(getattr(evidence, "hasEnabledAnswerControl", False) or evidence.state.upper() == "CONNECTED_CTRL")
         has_speech_like0 = bool(getattr(af, "has_speech_like", False))
         is_silent0 = bool(getattr(af, "is_silent", False))
 
@@ -293,6 +294,13 @@ class LocalCallDetector:
         ring_cad = float(_get("ringback_cadence_confidence", 0.0) or 0.0)
         beep_conf = float(_get("beep_hz_confidence", 0.0) or 0.0)
         busy_conf = float(_get("busy_tone_cadence_confidence", 0.0) or 0.0)
+        speech_duration_seconds = float(_get("speech_duration_seconds", 0.0) or 0.0)
+        silence_duration_seconds = float(_get("silence_duration_seconds", 0.0) or 0.0)
+        human_greeting_detected = bool(_get("human_greeting_detected", False) or False)
+        short_speech_burst_detected = bool(_get("short_speech_burst_detected", False) or False)
+        beep_detected = bool(_get("beep_detected", False) or False)
+        vad_confidence = float(_get("vad_confidence", 0.0) or 0.0)
+        transcript = str(_get("transcript", "") or "")
 
         dom_state = evidence.state.upper()
 
@@ -337,6 +345,50 @@ class LocalCallDetector:
                 busy_tone_cadence_confidence=busy_conf,
             )
 
+        # Some Google Voice sessions keep stale "calling/ringing" text in the
+        # page after pickup, especially when the active-call panel is not
+        # exposed with a timer. Once this detector has already reached RINGING
+        # for an active controller call, allow a short human-speech burst with
+        # weak ringback/beep evidence to mark audio-based pickup. Keep it
+        # pending instead of HUMAN so voicemail logic is not bypassed too early.
+        post_ringing_audio_pickup = (
+            self._current_state == DecisionState.RINGING
+            and elapsed_seconds >= 6.0
+            and self.config.enable_audio_detection
+            and has_speech_like
+            and not is_silent
+            and ring_cad < self.config.ringing_confidence_threshold
+            and busy_conf < 0.8
+            and beep_conf < 0.55
+            and not beep_detected
+            and self._passes_human_audio_gate(
+                has_speech_like=has_speech_like,
+                speech_duration_seconds=speech_duration_seconds,
+                human_greeting_detected=human_greeting_detected,
+                short_speech_burst_detected=short_speech_burst_detected,
+                vad_confidence=vad_confidence,
+                transcript=transcript,
+            )
+        )
+        if post_ringing_audio_pickup:
+            if self._answer_detected_elapsed_seconds is None:
+                self._answer_detected_elapsed_seconds = float(elapsed_seconds)
+            return self._transition(
+                DecisionState.CONNECTED_AUDIO_EVIDENCE,
+                0.82,
+                "post-ringing speech pickup detected despite stale GV ringing text",
+                audio_state=self._audio_state(
+                    has_speech_like=has_speech_like,
+                    ring_cad=ring_cad,
+                    beep_conf=beep_conf,
+                    busy_conf=busy_conf,
+                    is_silent=is_silent,
+                ),
+                speech_duration=speech_duration_seconds,
+                vad_confidence=vad_confidence,
+                ringback_detected=False,
+            )
+
         # While ringing, never consider voicemail.
         if ringing_conf >= self.config.ringing_confidence_threshold or dom_ringing:
             # Determine if max ring exceeded.
@@ -350,7 +402,7 @@ class LocalCallDetector:
 
         # Answered pending evidence:
         timer_evidence = bool(evidence.hasTimer)
-        ctrl_evidence = bool(evidence.hasEnabledAnswerControl)
+        ctrl_evidence = bool(evidence.hasEnabledAnswerControl or dom_state == "CONNECTED_CTRL")
         audio_answer_like = (
             self.config.enable_audio_detection and has_speech_like and not is_silent
         )
@@ -364,8 +416,6 @@ class LocalCallDetector:
             answered_pending_conf += 0.3
 
         # Audio features that may be populated by analyzer / tests (duck-typed).
-        speech_duration_seconds = float(_get("speech_duration_seconds", 0.0) or 0.0)
-        silence_duration_seconds = float(_get("silence_duration_seconds", 0.0) or 0.0)
         voicemail_keywords_detected_count = int(_get("voicemail_keywords_detected_count", 0) or 0)
         dom_voicemail_keywords = self._voicemail_detector.keyword_count(evidence.callText)
         if dom_voicemail_keywords:
@@ -373,12 +423,8 @@ class LocalCallDetector:
                 voicemail_keywords_detected_count,
                 dom_voicemail_keywords,
             )
-        human_greeting_detected = bool(_get("human_greeting_detected", False) or False)
-        short_speech_burst_detected = bool(_get("short_speech_burst_detected", False) or False)
         continuous_greeting_duration_seconds = float(_get("continuous_greeting_duration_seconds", 0.0) or 0.0)
-        beep_detected = bool(_get("beep_detected", False) or False)
         background_noise_level = float(_get("background_noise_level", rms) or 0.0)
-        transcript = str(_get("transcript", "") or "")
 
         # Start pending window if evidence suggests answer has happened.
         if answered_pending_conf >= 0.4:
@@ -790,7 +836,15 @@ class LocalCallDetector:
             self._state_entered_at = 0.0
 
         # Debounce: only hold if we already have a meaningful previous state.
-        if self._stable_raw_count < self.config.decision_stability_window and state != self._current_state:
+        immediate_states = {
+            DecisionState.ANSWERED_PENDING,
+            DecisionState.CONNECTED_AUDIO_EVIDENCE,
+        }
+        if (
+            self._stable_raw_count < self.config.decision_stability_window
+            and state != self._current_state
+            and state not in immediate_states
+        ):
             if self._current_state != DecisionState.IDLE:
                 return self._build(self._current_state, 0.3, reason=reason, debug={"debounce": True, **debug})
 

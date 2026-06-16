@@ -20,6 +20,8 @@ class DummyAudio:
         continuous_greeting_duration_seconds=0.0,
         beep_detected=False,
         busy_tone_cadence_confidence=0.0,
+        vad_confidence=0.0,
+        transcript="",
     ):
         self.rms = rms
         self.is_silent = is_silent
@@ -35,6 +37,8 @@ class DummyAudio:
         self.continuous_greeting_duration_seconds = continuous_greeting_duration_seconds
         self.beep_detected = beep_detected
         self.busy_tone_cadence_confidence = busy_tone_cadence_confidence
+        self.vad_confidence = vad_confidence
+        self.transcript = transcript
 
 
 
@@ -84,6 +88,30 @@ def test_answered_without_timer_becomes_answered_pending():
     audio = DummyAudio(rms=0.2, is_silent=False, has_speech_like=True)
     decision = det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=2)
     assert decision.state == DecisionState.ANSWERED_PENDING.value or decision.state == DecisionState.UNKNOWN.value
+
+
+def test_connected_ctrl_state_counts_as_answer_control_evidence():
+    cfg = DetectionConfig(max_ring_seconds=55, answered_pending_seconds=10)
+    det = LocalCallDetector(cfg)
+    dom = {
+        "state": "CONNECTED_CTRL",
+        "hasEnabledAnswerControl": False,
+        "hasTimer": False,
+        "hasVoicemailCue": False,
+    }
+    audio = DummyAudio(
+        rms=0.0,
+        is_silent=False,
+        has_speech_like=True,
+        ringback_cadence_confidence=0.35,
+        speech_duration_seconds=0.69,
+        vad_confidence=0.75,
+    )
+    decision = det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=25)
+    assert decision.state in {
+        DecisionState.ANSWERED_PENDING.value,
+        DecisionState.HUMAN.value,
+    }
 
 
 def test_human_short_hello_becomes_human():
@@ -215,6 +243,71 @@ def test_busy_tone_becomes_busy():
     )
     decision = det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=5)
     assert decision.state == DecisionState.BUSY.value
+
+
+def test_post_ringing_speech_evidence_becomes_connected_audio_evidence():
+    cfg = DetectionConfig(max_ring_seconds=55)
+    det = LocalCallDetector(cfg)
+    ringing_dom = {
+        "state": "RINGING",
+        "hasRingingText": True,
+        "hasRingingNode": True,
+        "hasTimer": False,
+        "hasEnabledAnswerControl": False,
+    }
+    ring_audio = DummyAudio(ringback_cadence_confidence=0.9, is_silent=False)
+
+    det.decide(dom_evidence=ringing_dom, audio_features=ring_audio, elapsed_seconds=4)
+    decision = det.decide(
+        dom_evidence=ringing_dom,
+        audio_features=DummyAudio(
+            rms=0.22,
+            is_silent=False,
+            has_speech_like=True,
+            ringback_cadence_confidence=0.1,
+            speech_duration_seconds=0.67,
+            short_speech_burst_detected=True,
+            vad_confidence=0.75,
+            transcript="hello hello",
+        ),
+        elapsed_seconds=8,
+    )
+
+    assert decision.state == DecisionState.CONNECTED_AUDIO_EVIDENCE.value
+
+
+def test_stale_ringing_text_does_not_override_connected_audio_evidence():
+    cfg = DetectionConfig(max_ring_seconds=55)
+    det = LocalCallDetector(cfg)
+    stale_dom = {
+        "state": "RINGING",
+        "callText": "Latest calls Outgoing call Calling",
+        "hasRingingText": True,
+        "hasRingingNode": False,
+        "hasTimer": False,
+        "hasEnabledAnswerControl": False,
+    }
+
+    det.decide(
+        dom_evidence=stale_dom,
+        audio_features=DummyAudio(ringback_cadence_confidence=0.8, is_silent=False),
+        elapsed_seconds=3,
+    )
+    decision = det.decide(
+        dom_evidence=stale_dom,
+        audio_features=DummyAudio(
+            rms=0.2,
+            is_silent=False,
+            has_speech_like=True,
+            ringback_cadence_confidence=0.0,
+            speech_duration_seconds=0.7,
+            short_speech_burst_detected=True,
+            vad_confidence=0.76,
+        ),
+        elapsed_seconds=9,
+    )
+
+    assert decision.state == DecisionState.CONNECTED_AUDIO_EVIDENCE.value
 
 
 def test_manual_end_becomes_ended_manually():

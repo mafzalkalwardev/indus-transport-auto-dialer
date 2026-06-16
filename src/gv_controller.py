@@ -428,6 +428,58 @@ _JS_DETECT_STATE = r"""
   function q(root, sel){
     try { return (root || document).querySelector(sel); } catch(e) { return null; }
   }
+  function roots(){
+    var out=[document], seen=new Set(out);
+    for(var i=0;i<out.length;i++){
+      var nodes=[];
+      try{ nodes=Array.from(out[i].querySelectorAll('*')); }catch(e){}
+      for(var n=0;n<nodes.length;n++){
+        if(nodes[n].shadowRoot && !seen.has(nodes[n].shadowRoot)){
+          seen.add(nodes[n].shadowRoot);
+          out.push(nodes[n].shadowRoot);
+        }
+      }
+    }
+    return out;
+  }
+  function qsa(sel){
+    var found=[];
+    roots().forEach(function(root){
+      try{ found=found.concat(Array.from(root.querySelectorAll(sel))); }catch(e){}
+    });
+    return found;
+  }
+  function panelText(el){
+    return ((el&&el.innerText)||((el&&el.textContent)||''))
+      .toLowerCase()
+      .replace(/[â€™']/g, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+  function bestCallPanel(hang){
+    var selectors=[
+      '[role="dialog"]','gv-call-panel','gv-call-widget','gv-in-call-panel',
+      '[data-e2eid*="call" i]','.call-panel','.in-call'
+    ];
+    for(var s=0;s<selectors.length;s++){
+      try{
+        var hit=hang.closest(selectors[s]);
+        if(hit && hit!==document.body && hit!==document.documentElement) return hit;
+      }catch(e){}
+    }
+    var best=hang, bestScore=-1, node=hang;
+    for(var depth=0;node && depth<6;depth++,node=node.parentElement){
+      if(node===document.body || node===document.documentElement) break;
+      var text=panelText(node);
+      var score=0;
+      if(/hang up|end call/.test(text)) score += 4;
+      if(/mute|hold|keypad|speaker|transfer|call duration/.test(text)) score += 2;
+      if(/latest calls|messages|contacts|settings|archive|spam/.test(text)) score -= 5;
+      score -= Math.min(5, Math.floor(text.length / 250));
+      if(score > bestScore){ bestScore=score; best=node; }
+    }
+    return best || hang;
+  }
   function out(state, extra){
     var e = extra || {};
     e.state = state;
@@ -446,10 +498,10 @@ _JS_DETECT_STATE = r"""
     'button[title*="Hang up" i]','gv-icon-button[icon-name="call_end"]',
     '[data-action="end-call"]','button.end-call'];
   for(var h=0;h<hangSels.length;h++){
-    var hang=document.querySelector(hangSels[h]);
+    var hang=qsa(hangSels[h]).find(vis);
     if(vis(hang)){
       inCall=true;
-      activeRoot=hang.closest('[role="dialog"],gv-call-panel,gv-call-widget,gv-in-call-panel,.call-panel,.in-call,body')||document.body;
+      activeRoot=bestCallPanel(hang);
       break;
     }
   }
@@ -1450,6 +1502,7 @@ class GVController(QObject):
         self._last_login_fill_status = ""
         self._login_required_logged = False
         self._console_messages: list[dict] = []
+        self._state_diag_seen: set[str] = set()
 
         # ── WebEngine setup ───────────────────────────────────────────────────
         os.makedirs(profile_dir, exist_ok=True)
@@ -1842,6 +1895,7 @@ class GVController(QObject):
         self._calls_ready_attempts = 0
         self._native_key_attempted = False
         self._native_key_attempts = 0
+        self._state_diag_seen = set()
         self._dial_started_at = time.monotonic()
         self._vm_count = 0
         self._idle_count = 0
@@ -2718,7 +2772,7 @@ class GVController(QObject):
         dom_payload = decision.evidence if isinstance(decision.evidence, dict) else {}
         dom_payload["state"] = decision.state or "IDLE"
         audio_features = self._audio_monitor.last_features
-        if self._state in ("RINGING", "ANSWERED_PENDING", "CONNECTED", "DIALING"):
+        if self._state in ("RINGING", "ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "CONNECTED", "DIALING"):
             audio_features = self._audio_monitor.poll()
         elapsed = time.monotonic() - self._dial_started_at if self._dial_started_at else 0.0
         fused = self._decision_engine.update(
@@ -2729,23 +2783,27 @@ class GVController(QObject):
         fused_state = fused.state or decision.state or "IDLE"
         if fused_state in {"HUMAN", "VOICEMAIL"} and self._amd_answer_at > 0 and self._amd_decision_ms <= 0:
             self._amd_decision_ms = int((time.monotonic() - self._amd_answer_at) * 1000)
-        if fused_state in {"ANSWERED_PENDING", "HUMAN"} and self._amd_answer_at <= 0:
-            if bool(dom_payload.get("hasTimer")) or fused_state == "HUMAN":
+        if fused_state in {"ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "HUMAN"} and self._amd_answer_at <= 0:
+            if (
+                bool(dom_payload.get("hasTimer"))
+                or fused_state in {"CONNECTED_AUDIO_EVIDENCE", "HUMAN"}
+            ):
                 self._amd_answer_at = time.monotonic()
         state = {
             "HUMAN": "CONNECTED",
             "ANSWERED_PENDING": "ANSWERED_PENDING",
+            "CONNECTED_AUDIO_EVIDENCE": "CONNECTED_AUDIO_EVIDENCE",
         }.get(fused_state, fused_state)
 
         # Vicidial-style gate: agent UI only after AMD confirms HUMAN, not DOM timer alone.
         if state == "CONNECTED" and fused_state != "HUMAN":
             state = (
                 "ANSWERED_PENDING"
-                if self._state in {"DIALING", "RINGING", "ANSWERED_PENDING", "CONNECTED"}
+                if self._state in {"DIALING", "RINGING", "ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "CONNECTED"}
                 else self._state
             )
         if state == "UNKNOWN" and self._active_call:
-            if self._state in {"DIALING", "RINGING", "ANSWERED_PENDING", "CONNECTED"}:
+            if self._state in {"DIALING", "RINGING", "ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "CONNECTED"}:
                 state = self._state
             else:
                 state = "DIALING"
@@ -2858,7 +2916,7 @@ class GVController(QObject):
             self._ctrl_count += 1
             if answer_window_ready and self._ctrl_count >= 4 and fused_state == "HUMAN":
                 state = "CONNECTED"
-            elif self._state in {"ANSWERED_PENDING", "CONNECTED"} or fused_state == "ANSWERED_PENDING":
+            elif self._state in {"ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "CONNECTED"} or fused_state in {"ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE"}:
                 state = "ANSWERED_PENDING"
             else:
                 state = "RINGING" if self._state != "CONNECTED" else "CONNECTED"
@@ -2867,7 +2925,7 @@ class GVController(QObject):
 
         # Safety: GV in-call controls/timer are not human confirmation by themselves.
         if raw_state == "CONNECTED" and fused_state != "HUMAN":
-            if self._state in ("RINGING", "DIALING", "ANSWERED_PENDING", "CONNECTED"):
+            if self._state in ("RINGING", "DIALING", "ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "CONNECTED"):
                 state = "ANSWERED_PENDING"
             else:
                 state = "RINGING" if self._state != "CONNECTED" else "CONNECTED"
@@ -2879,7 +2937,7 @@ class GVController(QObject):
         # Promote DIALING → RINGING when in-call UI appears
         if state == "RINGING" and self._state == "DIALING":
             self._emit_log("Ringing…")
-        if state == "ANSWERED_PENDING" and self._state not in {"ANSWERED_PENDING", "CONNECTED"}:
+        if state in {"ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE"} and self._state not in {"ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "CONNECTED"}:
             self._emit_log("Answer detected — AMD classifying (waiting for human audio pattern)…")
 
         # Map ENDED back to IDLE after a brief pause
@@ -2930,8 +2988,32 @@ class GVController(QObject):
             self._state = state
             self.state_changed.emit(self.slot_id, state)
             self._pulse_heartbeat()
+            self._capture_state_transition_diagnostics(state)
         if state != "DIALING" and self._dial_stuck_timer is not None:
             self._dial_stuck_timer.stop()
+
+    def _capture_state_transition_diagnostics(self, state: str) -> None:
+        phone = self._current_call_phone or self._pending_dial_phone
+        if not phone:
+            return
+        wanted = {
+            "RINGING": "state_ringing",
+            "ANSWERED_PENDING": "state_answered",
+            "CONNECTED_AUDIO_EVIDENCE": "state_connected_audio",
+            "CONNECTED": "state_connected",
+            "NO_ANSWER": "state_no_answer",
+            "ENDED": "state_ended",
+            "ENDED_MANUALLY": "state_ended",
+            "FAILED": "state_failed",
+        }
+        label = wanted.get(state)
+        if not label:
+            return
+        key = f"{label}:{phone}"
+        if key in self._state_diag_seen:
+            return
+        self._state_diag_seen.add(key)
+        QTimer.singleShot(100, lambda l=label: self._capture_dial_diagnostics(l))
 
     def _emit_log(self, msg: str) -> None:
         self.log_message.emit(self.slot_id, msg)

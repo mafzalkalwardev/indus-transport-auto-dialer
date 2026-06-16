@@ -23,7 +23,7 @@ from src.webengine_env import configure_webengine_environment
 configure_webengine_environment()
 
 from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QApplication, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
 from src.gv_accounts import load_accounts, profile_dir, has_session_marker
 from src.gv_controller import GVController
@@ -38,6 +38,7 @@ DEFAULT_NUMBERS = [
 ]
 
 TERMINAL_STATES = {"CONNECTED", "VOICEMAIL", "ENDED", "ENDED_MANUALLY", "FAILED", "NO_ANSWER", "BUSY"}
+ANSWERED_SUCCESS_STATES = {"ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE"}
 LIVE_TEST_CONFIRMATION = "I OWN OR HAVE PERMISSION TO CALL THESE NUMBERS"
 
 
@@ -188,6 +189,7 @@ class LiveCallSmoke:
         max_parallel: int | None = None,
         rate_limit_sec: float = 1.2,
         stop_on_failure: bool = False,
+        manual_connect_confirmation: bool = False,
     ) -> None:
         self.numbers = numbers
         self.call_timeout = call_timeout
@@ -210,6 +212,7 @@ class LiveCallSmoke:
         self.rate_limit_sec = max(1.0, float(rate_limit_sec or 1.2))
         self.stop_requested = False
         self.stop_on_failure = bool(stop_on_failure)
+        self.manual_connect_confirmation = bool(manual_connect_confirmation)
 
     def log(self, slot: int | None, message: str) -> None:
         stamp = datetime.now().isoformat(timespec="seconds")
@@ -357,6 +360,7 @@ class LiveCallSmoke:
         status = {
             "RINGING": "ringing",
             "ANSWERED_PENDING": "on-call",
+            "CONNECTED_AUDIO_EVIDENCE": "on-call",
             "CONNECTED": "on-call",
             "VOICEMAIL": "voicemail",
             "FAILED": "failed",
@@ -365,6 +369,10 @@ class LiveCallSmoke:
         if state == "CONNECTED":
             rec["final"] = "CONNECTED"
             self.schedule_hangup(slot, self.connected_hold, "connected hold complete")
+        elif state in ANSWERED_SUCCESS_STATES:
+            if rec.get("final") == "PENDING":
+                rec["final"] = state
+                self.schedule_hangup(slot, self.connected_hold, "answered hold complete")
         elif state == "VOICEMAIL":
             rec["final"] = "VOICEMAIL"
             self.schedule_hangup(slot, self.voicemail_hold, "voicemail detected")
@@ -416,11 +424,42 @@ class LiveCallSmoke:
         if not rec.get("call_clicked_at"):
             return
         state = self.controllers[slot].current_state
-        if state in ("DIALING", "RINGING", "IDLE", "UNKNOWN", "ANSWERED_PENDING"):
+        if state in ANSWERED_SUCCESS_STATES:
+            rec["final"] = state
+            self.log(slot, f"{state} after answer evidence")
+            self.controllers[slot].hangup()
+            self.release_slot(slot)
+            return
+        if self._confirm_connected_manually(slot, rec):
+            self.controllers[slot].hangup()
+            self.release_slot(slot)
+            return
+        if state in ("DIALING", "RINGING", "IDLE", "UNKNOWN"):
             rec["final"] = "NO_ANSWER"
             self.log(slot, f"NO_ANSWER after {self.call_timeout}s timeout")
             self.controllers[slot].hangup()
             self.release_slot(slot)
+
+    def _confirm_connected_manually(self, slot: int, rec: dict) -> bool:
+        if not (self.visible and self.manual_connect_confirmation):
+            return False
+        if not rec.get("call_clicked_at"):
+            return False
+        reply = QMessageBox.question(
+            None,
+            "Live call confirmation",
+            "Did the call connect on your phone? yes/no",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            rec["final"] = "CONNECTED_MANUAL_CONFIRMATION"
+            rec["manual_confirmation_at"] = datetime.now().isoformat(timespec="seconds")
+            self.log(slot, "CONNECTED by manual confirmation")
+            return True
+        rec["manual_confirmation_at"] = datetime.now().isoformat(timespec="seconds")
+        rec["manual_confirmation"] = "no"
+        return False
 
     def mark_pre_dial_timeout(self, slot: int, call_id: int) -> None:
         if self.active_by_slot.get(slot) != call_id:
@@ -595,7 +634,7 @@ def _run_crm_campaign(args: argparse.Namespace, accounts: list[dict]) -> int:
             final_counts[final] = final_counts.get(final, 0) + 1
             if final == "VOICEMAIL":
                 voicemail_count += 1
-            elif final in {"CONNECTED", "HUMAN"}:
+            elif final in {"CONNECTED", "HUMAN", "ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "CONNECTED_MANUAL_CONFIRMATION"}:
                 live_count += 1
         print(
             f"Campaign progress: voicemails={voicemail_count}/{target_voicemail}, "
@@ -691,6 +730,7 @@ def main() -> None:
         max_parallel=args.max_parallel if args.live_test_live_test else len(numbers),
         rate_limit_sec=args.rate_limit_sec if args.live_test_live_test else max(1.0, args.stagger_ms / 1000.0),
         stop_on_failure=bool(args.live_test_live_test),
+        manual_connect_confirmation=bool(args.visible),
     )
     panel = EmergencyStopPanel(smoke) if args.live_test_live_test else None
     if panel is not None:
