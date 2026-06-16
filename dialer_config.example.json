@@ -19,6 +19,10 @@
         "amd_early_decision_ms": 800,
         "amd_max_decision_ms": 2500,
         "amd_human_first_seconds": 5,
+        "amd_require_audio_human": true,
+        "amd_min_human_audio_score": 0.30,
+        "amd_safe_window_seconds": 5,
+        "amd_analysis_seconds": 8,
         "audio_device": "",
         "live_debug_mode": false,
         "dry_run_mode": false,
@@ -29,7 +33,8 @@
         "websocket_enabled": false,
         "websocket_port": 8765,
         "ui": {
-            "auto_open_panel_on_human": false
+            "auto_open_panel_on_human": false,
+            "agent_panel_delay_seconds": 0
         },
   "campaign_contact_idx": 0,
   "campaign_excel_path": ""
