@@ -1,5 +1,10 @@
 """Client-ready UI themes for FT Solutions Auto Dialer."""
 
+from __future__ import annotations
+
+from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtWidgets import QApplication
+
 # Human-readable call status labels (not developer jargon)
 STATUS_LABELS = {
     "IDLE": "Waiting",
@@ -52,6 +57,59 @@ def status_color(state: str) -> str:
     return STATUS_COLORS.get(state, "#64748b")
 
 
+def table_item_color(theme: str = DEFAULT_THEME) -> str:
+    return "#f1f5f9" if theme == "dark" else "#0f172a"
+
+
+def log_status_color(status: str, theme: str = DEFAULT_THEME) -> str:
+    if theme == "dark":
+        colors = {
+            "ENDED": "#4ade80",
+            "VOICEMAIL": "#fb923c",
+            "NO_ANSWER": "#94a3b8",
+            "BUSY": "#c084fc",
+            "ENDED_MANUALLY": "#94a3b8",
+            "FAILED": "#f87171",
+        }
+    else:
+        colors = {
+            "ENDED": "#15803d",
+            "VOICEMAIL": "#c2410c",
+            "NO_ANSWER": "#64748b",
+            "BUSY": "#7c3aed",
+            "ENDED_MANUALLY": "#64748b",
+            "FAILED": "#dc2626",
+        }
+    return colors.get(status, table_item_color(theme))
+
+
+def apply_theme(app: QApplication, name: str) -> None:
+    """Apply stylesheet and palette so Windows dark mode cannot wash out text."""
+    app.setStyleSheet(DARK_QSS if name == "dark" else LIGHT_QSS)
+    palette = QPalette()
+    if name == "dark":
+        palette.setColor(QPalette.ColorRole.Window, QColor("#1a2332"))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor("#e8ecf2"))
+        palette.setColor(QPalette.ColorRole.Base, QColor("#232f42"))
+        palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#1e293b"))
+        palette.setColor(QPalette.ColorRole.Text, QColor("#f1f5f9"))
+        palette.setColor(QPalette.ColorRole.Button, QColor("#2a3649"))
+        palette.setColor(QPalette.ColorRole.ButtonText, QColor("#e8ecf2"))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor("#2563eb"))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    else:
+        palette.setColor(QPalette.ColorRole.Window, QColor("#eef1f6"))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor("#0f172a"))
+        palette.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
+        palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#f8fafc"))
+        palette.setColor(QPalette.ColorRole.Text, QColor("#0f172a"))
+        palette.setColor(QPalette.ColorRole.Button, QColor("#ffffff"))
+        palette.setColor(QPalette.ColorRole.ButtonText, QColor("#0f172a"))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor("#dbeafe"))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#0f172a"))
+    app.setPalette(palette)
+
+
 # ── Primary theme: clean light UI for client delivery ─────────────────────────
 LIGHT_QSS = """
 QMainWindow, QDialog {
@@ -76,21 +134,27 @@ QFrame#loginCard {
     border-radius: 16px;
     padding: 8px;
 }
-QLabel { color: #1e293b; background: transparent; }
+QLabel { color: #0f172a; background: transparent; }
 QLabel#brandName {
     color: #1e3a5f;
     font-size: 16pt;
     font-weight: 700;
 }
 QLabel#brandTagline {
-    color: #64748b;
+    color: #475569;
     font-size: 9.5pt;
 }
-QLabel#headerUser { color: #475569; font-size: 10pt; }
-QLabel#muted  { color: #64748b; }
+QLabel#headerUser { color: #334155; font-size: 10pt; }
+QLabel#muted  { color: #475569; }
 QLabel#accent { color: #1d4ed8; font-weight: 600; }
 QLabel#warn   { color: #b45309; }
 QLabel#danger { color: #dc2626; }
+QLabel#statValue {
+    color: #0f172a;
+    font-size: 11pt;
+    font-weight: 700;
+    background: transparent;
+}
 QLabel#heroTitle {
     color: #1e3a5f;
     font-size: 14pt;
@@ -168,27 +232,60 @@ QPushButton#ghost:hover {
 
 QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
     background-color: #ffffff;
-    color: #1e293b;
-    border: 1px solid #c5cdd8;
+    color: #0f172a;
+    border: 1px solid #94a3b8;
     border-radius: 8px;
     padding: 9px 12px;
     selection-background-color: #bfdbfe;
+    selection-color: #0f172a;
 }
-QLineEdit:focus, QTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
+QSpinBox, QDoubleSpinBox {
+    min-height: 28px;
+    min-width: 72px;
+}
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+    background-color: #f1f5f9;
+    border: 1px solid #cbd5e1;
+    width: 18px;
+}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
+    background-color: #e2e8f0;
+}
+QComboBox QAbstractItemView {
+    background-color: #ffffff;
+    color: #0f172a;
+    selection-background-color: #dbeafe;
+    selection-color: #0f172a;
+}
+QLineEdit:focus, QTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
     border-color: #3b82f6;
 }
 
 QTableWidget {
     background-color: #ffffff;
-    color: #1e293b;
-    border: 1px solid #d8dee9;
+    color: #0f172a;
+    border: 1px solid #cbd5e1;
     border-radius: 10px;
-    gridline-color: #e8ecf2;
+    gridline-color: #e2e8f0;
     alternate-background-color: #f8fafc;
     selection-background-color: #dbeafe;
-    selection-color: #1e293b;
+    selection-color: #0f172a;
 }
-QTableWidget::item { padding: 8px 10px; }
+QTableWidget::item {
+    color: #0f172a;
+    background-color: #ffffff;
+    padding: 8px 10px;
+}
+QTableWidget::item:alternate {
+    background-color: #f8fafc;
+    color: #0f172a;
+}
+QTableWidget::item:selected {
+    background-color: #dbeafe;
+    color: #0f172a;
+}
 QHeaderView::section {
     background-color: #f8fafc;
     color: #475569;
@@ -237,13 +334,23 @@ QTabBar::tab:hover:!selected {
 }
 
 QGroupBox {
-    border: 1px solid #d8dee9;
+    border: 1px solid #cbd5e1;
     border-radius: 12px;
     margin-top: 16px;
     padding: 20px 16px 16px 16px;
     background-color: #ffffff;
     font-weight: 600;
+    color: #334155;
+}
+QGroupBox QLabel {
+    color: #0f172a;
+    background: transparent;
+}
+QGroupBox QLabel#muted {
     color: #475569;
+}
+QGroupBox QLabel#statValue {
+    color: #0f172a;
 }
 QGroupBox[connected="true"] {
     background-color: #f0fdf4;
@@ -278,12 +385,13 @@ QFrame#hline {
 }
 
 QTextEdit#console {
-    background-color: #f8fafc;
-    color: #334155;
-    border: 1px solid #d8dee9;
+    background-color: #ffffff;
+    color: #0f172a;
+    border: 1px solid #cbd5e1;
     border-radius: 8px;
-    font-family: "Segoe UI", Arial, sans-serif;
-    font-size: 9.5pt;
+    font-family: "Consolas", "Segoe UI", Arial, sans-serif;
+    font-size: 10pt;
+    padding: 8px;
 }
 QStatusBar {
     background: #ffffff;
@@ -320,6 +428,7 @@ QLabel#brandName { color: #93c5fd; font-size: 16pt; font-weight: 700; }
 QLabel#brandTagline { color: #94a3b8; }
 QLabel#muted { color: #94a3b8; }
 QLabel#accent { color: #93c5fd; }
+QLabel#statValue { color: #f1f5f9; font-size: 11pt; font-weight: 700; }
 QPushButton {
     background-color: #2a3649;
     color: #e8ecf2;
@@ -345,6 +454,18 @@ QLineEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
     border: 1px solid #425168;
     border-radius: 8px;
     padding: 9px 12px;
+    selection-background-color: #2563eb;
+    selection-color: #ffffff;
+}
+QSpinBox, QDoubleSpinBox {
+    min-height: 28px;
+    min-width: 72px;
+}
+QComboBox QAbstractItemView {
+    background-color: #232f42;
+    color: #f1f5f9;
+    selection-background-color: #2563eb;
+    selection-color: #ffffff;
 }
 QGroupBox {
     background-color: #232f42;
@@ -352,6 +473,13 @@ QGroupBox {
     border-radius: 12px;
     margin-top: 14px;
     padding: 16px;
+    color: #cbd5e1;
+}
+QGroupBox QLabel {
+    color: #e8ecf2;
+    background: transparent;
+}
+QGroupBox QLabel#muted {
     color: #94a3b8;
 }
 QGroupBox::title { color: #93c5fd; }
@@ -369,10 +497,26 @@ QTabBar::tab:selected {
 }
 QTableWidget {
     background-color: #232f42;
+    color: #f1f5f9;
     border: 1px solid #364357;
     border-radius: 10px;
     gridline-color: #364357;
     alternate-background-color: #1e293b;
+    selection-background-color: #1d4ed8;
+    selection-color: #ffffff;
+}
+QTableWidget::item {
+    color: #f1f5f9;
+    background-color: #232f42;
+    padding: 8px 10px;
+}
+QTableWidget::item:alternate {
+    background-color: #1e293b;
+    color: #f1f5f9;
+}
+QTableWidget::item:selected {
+    background-color: #1d4ed8;
+    color: #ffffff;
 }
 QHeaderView::section {
     background-color: #2a3649;
@@ -381,10 +525,13 @@ QHeaderView::section {
     padding: 10px;
 }
 QTextEdit#console {
-    background-color: #232f42;
-    color: #cbd5e1;
+    background-color: #1e293b;
+    color: #e8ecf2;
     border: 1px solid #364357;
     border-radius: 8px;
+    font-family: "Consolas", "Segoe UI", Arial, sans-serif;
+    font-size: 10pt;
+    padding: 8px;
 }
 QGroupBox#slotCard {
     background-color: #232f42;
