@@ -71,11 +71,19 @@ def test_call_button_status_accepts_matching_number():
     )
 
 
-def test_call_button_status_accepts_generic_call_button():
+def test_call_button_status_rejects_generic_call_button_without_target_proof():
+    ctrl = _controller_for("+12392849055")
+
+    assert not ctrl._call_button_status_matches_pending(
+        "call_button_ready|x=1220|y=165|aria=Call|text=call"
+    )
+
+
+def test_call_button_status_accepts_generic_call_button_with_matching_input():
     ctrl = _controller_for("+12392849055")
 
     assert ctrl._call_button_status_matches_pending(
-        "call_button_ready|x=1220|y=165|aria=Call|text=call"
+        "call_button_ready|x=1220|y=165|input_digits=12392849055|aria=Call|text=call"
     )
 
 
@@ -139,7 +147,7 @@ def test_first_dial_attempt_loads_prefilled_dial_url(monkeypatch):
 
     ctrl._ensure_calls_page_then_dial()
 
-    assert ctrl._page.loaded == ["https://voice.google.com/dial/+17085681794"]
+    assert ctrl._page.loaded == ["https://voice.google.com/u/0/calls?a=nc,%2B17085681794"]
     assert scheduled and scheduled[-1][0] == 2500
 
 
@@ -160,7 +168,7 @@ def test_first_dial_attempt_loads_calls_page_only_when_off_voice(monkeypatch):
 
     ctrl._ensure_calls_page_then_dial()
 
-    assert ctrl._page.loaded == ["https://voice.google.com/dial/+17085681794"]
+    assert ctrl._page.loaded == ["https://voice.google.com/u/0/calls?a=nc,%2B17085681794"]
     assert scheduled and scheduled[-1][0] == 2500
 
 
@@ -183,7 +191,7 @@ def test_disabled_native_field_falls_back_to_direct_dial_url(monkeypatch):
     ctrl._handle_retryable_dial_status("call_button_missing")
 
     assert ctrl._dial_url_variant == 1
-    assert ctrl._page.loaded == ["https://voice.google.com/u/0/calls?a=nc,%2B17085681794"]
+    assert ctrl._page.loaded == ["https://voice.google.com/u/0/calls"]
     assert scheduled and scheduled[-1][0] == 2500
 
 
@@ -205,7 +213,7 @@ def test_disabled_target_button_falls_back_to_direct_dial_url(monkeypatch):
     ctrl._handle_retryable_dial_status("call_button_disabled_for_target")
 
     assert ctrl._dial_url_variant == 1
-    assert ctrl._page.loaded == ["https://voice.google.com/u/0/calls?a=nc,%2B17085681794"]
+    assert ctrl._page.loaded == ["https://voice.google.com/u/0/calls"]
     assert scheduled and scheduled[-1][0] == 2500
 
 
@@ -252,6 +260,15 @@ def test_js_dial_supports_click_only_mode():
     assert "current === digits || current === dialDigits" in js
     assert "return inputReflectsDigits;" in js
     assert "return clickedDigits || inputReflectsDigits" not in js
+
+
+def test_js_dial_does_not_synthetic_click_final_call_button():
+    from src.gv_controller import _js_dial
+
+    js = _js_dial("+17085681794")
+
+    assert "call_button_ready|x=" in js
+    assert "call_button_clicked_js" not in js
 
 
 def test_clear_dial_field_reports_remaining_digits():

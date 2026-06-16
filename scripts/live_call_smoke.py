@@ -325,10 +325,23 @@ class LiveCallSmoke:
             self.active_by_slot.pop(slot, None)
             QTimer.singleShot(int(self.rate_limit_sec * 1000), lambda s=slot: self.assign_next(s))
             return
-        QTimer.singleShot(self.call_timeout * 1000, lambda s=slot, c=call_id: self.mark_no_answer(s, c))
+        QTimer.singleShot(
+            (self.call_timeout + 35) * 1000,
+            lambda s=slot, c=call_id: self.mark_pre_dial_timeout(s, c),
+        )
 
     def on_controller_log(self, slot: int, message: str) -> None:
         self.log(slot, message)
+        call_id = self.active_by_slot.get(slot)
+        rec = self.results.get(call_id) if call_id is not None else None
+        if rec is None:
+            return
+        if "Dial UI status: call_button_clicked" in message and not rec.get("call_clicked_at"):
+            rec["call_clicked_at"] = datetime.now().isoformat(timespec="seconds")
+            QTimer.singleShot(
+                self.call_timeout * 1000,
+                lambda s=slot, c=call_id: self.mark_no_answer(s, c),
+            )
 
     def on_state(self, slot: int, state: str) -> None:
         call_id = self.active_by_slot.get(slot)
@@ -400,12 +413,29 @@ class LiveCallSmoke:
         rec = self.results.get(call_id)
         if not rec or rec.get("final") != "PENDING":
             return
+        if not rec.get("call_clicked_at"):
+            return
         state = self.controllers[slot].current_state
         if state in ("DIALING", "RINGING", "IDLE", "UNKNOWN", "ANSWERED_PENDING"):
             rec["final"] = "NO_ANSWER"
             self.log(slot, f"NO_ANSWER after {self.call_timeout}s timeout")
             self.controllers[slot].hangup()
             self.release_slot(slot)
+
+    def mark_pre_dial_timeout(self, slot: int, call_id: int) -> None:
+        if self.active_by_slot.get(slot) != call_id:
+            return
+        rec = self.results.get(call_id)
+        if not rec or rec.get("final") != "PENDING" or rec.get("call_clicked_at"):
+            return
+        rec["final"] = "FAILED"
+        rec["failure_reason"] = "pre_dial_timeout_no_call_button_click"
+        self.log(slot, "FAILED: Google Voice did not become ready before live dial")
+        self.controllers[slot].hangup()
+        if self.stop_on_failure:
+            self.stop_requested = True
+            self.log(None, "Stopping guarded live test after first failed dial")
+        self.release_slot(slot)
 
     def release_slot(self, slot: int) -> None:
         self.active_by_slot.pop(slot, None)
