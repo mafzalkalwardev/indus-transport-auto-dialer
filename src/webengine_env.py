@@ -10,9 +10,6 @@ def configure_webengine_environment() -> None:
     os.environ.setdefault("QT_QUICK_BACKEND", "software")
     flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
     for flag in (
-        "--disable-gpu",
-        "--disable-gpu-compositing",
-        "--disable-gpu-sandbox",
         "--disable-features=VizDisplayCompositor",
         "--autoplay-policy=no-user-gesture-required",
         "--use-fake-ui-for-media-stream",
