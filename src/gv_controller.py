@@ -92,6 +92,25 @@ _JS_REFRESH_LAYOUT = """
 })();
 """
 
+_JS_CLICK_AT = """
+(function(x, y){
+  try {
+    var el = document.elementFromPoint(x, y);
+    if (!el) return 'no_element';
+    try { el.scrollIntoView({block:'center', inline:'center'}); } catch(e) {}
+    ['pointerdown','mousedown','mouseup','pointerup','click'].forEach(function(type){
+      var opts = {bubbles:true, cancelable:true, view:window, clientX:x, clientY:y, button:0};
+      var ev = type.indexOf('pointer')===0 && window.PointerEvent
+        ? new PointerEvent(type, opts)
+        : new MouseEvent(type, opts);
+      el.dispatchEvent(ev);
+    });
+    if (typeof el.click === 'function') el.click();
+    return 'clicked';
+  } catch(e) { return 'click_error:' + e; }
+})(%d, %d);
+"""
+
 _JS_READY_FOR_DIAL = """
 (function(){
   function vis(el){
@@ -1239,6 +1258,8 @@ class GVController(QObject):
         self._call_clicked_at = 0.0
         self._amd_answer_at = 0.0
         self._amd_decision_ms = 0
+        self._render_w = 800
+        self._render_h = 600
         self._whisper_pending = False
         self._whisper_thread = None
         self._min_answer_seconds = 10.0
@@ -1258,12 +1279,26 @@ class GVController(QObject):
         amd_mode = str(self._runtime_cfg.get("amd_mode", "heuristic") or "heuristic").lower()
         audio_enabled = bool(self._runtime_cfg.get("enable_ai_audio", False)) and amd_mode != "off"
         max_decision_s = float(self._runtime_cfg.get("amd_max_decision_ms", 2500)) / 1000.0
+        analysis_s = float(
+            self._runtime_cfg.get(
+                "amd_analysis_seconds",
+                max(8.0, max_decision_s),
+            )
+        )
+        require_audio_human = bool(self._runtime_cfg.get("amd_require_audio_human", True))
         return DetectionConfig(
             max_ring_seconds=float(self._runtime_cfg.get("call_timeout", 60)),
             enable_audio_detection=audio_enabled,
             enable_beep_detection=amd_mode != "off",
             human_first_seconds=float(self._runtime_cfg.get("amd_human_first_seconds", 5)),
-            answered_pending_seconds=max(4.0, max_decision_s),
+            answered_pending_seconds=analysis_s,
+            answered_pending_safe_min_seconds=float(
+                self._runtime_cfg.get("amd_safe_window_seconds", 5)
+            ),
+            require_audio_for_human=require_audio_human and audio_enabled,
+            min_human_audio_score=float(
+                self._runtime_cfg.get("amd_min_human_audio_score", 0.30)
+            ),
         )
 
     def apply_runtime_cfg(self, runtime_cfg: dict) -> None:
@@ -1339,10 +1374,37 @@ class GVController(QObject):
             self._profile = None  # type: ignore[assignment]
 
     def _page_alive(self) -> bool:
-        return getattr(self, "_page", None) is not None
+        return self.__dict__.get("_page") is not None
 
     def _pulse_heartbeat(self) -> None:
         self.heartbeat.emit(self.slot_id)
+
+    def _render_dimensions(self) -> tuple[int, int]:
+        w = int(self.__dict__.get("_render_w", 800) or 800)
+        h = int(self.__dict__.get("_render_h", 600) or 600)
+        page = self.__dict__.get("_page")
+        if page is not None and hasattr(page, "viewportSize"):
+            try:
+                vs = page.viewportSize()
+                if vs.width() > 0 and vs.height() > 0:
+                    w = max(w, int(vs.width()))
+                    h = max(h, int(vs.height()))
+            except Exception:
+                pass
+        view = self.__dict__.get("view")
+        if view is not None:
+            w = max(w, int(view.width() or 0))
+            h = max(h, int(view.height() or 0))
+        return max(w, 640), max(h, 480)
+
+    def _set_render_dimensions(self, width: int, height: int) -> None:
+        self._render_w = max(640, int(width))
+        self._render_h = max(480, int(height))
+        if self._page_alive() and hasattr(self.__dict__.get("_page"), "setViewportSize"):
+            try:
+                self.__dict__["_page"].setViewportSize(QSize(self._render_w, self._render_h))
+            except Exception:
+                pass
 
     def prepare_for_visible_display(self) -> None:
         """
@@ -1354,6 +1416,7 @@ class GVController(QObject):
         self.view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
         self.view.setMinimumSize(640, 480)
         self.view.resize(1024, 720)
+        self._set_render_dimensions(1024, 720)
         if hasattr(self._page, "setViewportSize"):
             try:
                 self._page.setViewportSize(QSize(1024, 720))
@@ -1430,6 +1493,7 @@ class GVController(QObject):
         self.view.setMinimumSize(1, 1)
         self.view.setMaximumSize(max_dim, max_dim)
         self.view.resize(800, 600)
+        self._set_render_dimensions(800, 600)
         self.view.move(-24000, -24000)
         if hasattr(self._page, "setViewportSize"):
             try:
@@ -1452,6 +1516,23 @@ class GVController(QObject):
         self._active_call = False
         self._decision_engine.stop_call()
 
+    def retry_dial_if_pending(self) -> None:
+        """Retry GV dial after the WebEngine view is resized (e.g. monitor opened)."""
+        if not self._active_call or not self._page_alive():
+            return
+        phone = self._pending_dial_phone or self._current_call_phone
+        if not phone:
+            return
+        if self._state not in {"DIALING", "RINGING", "IDLE"}:
+            return
+        self._native_key_attempts = 0
+        self._native_key_attempted = False
+        self._dial_step_attempts = 0
+        self._emit_log("Retrying dial with expanded Google Voice viewport…")
+        self._page.runJavaScript(_JS_FORCE_VISIBLE)
+        self._page.runJavaScript(_JS_REFRESH_LAYOUT)
+        QTimer.singleShot(300, self._ensure_calls_page_then_dial)
+
     def dial(self, phone: str) -> None:
         if not self._page_alive():
             return
@@ -1472,6 +1553,8 @@ class GVController(QObject):
         self._amd_decision_ms = 0
         self._whisper_pending = False
         self._decision_engine.start_call()
+        if bool(self._runtime_cfg.get("enable_ai_audio", True)):
+            self._audio_monitor.prime()
         self._set_state("DIALING")
         if bool(self._runtime_cfg.get("dry_run_mode", False)):
             self._emit_log("Dry-run mode: simulated dial, no Google Voice call placed")
@@ -1703,7 +1786,8 @@ class GVController(QObject):
                 return False
             x = int(mx.group(1))
             y = int(my.group(1))
-            if x < 0 or y < 0 or x > self.view.width() or y > self.view.height():
+            rw, rh = self._render_dimensions()
+            if x < 0 or y < 0 or x > rw or y > rh:
                 self._emit_log(
                     f"Dial UI native typing target off-screen ({x},{y}); waiting for dialpad"
                 )
@@ -1761,7 +1845,8 @@ class GVController(QObject):
                     return False
                 x = int(x_raw)
                 y = int(y_raw)
-                if x < 0 or y < 0 or x > self.view.width() or y > self.view.height():
+                rw, rh = self._render_dimensions()
+                if x < 0 or y < 0 or x > rw or y > rh:
                     self._emit_log(
                         f"Dial UI keypad target off-screen ({x},{y}); waiting for dialpad"
                     )
@@ -1829,16 +1914,34 @@ class GVController(QObject):
         return min_len < 7 or label_digits[-min_len:] == wanted[-min_len:]
 
     def _click_view_coords(self, x: int, y: int) -> bool:
-        """Click inside the WebEngine view (JS coords = view-local, not screen)."""
+        """Click inside the WebEngine page at viewport-local JS coordinates."""
         try:
             if x < 0 or y < 0:
                 return False
-            if x > self.view.width() or y > self.view.height():
+            view = self.__dict__.get("view")
+            rw, rh = self._render_dimensions()
+            if x > rw or y > rh:
                 return False
-            self.view.setFocus()
-            self.view.activateWindow()
+            vw = int(view.width() or 0) if view is not None else 0
+            vh = int(view.height() or 0) if view is not None else 0
+            if x > vw or y > vh:
+                page = self.__dict__.get("_page")
+                if page is not None:
+                    done = {"ok": False}
+
+                    def _on_js_click(result: object) -> None:
+                        done["ok"] = str(result or "").startswith("clicked")
+
+                    page.runJavaScript(_JS_CLICK_AT % (x, y), _on_js_click)
+                    QTest.qWait(80)
+                    if done["ok"]:
+                        return True
+            if view is None:
+                return False
+            view.setFocus()
+            view.activateWindow()
             QTest.mouseClick(
-                self.view,
+                view,
                 Qt.MouseButton.LeftButton,
                 Qt.KeyboardModifier.NoModifier,
                 QPoint(x, y),
@@ -2139,6 +2242,14 @@ class GVController(QObject):
             "HUMAN": "CONNECTED",
             "ANSWERED_PENDING": "ANSWERED_PENDING",
         }.get(fused_state, fused_state)
+
+        # Vicidial-style gate: agent UI only after AMD confirms HUMAN, not DOM timer alone.
+        if state == "CONNECTED" and fused_state != "HUMAN":
+            state = (
+                "ANSWERED_PENDING"
+                if self._state in {"DIALING", "RINGING", "ANSWERED_PENDING", "CONNECTED"}
+                else self._state
+            )
         if state == "UNKNOWN" and self._active_call:
             if self._state in {"DIALING", "RINGING", "ANSWERED_PENDING", "CONNECTED"}:
                 state = self._state
@@ -2250,31 +2361,31 @@ class GVController(QObject):
         # still ringing, so require a mature call window and repeated evidence.
         if raw_state == "CONNECTED_CTRL":
             self._ctrl_count += 1
-            if answer_window_ready and self._ctrl_count >= 4:
+            if answer_window_ready and self._ctrl_count >= 4 and fused_state == "HUMAN":
                 state = "CONNECTED"
+            elif self._state in {"ANSWERED_PENDING", "CONNECTED"} or fused_state == "ANSWERED_PENDING":
+                state = "ANSWERED_PENDING"
             else:
                 state = "RINGING" if self._state != "CONNECTED" else "CONNECTED"
         else:
             self._ctrl_count = 0
 
-        # Safety: do not churn into ringing/unknown when GV UI briefly
-        # disappears during early dialing. If we haven't reached the
-        # answer window yet, keep the last known state (usually RINGING).
-        if raw_state == "CONNECTED" and not answer_window_ready and fused_state != "HUMAN":
-            if self._state in ("RINGING", "DIALING"):
-                state = self._state
+        # Safety: GV in-call controls/timer are not human confirmation by themselves.
+        if raw_state == "CONNECTED" and fused_state != "HUMAN":
+            if self._state in ("RINGING", "DIALING", "ANSWERED_PENDING", "CONNECTED"):
+                state = "ANSWERED_PENDING"
             else:
                 state = "RINGING" if self._state != "CONNECTED" else "CONNECTED"
 
 
         if state == "CONNECTED" and self._state != "CONNECTED":
-            self._emit_log("Live answer detected — person answered")
+            self._emit_log("Human pickup confirmed by AMD — connecting agent")
 
         # Promote DIALING → RINGING when in-call UI appears
         if state == "RINGING" and self._state == "DIALING":
             self._emit_log("Ringing…")
         if state == "ANSWERED_PENDING" and self._state not in {"ANSWERED_PENDING", "CONNECTED"}:
-            self._emit_log("Answer detected — classifying human vs voicemail…")
+            self._emit_log("Answer detected — AMD classifying (waiting for human audio pattern)…")
 
         # Map ENDED back to IDLE after a brief pause
         if state == "ENDED":
