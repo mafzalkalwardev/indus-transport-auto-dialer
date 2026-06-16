@@ -1415,11 +1415,13 @@ class GVController(QObject):
             return
         self.view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
         self.view.setMinimumSize(640, 480)
-        self.view.resize(1024, 720)
-        self._set_render_dimensions(1024, 720)
+        width = max(1024, int(self.view.width() or 0))
+        height = max(720, int(self.view.height() or 0))
+        self.view.resize(width, height)
+        self._set_render_dimensions(width, height)
         if hasattr(self._page, "setViewportSize"):
             try:
-                self._page.setViewportSize(QSize(1024, 720))
+                self._page.setViewportSize(QSize(width, height))
             except Exception:
                 pass
         self.view.show()
@@ -1487,17 +1489,24 @@ class GVController(QObject):
     def prepare_for_background_rendering(self) -> None:
         """Keep Google Voice rendered off-screen with a small footprint."""
         max_dim = 16777215
+        viewport_w, viewport_h = 1280, 900
+        native_w, native_h = 1024, 720
         self.view.setParent(None)
         self.view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
         self.view.setWindowFlag(Qt.WindowType.Tool, True)
         self.view.setMinimumSize(1, 1)
         self.view.setMaximumSize(max_dim, max_dim)
-        self.view.resize(800, 600)
-        self._set_render_dimensions(800, 600)
-        self.view.move(-24000, -24000)
+        self.view.resize(native_w, native_h)
+        self._set_render_dimensions(viewport_w, viewport_h)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            rect = screen.availableGeometry()
+            self.view.move(rect.x() - native_w - 80, rect.y() + 40)
+        else:
+            self.view.move(-1200, 40)
         if hasattr(self._page, "setViewportSize"):
             try:
-                self._page.setViewportSize(QSize(800, 600))
+                self._page.setViewportSize(QSize(viewport_w, viewport_h))
             except Exception:
                 pass
         self.view.show()
@@ -1864,10 +1873,36 @@ class GVController(QObject):
                 if not self._click_view_coords(x, y):
                     return False
                 QTest.qWait(35)
+            self._type_number_input_from_status(status)
             self._emit_log("Dial UI status: native_keypad_clicked")
             return True
         except Exception as exc:
             self._emit_log(f"Native keypad click failed: {exc}")
+            return False
+
+    def _type_number_input_from_status(self, status: str) -> bool:
+        """Type the current number into GV's number field after keypad clicks."""
+        try:
+            match = re.search(r"(?:^|\|)input=(\d+),(-?\d+)", status)
+            if not match:
+                return False
+            x = int(match.group(1))
+            y = int(match.group(2))
+            phone = self._pending_dial_phone or self._current_call_phone
+            digits = re.sub(r"\D", "", phone)
+            if len(digits) == 11 and digits.startswith("1"):
+                digits = digits[1:]
+            if not digits:
+                return False
+            if not self._click_view_coords(x, y):
+                return False
+            QTest.keyClick(self.view, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+            QTest.keyClick(self.view, Qt.Key.Key_Backspace)
+            QTest.keyClicks(self.view, digits)
+            self._emit_log("Dial UI status: native_number_typed_after_keypad")
+            return True
+        except Exception as exc:
+            self._emit_log(f"Native number fallback failed: {exc}")
             return False
 
     def _type_number_os_from_status(self, status: str) -> bool:
@@ -1924,30 +1959,31 @@ class GVController(QObject):
                 return False
             vw = int(view.width() or 0) if view is not None else 0
             vh = int(view.height() or 0) if view is not None else 0
-            if x > vw or y > vh:
-                page = self.__dict__.get("_page")
-                if page is not None:
-                    done = {"ok": False}
-
-                    def _on_js_click(result: object) -> None:
-                        done["ok"] = str(result or "").startswith("clicked")
-
-                    page.runJavaScript(_JS_CLICK_AT % (x, y), _on_js_click)
-                    QTest.qWait(80)
-                    if done["ok"]:
-                        return True
             if view is None:
                 return False
+            click_x = min(x, max(0, (vw or rw) - 2))
+            click_y = min(y, max(0, (vh or rh) - 2))
+            page = self.__dict__.get("_page")
+            if page is not None:
+                done = {"ok": False}
+
+                def _on_js_click(result: object) -> None:
+                    done["ok"] = str(result or "").startswith("clicked")
+
+                page.runJavaScript(_JS_CLICK_AT % (x, y), _on_js_click)
+                QTest.qWait(80)
+                if done["ok"]:
+                    return True
             view.setFocus()
             view.activateWindow()
             QTest.mouseClick(
                 view,
                 Qt.MouseButton.LeftButton,
                 Qt.KeyboardModifier.NoModifier,
-                QPoint(x, y),
+                QPoint(click_x, click_y),
             )
             if self.__dict__.get("_allow_os_input", False):
-                self._click_view_coords_os(x, y)
+                self._click_view_coords_os(click_x, click_y)
             return True
         except Exception as exc:
             self._emit_log(f"View click failed: {exc}")
