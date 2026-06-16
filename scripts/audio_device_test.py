@@ -35,8 +35,11 @@ def main() -> None:
         chunk_seconds=max(0.2, float(args.seconds)),
     )
     features = analyzer.get_features_real_time()
+    recommended = AudioAnalyzer.recommend_capture_device()
     print("\nCapture result:")
     print(f"AI Audio: {features.backend_status}")
+    if recommended and not args.device:
+        print(f"recommended_device={recommended}  (set audio_device in dialer_config.json)")
     print(f"backend={features.backend_name}")
     print(f"rms={features.rms:.4f}")
     print(f"speech_like={features.has_speech_like}")

@@ -76,6 +76,11 @@ class CallAudioMonitor:
         )
         return self.last_features
 
+    def prime(self) -> None:
+        """Warm audio backend before AMD analysis on the next answered call."""
+        if self.enabled:
+            self.poll()
+
     def status_label(self) -> str:
         status = self.last_features.backend_status
         if status == "ON":

@@ -246,57 +246,99 @@ class AudioAnalyzer:
             return features
 
     def _capture_candidates(self, sd) -> list[int | str | None]:
-        """Keep candidate list short — probing many devices blocks the UI thread."""
+        """Prefer Windows loopback-friendly inputs before speaker WASAPI loopback."""
         resolved = self._resolve_device(sd)
         if resolved is not None:
             return [resolved]
+
+        candidates: list[int | str | None] = []
+        for idx, dev in enumerate(sd.query_devices()):
+            name = str(dev.get("name", "")).lower()
+            in_ch = int(dev.get("max_input_channels", 0) or 0)
+            if in_ch <= 0:
+                continue
+            if "stereo mix" in name:
+                candidates.append(idx)
+            elif "cable output" in name and in_ch == 2:
+                candidates.append(idx)
+
         try:
             default_output = sd.default.device[1]
-            if default_output is not None and default_output >= 0:
-                return [int(default_output)]
+            if default_output is not None and int(default_output) >= 0:
+                candidates.append(int(default_output))
         except Exception:
             pass
-        return [None]
+        candidates.append(None)
+        return list(dict.fromkeys(candidates))
 
     def _capture_device(self, sd, device: int | str | None) -> AudioFeatures:
-            channels = 1
-            try:
-                info = sd.query_devices(device)
-                output_channels = int(info.get("max_output_channels", 0) or 0)
-                input_channels = int(info.get("max_input_channels", 0) or 0)
-                if output_channels > 0 and input_channels <= 0:
-                    if "loopback" not in str(getattr(sd.WasapiSettings, "__init__", "")).lower():
-                        raise RuntimeError("output loopback is not supported by installed sounddevice")
-                channels = max(1, min(2, input_channels or output_channels))
-                sample_rate = int(float(info.get("default_samplerate", 0) or self.sample_rate))
-            except Exception:
-                output_channels = 0
-                sample_rate = self.sample_rate
-                channels = 1
+            info = sd.query_devices(device)
+            output_channels = int(info.get("max_output_channels", 0) or 0)
+            input_channels = int(info.get("max_input_channels", 0) or 0)
+            sample_rate = int(float(info.get("default_samplerate", 0) or self.sample_rate))
+            use_loopback = output_channels > 0 and input_channels <= 0
             extra = None
-            if output_channels > 0:
+            if use_loopback:
                 try:
                     extra = sd.WasapiSettings(loopback=True)
-                except Exception:
-                    raise RuntimeError("output loopback is not supported by installed sounddevice")
+                except Exception as exc:
+                    raise RuntimeError(
+                        "output loopback is not supported by installed sounddevice"
+                    ) from exc
+                channel_options = [
+                    c for c in (output_channels, 2, 1) if c and c > 0
+                ]
+            else:
+                channel_options = [
+                    c for c in (1, 2, min(input_channels, 2)) if c and c > 0
+                ]
+            channel_options = list(dict.fromkeys(channel_options))
+
             poll_seconds = min(self.chunk_seconds, 0.12)
-            frames = max(256, int(sample_rate * poll_seconds))
-            data = sd.rec(
-                frames,
-                samplerate=sample_rate,
-                channels=channels,
-                dtype="float32",
-                device=device,
-                blocking=True,
-                extra_settings=extra,
-            )
-            mono = [
-                float(sum(row) / len(row)) if hasattr(row, "__len__") else float(row)
-                for row in data
-            ]
-            self.backend_status = "ON"
-            self.backend_name = self._device_name(sd, device)
-            return self.analyze_from_pcm(mono, sample_rate=sample_rate)
+            last_error: Exception | None = None
+            for channels in channel_options:
+                try:
+                    frames = max(256, int(sample_rate * poll_seconds))
+                    data = sd.rec(
+                        frames,
+                        samplerate=sample_rate,
+                        channels=channels,
+                        dtype="float32",
+                        device=device,
+                        blocking=True,
+                        extra_settings=extra,
+                    )
+                    mono = [
+                        float(sum(row) / len(row)) if hasattr(row, "__len__") else float(row)
+                        for row in data
+                    ]
+                    self.backend_status = "ON"
+                    self.backend_name = self._device_name(sd, device)
+                    return self.analyze_from_pcm(mono, sample_rate=sample_rate)
+                except Exception as exc:
+                    last_error = exc
+            raise last_error or RuntimeError("no supported channel layout for device")
+
+    @staticmethod
+    def recommend_capture_device() -> str:
+        """Best-effort Windows capture device index for AMD loopback."""
+        try:
+            import sounddevice as sd  # type: ignore
+        except Exception:
+            return ""
+        for idx, dev in enumerate(sd.query_devices()):
+            name = str(dev.get("name", "")).lower()
+            in_ch = int(dev.get("max_input_channels", 0) or 0)
+            if in_ch <= 0:
+                continue
+            if "stereo mix" in name:
+                return str(idx)
+        for idx, dev in enumerate(sd.query_devices()):
+            name = str(dev.get("name", "")).lower()
+            in_ch = int(dev.get("max_input_channels", 0) or 0)
+            if "cable output" in name and in_ch == 2:
+                return str(idx)
+        return ""
 
     @staticmethod
     def list_audio_devices() -> list[dict[str, Any]]:
@@ -321,12 +363,6 @@ class AudioAnalyzer:
             if isinstance(self.device, str) and self.device.strip().isdigit():
                 return int(self.device.strip())
             return self.device
-        try:
-            default_output = sd.default.device[1]
-            if default_output is not None and default_output >= 0:
-                return int(default_output)
-        except Exception:
-            return None
         return None
 
     @staticmethod
