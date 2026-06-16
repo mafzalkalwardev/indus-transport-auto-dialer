@@ -833,8 +833,10 @@ def _js_dial(phone: str, *, click_only: bool = False) -> str:
   var dialDigits=(digits.length===11 && digits.charAt(0)==='1') ? digits.slice(1) : digits;
 
   function numberLooksEntered(current){{
-    return current.length >= Math.min(7, digits.length) &&
-      (sameNumber(current, digits) || sameNumber(current, dialDigits));
+    current = (current || '').replace(/\\D/g,'');
+    if(current === digits || current === dialDigits) return true;
+    if(current.length === 11 && current.charAt(0)==='1' && current.slice(1) === dialDigits) return true;
+    return false;
   }}
 
   function clearIfGarbled(){{
@@ -877,11 +879,8 @@ def _js_dial(phone: str, *, click_only: bool = False) -> str:
     var clickedDigits=clickKeypadDigits(dialDigits);
     if(!clickedDigits) return false;
     current=editableValue(inp).replace(/\\D/g,'');
-    var inputReflectsDigits = current.length >= Math.min(7, digits.length) &&
-      (current.indexOf(digits)!==-1 || digits.indexOf(current)!==-1 ||
-       current.slice(-10)===digits.slice(-10) ||
-       current.slice(-10)===dialDigits.slice(-10));
-    return clickedDigits || inputReflectsDigits;
+    var inputReflectsDigits = numberLooksEntered(current);
+    return inputReflectsDigits;
   }}
 
   function nativeKeyStatus(reason){{
@@ -1873,36 +1872,10 @@ class GVController(QObject):
                 if not self._click_view_coords(x, y):
                     return False
                 QTest.qWait(35)
-            self._type_number_input_from_status(status)
             self._emit_log("Dial UI status: native_keypad_clicked")
             return True
         except Exception as exc:
             self._emit_log(f"Native keypad click failed: {exc}")
-            return False
-
-    def _type_number_input_from_status(self, status: str) -> bool:
-        """Type the current number into GV's number field after keypad clicks."""
-        try:
-            match = re.search(r"(?:^|\|)input=(\d+),(-?\d+)", status)
-            if not match:
-                return False
-            x = int(match.group(1))
-            y = int(match.group(2))
-            phone = self._pending_dial_phone or self._current_call_phone
-            digits = re.sub(r"\D", "", phone)
-            if len(digits) == 11 and digits.startswith("1"):
-                digits = digits[1:]
-            if not digits:
-                return False
-            if not self._click_view_coords(x, y):
-                return False
-            QTest.keyClick(self.view, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
-            QTest.keyClick(self.view, Qt.Key.Key_Backspace)
-            QTest.keyClicks(self.view, digits)
-            self._emit_log("Dial UI status: native_number_typed_after_keypad")
-            return True
-        except Exception as exc:
-            self._emit_log(f"Native number fallback failed: {exc}")
             return False
 
     def _type_number_os_from_status(self, status: str) -> bool:
