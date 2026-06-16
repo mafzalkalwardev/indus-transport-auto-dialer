@@ -44,6 +44,7 @@ from src.gv_controller import (
 from src.ui_theme import (
     DARK_QSS, LIGHT_QSS, DEFAULT_THEME,
     status_label, status_color,
+    apply_theme, table_item_color, log_status_color,
 )
 from src.client_deploy import export_client_package, is_client_deployment
 from src.slot_watchdog import SlotWatchdog, webengine_total_memory_mb
@@ -169,6 +170,23 @@ def _hline() -> QFrame:
     line.setObjectName("hline")
     line.setFrameShape(QFrame.Shape.HLine)
     return line
+
+
+def _configure_data_table(table: QTableWidget, min_visible_rows: int = 5) -> None:
+    """Readable row height and minimum size for data tables."""
+    table.setMinimumHeight(min_visible_rows * 38 + 48)
+    vh = table.verticalHeader()
+    vh.setDefaultSectionSize(36)
+    vh.setMinimumSectionSize(32)
+    table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+
+
+def _table_item(text: str, theme: str = DEFAULT_THEME) -> QTableWidgetItem:
+    item = QTableWidgetItem(str(text))
+    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+    item.setForeground(QColor(table_item_color(theme)))
+    return item
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -836,6 +854,7 @@ class SlotMonitorDialog(QDialog):
         super().showEvent(event)
         QTimer.singleShot(100, self._refresh_view)
         QTimer.singleShot(500, self._refresh_view)
+        QTimer.singleShot(700, self.controller.retry_dial_if_pending)
 
     def _on_log(self, _sid: int, msg: str) -> None:
         self.lbl_monitor.setText(msg)
@@ -1026,6 +1045,8 @@ class MainWindow(QMainWindow):
         self._pacing_dial_history: list[int] = []
         self._slot_agent_handled: set[int] = set()
         self._ws_thread = None
+        self._dial_assign_count: int = 0
+        self._dial_started_at: float = 0.0
 
         # ── Timers ────────────────────────────────────────────────────────────
         self._dial_timer   = QTimer(self)    # fires to assign next number to free slot
@@ -1057,6 +1078,8 @@ class MainWindow(QMainWindow):
         self._build_header()
         self._build_tabs()
         self._build_status_bar()
+
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         # ── Boot controllers (deferred — UI shows first) ─────────────────────
         requested = int(cfg.get("n_slots", 1))
@@ -1139,6 +1162,8 @@ class MainWindow(QMainWindow):
         for ctrl in self._controllers:
             if ctrl is not None:
                 ctrl.apply_runtime_cfg(runtime)
+                if effective_enable_ai_audio(runtime):
+                    ctrl._audio_monitor.prime()
 
     def _configure_watchdog(self) -> None:
         stuck = float(self.cfg.get(
@@ -1648,19 +1673,19 @@ class MainWindow(QMainWindow):
 
         grp_settings = QGroupBox("Dialing options")
         slay = QHBoxLayout(grp_settings)
-        slay.addWidget(QLabel("Lines at once:"))
+        slay.addWidget(_label("Lines at once:", "muted"))
         self.spin_slots = QSpinBox()
         self.spin_slots.setRange(1, 5)
         self.spin_slots.setValue(self.cfg.get("n_slots", 1))
         slay.addWidget(self.spin_slots)
         slay.addSpacing(20)
-        slay.addWidget(QLabel("Call Timeout (sec):"))
+        slay.addWidget(_label("Call Timeout (sec):", "muted"))
         self.spin_timeout = QSpinBox()
         self.spin_timeout.setRange(20, 180)
         self.spin_timeout.setValue(self.cfg.get("call_timeout", 60))
         slay.addWidget(self.spin_timeout)
         slay.addSpacing(20)
-        slay.addWidget(QLabel("Cooldown between calls (sec):"))
+        slay.addWidget(_label("Cooldown between calls (sec):", "muted"))
         self.spin_cooldown = QDoubleSpinBox()
         self.spin_cooldown.setRange(1.0, 30)
         self.spin_cooldown.setSingleStep(0.5)
@@ -1669,7 +1694,7 @@ class MainWindow(QMainWindow):
             "Pause on each line after a call ends before dialing the next number")
         slay.addWidget(self.spin_cooldown)
         slay.addSpacing(20)
-        slay.addWidget(QLabel("Voicemail hangup (sec):"))
+        slay.addWidget(_label("Voicemail hangup (sec):", "muted"))
         self.spin_vm_hangup = QSpinBox()
         self.spin_vm_hangup.setRange(1, 15)
         self.spin_vm_hangup.setValue(int(self.cfg.get("voicemail_hangup_sec", 3)))
@@ -1712,10 +1737,10 @@ class MainWindow(QMainWindow):
         grp_prog = QGroupBox("Campaign progress")
         play = QVBoxLayout(grp_prog)
         stat_row = QHBoxLayout()
-        self.lbl_total   = _label("Total: —",     bold=True)
-        self.lbl_done    = _label("Completed: —", bold=True)
-        self.lbl_rem     = _label("Remaining: —", bold=True)
-        self.lbl_invalid = _label("Invalid: —",   bold=True)
+        self.lbl_total   = _label("Total: —",     "statValue", bold=True)
+        self.lbl_done    = _label("Completed: —", "statValue", bold=True)
+        self.lbl_rem     = _label("Remaining: —", "statValue", bold=True)
+        self.lbl_invalid = _label("Invalid: —",   "statValue", bold=True)
         for w in (self.lbl_total, self.lbl_done, self.lbl_rem, self.lbl_invalid):
             stat_row.addWidget(w)
             stat_row.addSpacing(20)
@@ -1747,7 +1772,8 @@ class MainWindow(QMainWindow):
         self.console = QTextEdit()
         self.console.setObjectName("console")
         self.console.setReadOnly(True)
-        self.console.setMaximumHeight(140)
+        self.console.setMinimumHeight(120)
+        self.console.setMaximumHeight(180)
         llay.addWidget(self.console)
         lay.addWidget(grp_log, stretch=1)
 
@@ -1795,6 +1821,8 @@ class MainWindow(QMainWindow):
         btn_start2.clicked.connect(self._start_dialing)
         btn_stop2  = _btn("Stop", "red")
         btn_stop2.clicked.connect(self._stop_dialing)
+        self.btn_start_live = btn_start2
+        self.btn_stop_live = btn_stop2
         brow.addWidget(btn_start2)
         brow.addWidget(btn_stop2)
         brow.addStretch()
@@ -1883,7 +1911,9 @@ class MainWindow(QMainWindow):
         self.log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.log_table.setAlternatingRowColors(True)
         self.log_table.verticalHeader().setVisible(False)
+        _configure_data_table(self.log_table, min_visible_rows=8)
         lay.addWidget(self.log_table, stretch=1)
+        self._refresh_logs()
         self._refresh_logs()
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -1969,6 +1999,7 @@ class MainWindow(QMainWindow):
             QAbstractItemView.EditTrigger.NoEditTriggers)
         self.gv_accounts_table.setAlternatingRowColors(True)
         self.gv_accounts_table.verticalHeader().setVisible(False)
+        _configure_data_table(self.gv_accounts_table, min_visible_rows=4)
         alay.addWidget(self.gv_accounts_table)
 
         acct_buttons = QHBoxLayout()
@@ -2014,13 +2045,25 @@ class MainWindow(QMainWindow):
         dlay.addWidget(self.chk_ai_audio)
         dlay.addWidget(QLabel("Audio device:"))
         self.audio_device_combo = QComboBox()
-        self.audio_device_combo.addItem("Default output loopback", "")
         try:
             from src.audio_analyzer import AudioAnalyzer
+            recommended = AudioAnalyzer.recommend_capture_device()
+            if recommended:
+                for dev in AudioAnalyzer.list_audio_devices():
+                    if str(dev.get("index")) == recommended:
+                        self.audio_device_combo.addItem(
+                            f"{dev['index']}: {dev['name']} (recommended)",
+                            recommended,
+                        )
+                        break
+            self.audio_device_combo.addItem("Auto-detect (Stereo Mix / loopback)", "")
             for dev in AudioAnalyzer.list_audio_devices():
                 if dev.get("max_output_channels", 0) or dev.get("max_input_channels", 0):
+                    data = str(dev["index"])
+                    if self.audio_device_combo.findData(data) >= 0:
+                        continue
                     label = f"{dev['index']}: {dev['name']}"
-                    self.audio_device_combo.addItem(label, str(dev["index"]))
+                    self.audio_device_combo.addItem(label, data)
         except Exception:
             self.audio_device_combo.addItem("NO BACKEND", "")
         saved_device = str(self.cfg.get("audio_device", "") or "")
@@ -2197,6 +2240,7 @@ class MainWindow(QMainWindow):
         self._gv_accounts = load_gv_accounts()
         if not hasattr(self, "gv_accounts_table"):
             return
+        theme = self.cfg.get("theme", DEFAULT_THEME)
         self.gv_accounts_table.setRowCount(0)
         for idx, acct in enumerate(self._gv_accounts, start=1):
             row = self.gv_accounts_table.rowCount()
@@ -2209,9 +2253,7 @@ class MainWindow(QMainWindow):
                 acct.get("profile", ""),
             ]
             for col, val in enumerate(vals):
-                item = QTableWidgetItem(str(val))
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                self.gv_accounts_table.setItem(row, col, item)
+                self.gv_accounts_table.setItem(row, col, _table_item(val, theme))
         self._refresh_slot_titles()
 
     def _refresh_slot_titles(self):
@@ -2729,6 +2771,43 @@ class MainWindow(QMainWindow):
             self._log(f"[Slot {sid}] Dial stuck 35s+ — auto retrying Call button…")
             ctrl.retry_start_call()
 
+        if self._dial_started_at <= 0:
+            return
+        elapsed = _now() - self._dial_started_at
+        if elapsed < 45:
+            return
+        active = len(self._slot_phone)
+        if active > 0 or self._dial_assign_count > 0:
+            return
+        busy_states = {
+            "DIALING", "RINGING", "ANSWERED_PENDING", "CONNECTED", "VOICEMAIL", "LOADING",
+        }
+        if any(c and c.current_state in busy_states for c in self._controllers):
+            return
+        remaining = max(0, len(self._contacts) - self._contact_idx)
+        if remaining <= 0 and self._retry_queue.pending_count() <= 0:
+            return
+        not_ready = []
+        for i, ctrl in enumerate(self._controllers):
+            if ctrl is None:
+                not_ready.append(f"Line {i + 1} (not loaded)")
+                continue
+            if ctrl.current_state not in ("IDLE", "ENDED", "ENDED_MANUALLY", "READY"):
+                not_ready.append(
+                    f"Line {i + 1} ({status_label(ctrl.current_state)})")
+            elif not self._slot_is_ready(i):
+                wait = int(self._slot_cooldown_until.get(i, 0) - _now())
+                not_ready.append(f"Line {i + 1} (cooldown {max(wait, 0)}s)")
+        hint = (
+            "Dialing waiting — no calls assigned yet. "
+            "Check Google Voice lines are Ready in Live Calls."
+        )
+        if not_ready:
+            hint += " " + "; ".join(not_ready[:3])
+        self.statusBar().showMessage(hint)
+        if int(elapsed) % 45 < 11:
+            self._log(hint)
+
     def _retry_slot_dial(self, slot_id: int) -> None:
         ctrl = self._get_ctrl(slot_id)
         if ctrl is None:
@@ -2940,6 +3019,8 @@ class MainWindow(QMainWindow):
 
         self._campaign_generation += 1
         self._running      = True
+        self._dial_assign_count = 0
+        self._dial_started_at = _now()
         resume = self._maybe_offer_campaign_resume()
         if not resume:
             self._contact_idx = 0
@@ -2952,8 +3033,7 @@ class MainWindow(QMainWindow):
             if ctrl:
                 ctrl.set_audio_muted(True)
         self._configure_watchdog()
-        self.btn_start.setEnabled(False)
-        self.btn_stop.setEnabled(True)
+        self._sync_dial_buttons(True)
         self.statusBar().showMessage("Dialing in progress…")
         self._log(
             f"Dialing started — {n} line(s), {cd:.1f}s pause between calls per line")
@@ -2992,8 +3072,7 @@ class MainWindow(QMainWindow):
             self._watchdog.record_state(sid, "IDLE")
             self._update_card(sid, "IDLE", "")
         self._refresh_dialer_counts()
-        self.btn_start.setEnabled(True)
-        self.btn_stop.setEnabled(False)
+        self._sync_dial_buttons(False)
         self.statusBar().showMessage("Dialing stopped")
         self._log("Dialing stopped")
         log_info(
@@ -3046,6 +3125,7 @@ class MainWindow(QMainWindow):
                 continue
             self._dial_on_slot(ctrl, phone, name, attempt)
             assigned += 1
+            self._dial_assign_count += 1
 
         for phone, name, attempt in deferred_retries:
             self._retry_queue.requeue(phone, name, attempt, 2.0)
@@ -3063,6 +3143,7 @@ class MainWindow(QMainWindow):
                 self._save_campaign_progress()
             self._dial_on_slot(ctrl, phone, name, 0)
             assigned += 1
+            self._dial_assign_count += 1
 
         if assigned == 0 and self._running:
             next_ready = min(
@@ -3237,8 +3318,7 @@ class MainWindow(QMainWindow):
         self._stuck_dial_timer.stop()
         self.cfg["campaign_contact_idx"] = 0
         _save_cfg(self.cfg)
-        self.btn_start.setEnabled(True)
-        self.btn_stop.setEnabled(False)
+        self._sync_dial_buttons(False)
         self.statusBar().showMessage("Campaign complete")
         self._log("All contacts in this list have been dialed.")
         QMessageBox.information(self, "Done", "All contacts have been dialed!")
@@ -3327,23 +3407,33 @@ class MainWindow(QMainWindow):
 
         self._watchdog.record_state(slot_id, state)
         phone = self._slot_phone.get(slot_id, "")
-        if state in ("RINGING", "ANSWERED_PENDING"):
-            self._mark_call_time(slot_id, "ringing_at")
-        elif state == "CONNECTED":
-            self._mark_call_time(slot_id, "connected_at")
         disp  = fmt_display(phone[2:]) if phone.startswith("+1") and len(phone) == 12 \
             else phone
+        if state in ("RINGING", "ANSWERED_PENDING"):
+            self._mark_call_time(slot_id, "ringing_at")
+            if state == "ANSWERED_PENDING":
+                self.statusBar().showMessage(
+                    f"Classifying answer — Line {slot_id + 1}: {disp}")
+        elif state == "CONNECTED":
+            self._mark_call_time(slot_id, "connected_at")
         self._update_card(slot_id, state, phone)
         self._log(f"[Slot {slot_id}] → {state}  {disp}")
 
         if state == "CONNECTED":
-            self.statusBar().showMessage(
-                f"Live call — Line {slot_id + 1}: {disp}")
-            self._focus_answered_slot(slot_id)
             ui_cfg = self.cfg.get("ui") if isinstance(self.cfg.get("ui"), dict) else {}
-            auto_listen = bool(ui_cfg.get("auto_open_panel_on_human", False))
-            if auto_listen and effective_enable_ai_audio(self.cfg):
-                self._open_slot_monitor(slot_id)
+            panel_delay_ms = int(float(ui_cfg.get("agent_panel_delay_seconds", 0)) * 1000)
+
+            def _show_connected(sid=slot_id, d=disp, delay=panel_delay_ms):
+                self.statusBar().showMessage(f"Live call — Line {sid + 1}: {d}")
+                self._focus_answered_slot(sid)
+                auto_listen = bool(ui_cfg.get("auto_open_panel_on_human", False))
+                if auto_listen and effective_enable_ai_audio(self.cfg):
+                    self._open_slot_monitor(sid)
+
+            if panel_delay_ms > 0:
+                QTimer.singleShot(panel_delay_ms, _show_connected)
+            else:
+                _show_connected()
             wait_sec = float(self.cfg.get("target_agent_wait_seconds", 3))
             token = self._slot_call_token.get(slot_id, 0)
             gen = self._campaign_generation
@@ -3515,14 +3605,8 @@ class MainWindow(QMainWindow):
         self.log_fail.setText(f"Failed: {fail}")
 
         self.log_table.setRowCount(0)
-        STATUS_COLORS_DARK = {
-            "ENDED":     "#00e676",
-            "VOICEMAIL": "#ff6b35",
-            "NO_ANSWER": "#8b949e",
-            "BUSY":      "#a855f7",
-            "ENDED_MANUALLY": "#8b949e",
-            "FAILED":    "#ff4444",
-        }
+        theme = self.cfg.get("theme", DEFAULT_THEME)
+        default_fg = QColor(table_item_color(theme))
         for r in reversed(filtered):
             row = self.log_table.rowCount()
             self.log_table.insertRow(row)
@@ -3537,11 +3621,13 @@ class MainWindow(QMainWindow):
                 r.get("dialed_at", "") or "—",
                 r.get("connected_at", "") or "—",
             ]
+            status_fg = QColor(log_status_color(st, theme))
             for col, val in enumerate(vals):
-                item = QTableWidgetItem(str(val))
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                if st in STATUS_COLORS_DARK:
-                    item.setForeground(QColor(STATUS_COLORS_DARK[st]))
+                item = _table_item(val, theme)
+                if col == 2 and st:
+                    item.setForeground(status_fg)
+                else:
+                    item.setForeground(default_fg)
                 self.log_table.setItem(row, col, item)
 
     def _export_logs(self):
@@ -3788,16 +3874,38 @@ class MainWindow(QMainWindow):
     # ── Theme / settings ──────────────────────────────────────────────────────
 
     def _toggle_theme(self):
-        current = self.cfg.get("theme", "dark")
+        current = self.cfg.get("theme", DEFAULT_THEME)
         self._set_theme("light" if current == "dark" else "dark")
+
+    def _sync_dial_buttons(self, running: bool) -> None:
+        for btn_start in (getattr(self, "btn_start", None),
+                          getattr(self, "btn_start_live", None)):
+            if btn_start is not None:
+                btn_start.setEnabled(not running)
+        for btn_stop in (getattr(self, "btn_stop", None),
+                         getattr(self, "btn_stop_live", None)):
+            if btn_stop is not None:
+                btn_stop.setEnabled(running)
+
+    def _on_tab_changed(self, index: int) -> None:
+        widget = self.tabs.widget(index)
+        if widget is getattr(self, "tab_logs", None):
+            self._refresh_logs()
+        elif widget is getattr(self, "tab_settings", None):
+            self._refresh_gv_accounts()
 
     def _set_theme(self, name: str):
         self.cfg["theme"] = name
         _save_cfg(self.cfg)
-        QApplication.instance().setStyleSheet(
-            DARK_QSS if name == "dark" else LIGHT_QSS)
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, name)
         self._theme_btn.setText(
             "Light mode" if name == "dark" else "Dark mode")
+        if hasattr(self, "log_table"):
+            self._apply_log_filter()
+        if hasattr(self, "gv_accounts_table"):
+            self._refresh_gv_accounts()
 
     def _save_settings(self):
         self.cfg["n_slots"] = self.settings_slots.value()
@@ -3858,8 +3966,9 @@ class DialerApp:
         self._stack.resize(1000, 680)
 
         theme = self.cfg.get("theme", DEFAULT_THEME)
-        QApplication.instance().setStyleSheet(
-            DARK_QSS if theme == "dark" else LIGHT_QSS)
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, theme)
 
         self._route_startup()
 
