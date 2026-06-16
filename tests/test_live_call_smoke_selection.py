@@ -86,3 +86,34 @@ def test_live_test_confirmation_phrase_is_stable():
         live_call_smoke.LIVE_TEST_CONFIRMATION
         == "I OWN OR HAVE PERMISSION TO CALL THESE NUMBERS"
     )
+
+
+def test_visible_failed_state_can_be_overridden_by_manual_confirmation(monkeypatch):
+    released = []
+    hung_up = []
+
+    smoke = live_call_smoke.LiveCallSmoke.__new__(live_call_smoke.LiveCallSmoke)
+    smoke.active_by_slot = {0: 0}
+    smoke.results = {
+        0: {
+            "phone": "+15127616455",
+            "states": [],
+            "final": "PENDING",
+            "call_clicked_at": "2026-06-16T13:59:24",
+        }
+    }
+    smoke.controllers = [type("Controller", (), {"hangup": lambda self: hung_up.append(True)})()]
+    smoke.stop_on_failure = True
+    smoke.stop_requested = False
+    smoke.log = lambda _slot, _message: None
+    smoke.release_slot = lambda slot: released.append(slot)
+    smoke._confirm_connected_manually = lambda _slot, rec: rec.__setitem__(
+        "final", "CONNECTED_MANUAL_CONFIRMATION"
+    ) or True
+
+    smoke.on_state(0, "FAILED")
+
+    assert smoke.results[0]["final"] == "CONNECTED_MANUAL_CONFIRMATION"
+    assert smoke.stop_requested is False
+    assert hung_up == [True]
+    assert released == [0]

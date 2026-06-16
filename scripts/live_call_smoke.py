@@ -377,6 +377,14 @@ class LiveCallSmoke:
             rec["final"] = "VOICEMAIL"
             self.schedule_hangup(slot, self.voicemail_hold, "voicemail detected")
         elif state in ("NO_ANSWER", "ENDED", "ENDED_MANUALLY", "FAILED", "BUSY"):
+            if (
+                state in {"NO_ANSWER", "FAILED"}
+                and rec.get("final") == "PENDING"
+                and self._confirm_connected_manually(slot, rec)
+            ):
+                self.controllers[slot].hangup()
+                self.release_slot(slot)
+                return
             if rec.get("final") == "PENDING":
                 rec["final"] = state
             if self.stop_on_failure and state == "FAILED":
