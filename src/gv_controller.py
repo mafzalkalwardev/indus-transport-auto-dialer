@@ -1012,6 +1012,29 @@ _JS_CLEAR_DIAL_FIELD = """
     if('value' in el) return el.value || '';
     return el.innerText || el.textContent || '';
   }
+  function roots(){
+    var out=[document];
+    var seen=new Set(out);
+    for(var i=0;i<out.length;i++){
+      var nodes=[];
+      try{ nodes=Array.from(out[i].querySelectorAll('*')); }catch(e){}
+      for(var n=0;n<nodes.length;n++){
+        var sr=nodes[n].shadowRoot;
+        if(sr && !seen.has(sr)){
+          seen.add(sr);
+          out.push(sr);
+        }
+      }
+    }
+    return out;
+  }
+  function qsa(sel){
+    var found=[];
+    roots().forEach(function(root){
+      try{ found=found.concat(Array.from(root.querySelectorAll(sel))); }catch(e){}
+    });
+    return found;
+  }
   function setNativeVal(el,val){
     try{
       if(el.isContentEditable || !('value' in el)){
@@ -1022,28 +1045,42 @@ _JS_CLEAR_DIAL_FIELD = """
           if(val) document.execCommand('insertText', false, val);
         }
         if(!val){ el.textContent=''; }
-        el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:val||''}));
+        try{ el.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,cancelable:true,inputType:'deleteContentBackward',data:null})); }catch(e){}
+        try{ el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'deleteContentBackward',data:null})); }catch(e){ el.dispatchEvent(new Event('input',{bubbles:true})); }
+        el.dispatchEvent(new Event('change',{bubbles:true}));
         return;
       }
       var proto=el.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;
       var setter=Object.getOwnPropertyDescriptor(proto,'value').set;
+      el.focus();
+      try{ el.select(); }catch(e){}
       setter.call(el, val || '');
-      el.dispatchEvent(new Event('input',{bubbles:true}));
+      try{ el.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,cancelable:true,inputType:'deleteContentBackward',data:null})); }catch(e){}
+      try{ el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'deleteContentBackward',data:null})); }catch(e){ el.dispatchEvent(new Event('input',{bubbles:true})); }
       el.dispatchEvent(new Event('change',{bubbles:true}));
     }catch(e){ if('value' in el) el.value=val||''; }
   }
-  var inputs=Array.from(document.querySelectorAll('input,textarea,[contenteditable="true"],[role="textbox"],[role="combobox"]'));
+  var inputs=qsa('input,textarea,[contenteditable="true"],[contenteditable=""],[role="textbox"],[role="combobox"]');
+  var candidate=null;
   for(var i=0;i<inputs.length;i++){
     var el=inputs[i];
     if(!visible(el)) continue;
-    var bits=(el.getAttribute('aria-label')||'')+(el.getAttribute('placeholder')||'');
+    var bits=((el.getAttribute('aria-label')||'')+' '+(el.getAttribute('placeholder')||'')+' '+(el.innerText||el.textContent||'')).toLowerCase();
     if(bits.toLowerCase().indexOf('call as')!==-1) continue;
+    var valueDigits=editableValue(el).replace(/\\D/g,'');
     if((el.getAttribute('type')||'').toLowerCase()==='tel' ||
        bits.toLowerCase().indexOf('number')!==-1 ||
-       bits.toLowerCase().indexOf('name')!==-1){
-      setNativeVal(el,'');
-      return 'cleared';
+       bits.toLowerCase().indexOf('name')!==-1 ||
+       valueDigits.length > 0){
+      candidate=el;
+      if(valueDigits.length > 0) break;
     }
+  }
+  if(candidate){
+    setNativeVal(candidate,'');
+    var remaining=editableValue(candidate).replace(/\\D/g,'');
+    if(!remaining) return 'cleared|value=';
+    return 'clear_failed|value='+remaining.slice(0,40);
   }
   return 'no_input';
 })();
@@ -1806,9 +1843,8 @@ class GVController(QObject):
                 digits = digits[1:]
             if not digits:
                 return False
-            if self._page_alive():
-                self._page.runJavaScript(_JS_CLEAR_DIAL_FIELD)
-                QTest.qWait(120)
+            if not self._clear_dial_field_before_native_input(status):
+                return False
             self._native_key_attempts = getattr(self, "_native_key_attempts", 0) + 1
             self._native_key_attempted = self._native_key_attempts >= 3
             if not self._click_view_coords(x, y):
@@ -1860,9 +1896,8 @@ class GVController(QObject):
                     )
                     return False
                 parsed.append((digit, x, y))
-            if self._page_alive():
-                self._page.runJavaScript(_JS_CLEAR_DIAL_FIELD)
-                QTest.qWait(120)
+            if not self._clear_dial_field_before_native_input(status):
+                return False
             self._native_key_attempts = getattr(self, "_native_key_attempts", 0) + 1
             self._native_key_attempted = self._native_key_attempts >= 3
             if self.__dict__.get("_allow_os_input", False):
@@ -1877,6 +1912,41 @@ class GVController(QObject):
         except Exception as exc:
             self._emit_log(f"Native keypad click failed: {exc}")
             return False
+
+    def _clear_dial_field_before_native_input(self, status: str = "") -> bool:
+        """Clear GV's dial field and verify it is empty before native input."""
+        if not self._page_alive():
+            return False
+
+        def run_clear() -> str:
+            done = {"status": ""}
+
+            def _on_clear(result: object) -> None:
+                done["status"] = str(result or "")
+
+            self._page.runJavaScript(_JS_CLEAR_DIAL_FIELD, _on_clear)
+            QTest.qWait(140)
+            return done["status"]
+
+        result = run_clear()
+        if result.startswith("cleared|value=") or result == "no_input":
+            return True
+
+        match = re.search(r"(?:^|\|)input=(\d+),(-?\d+)", status or "")
+        if match:
+            x = int(match.group(1))
+            y = int(match.group(2))
+            rw, rh = self._render_dimensions()
+            if 0 <= x <= rw and 0 <= y <= rh and self._click_view_coords(x, y):
+                QTest.keyClick(self.view, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+                QTest.keyClick(self.view, Qt.Key.Key_Backspace)
+                QTest.qWait(80)
+                result = run_clear()
+                if result.startswith("cleared|value=") or result == "no_input":
+                    return True
+
+        self._emit_log(f"Dial UI status: clear_failed_before_input|{result}")
+        return False
 
     def _type_number_os_from_status(self, status: str) -> bool:
         try:

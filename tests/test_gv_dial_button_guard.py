@@ -191,6 +191,7 @@ def test_native_keypad_status_clicks_each_digit():
     ctrl._native_key_attempted = False
     ctrl._emit_log = lambda _msg: None
     ctrl._page = _FakePage("https://voice.google.com/u/0/calls")
+    ctrl._clear_dial_field_before_native_input = lambda _status: True
     clicked = []
     ctrl._click_view_coords = lambda x, y: clicked.append((x, y)) or True
 
@@ -198,6 +199,23 @@ def test_native_keypad_status_clicks_each_digit():
         "keypad_needs_native_clicks|reason=disabled|input=4,5|coords=7,10,20;0,30,40;8,50,60;5,70,80;6,90,100;8,110,120;1,130,140;7,150,160;9,170,180;4,190,200"
     )
     assert clicked == [(10, 20), (30, 40), (50, 60), (70, 80), (90, 100), (110, 120), (130, 140), (150, 160), (170, 180), (190, 200)]
+
+
+def test_native_keypad_does_not_append_when_clear_fails():
+    ctrl = _controller_for("+17085681794")
+    ctrl.view = _FakeView()
+    ctrl._native_key_attempts = 0
+    ctrl._native_key_attempted = False
+    ctrl._emit_log = lambda _msg: None
+    ctrl._page = _FakePage("https://voice.google.com/u/0/calls")
+    ctrl._clear_dial_field_before_native_input = lambda _status: False
+    clicked = []
+    ctrl._click_view_coords = lambda x, y: clicked.append((x, y)) or True
+
+    assert not ctrl._click_keypad_from_status(
+        "keypad_needs_native_clicks|reason=disabled|input=4,5|coords=7,10,20;0,30,40;8,50,60;5,70,80;6,90,100;8,110,120;1,130,140;7,150,160;9,170,180;4,190,200"
+    )
+    assert clicked == []
 
 
 def test_js_dial_supports_click_only_mode():
@@ -209,6 +227,13 @@ def test_js_dial_supports_click_only_mode():
     assert "current === digits || current === dialDigits" in js
     assert "return inputReflectsDigits;" in js
     assert "return clickedDigits || inputReflectsDigits" not in js
+
+
+def test_clear_dial_field_reports_remaining_digits():
+    from src.gv_controller import _JS_CLEAR_DIAL_FIELD
+
+    assert "clear_failed|value=" in _JS_CLEAR_DIAL_FIELD
+    assert "shadowRoot" in _JS_CLEAR_DIAL_FIELD
 
 
 def test_retry_start_call_does_not_reenter_number(monkeypatch):
