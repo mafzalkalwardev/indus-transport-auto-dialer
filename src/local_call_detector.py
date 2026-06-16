@@ -85,6 +85,10 @@ class DetectionConfig:
     enable_audio_detection: bool = True
     enable_beep_detection: bool = True
 
+    # Vicidial-style gate: never promote HUMAN from DOM timer/controls alone.
+    require_audio_for_human: bool = True
+    min_human_audio_score: float = 0.30
+
     # Debounce
     min_state_hold_seconds: float = 2.0
     decision_stability_window: int = 3  # require same raw decision N polls
@@ -171,6 +175,52 @@ class LocalCallDetector:
         self._human_detector = HumanDetector()
         self._voicemail_detector = VoicemailDetector()
 
+    def _human_audio_score(
+        self,
+        *,
+        has_speech_like: bool,
+        speech_duration_seconds: float,
+        human_greeting_detected: bool,
+        short_speech_burst_detected: bool,
+        vad_confidence: float,
+        transcript: str,
+    ) -> float:
+        score = 0.0
+        if human_greeting_detected or self._human_detector.has_human_keyword(transcript):
+            score += 0.45
+        if short_speech_burst_detected:
+            score += 0.35
+        if has_speech_like and 0.15 <= speech_duration_seconds <= self.config.human_short_speech_max_duration_seconds:
+            score += 0.25
+        if vad_confidence >= 0.45:
+            score += 0.15
+        return min(1.0, score)
+
+    def _passes_human_audio_gate(
+        self,
+        *,
+        has_speech_like: bool,
+        speech_duration_seconds: float,
+        human_greeting_detected: bool,
+        short_speech_burst_detected: bool,
+        vad_confidence: float,
+        transcript: str,
+    ) -> bool:
+        if not self.config.require_audio_for_human:
+            return True
+        if not self.config.enable_audio_detection:
+            return False
+        return (
+            self._human_audio_score(
+                has_speech_like=has_speech_like,
+                speech_duration_seconds=speech_duration_seconds,
+                human_greeting_detected=human_greeting_detected,
+                short_speech_burst_detected=short_speech_burst_detected,
+                vad_confidence=vad_confidence,
+                transcript=transcript,
+            )
+            >= self.config.min_human_audio_score
+        )
 
     def reset_for_new_call(self) -> None:
         self._history.clear()
@@ -369,16 +419,24 @@ class LocalCallDetector:
                         **{**current_debug_base, "ui_state": "CLASSIFYING"},
                     )
 
-                if answer_elapsed_seconds <= self.config.human_first_seconds and (
-                    human_greeting_detected
-                    or short_speech_burst_detected
-                    or (speech_duration_seconds > 0.0 and speech_duration_seconds <= self.config.human_short_speech_max_duration_seconds)
+                vad_confidence = float(_get("vad_confidence", 0.0) or 0.0)
+                audio_gate_ok = self._passes_human_audio_gate(
+                    has_speech_like=has_speech_like,
+                    speech_duration_seconds=speech_duration_seconds,
+                    human_greeting_detected=human_greeting_detected,
+                    short_speech_burst_detected=short_speech_burst_detected,
+                    vad_confidence=vad_confidence,
+                    transcript=transcript,
+                )
+                if (
+                    answer_elapsed_seconds <= self.config.human_first_seconds
+                    and audio_gate_ok
                 ):
                     human_conf = min(0.98, max(answered_pending_conf, self.config.human_confidence_threshold) + 0.25)
                     return self._transition(
                         DecisionState.HUMAN,
                         human_conf,
-                        "human-first: short greeting/burst detected during pending safe window",
+                        "human-first: audio human pattern during pending safe window",
                         **current_debug_base,
                     )
 
@@ -405,15 +463,21 @@ class LocalCallDetector:
                     **{**current_debug_base, "ui_state": "CLASSIFYING"},
                 )
 
-            # 3) After safe window, if audio looks clearly human, promote HUMAN.
-            if human_greeting_detected or (
-                has_speech_like and (speech_duration_seconds > 0.0) and speech_duration_seconds <= self.config.human_short_speech_max_duration_seconds
+            # 3) After safe window, promote HUMAN only with audio human pattern.
+            vad_confidence = float(_get("vad_confidence", 0.0) or 0.0)
+            if self._passes_human_audio_gate(
+                has_speech_like=has_speech_like,
+                speech_duration_seconds=speech_duration_seconds,
+                human_greeting_detected=human_greeting_detected,
+                short_speech_burst_detected=short_speech_burst_detected,
+                vad_confidence=vad_confidence,
+                transcript=transcript,
             ):
                 human_conf = min(0.98, max(answered_pending_conf, self.config.human_confidence_threshold) + 0.2)
                 return self._transition(
                     DecisionState.HUMAN,
                     human_conf,
-                    "human-first: greeting/burst present after safe window",
+                    "audio human pattern confirmed after safe window",
                     **current_debug_base,
                 )
 
@@ -445,6 +509,7 @@ class LocalCallDetector:
                     continuous_greeting_duration_seconds,
                     background_noise_level,
                     transcript,
+                    float(_get("vad_confidence", 0.0) or 0.0),
                 ),
                 answer_elapsed_seconds=answer_elapsed_seconds,
                 debug_base=current_debug_base,
@@ -509,6 +574,7 @@ class LocalCallDetector:
             continuous_greeting_duration_seconds,
             background_noise_level,
             transcript,
+            vad_confidence,
         ) = audio
 
         debug_base = debug_base or {}
@@ -523,13 +589,24 @@ class LocalCallDetector:
             short_speech_burst_detected=short_speech_burst_detected,
         )
 
-        # Human heuristics: human-first during early moments should already keep VOICEMAIL away,
-        # but we still compute confidence here.
+        human_audio_score = self._human_audio_score(
+            has_speech_like=has_speech_like,
+            speech_duration_seconds=speech_duration_seconds,
+            human_greeting_detected=human_greeting_detected,
+            short_speech_burst_detected=short_speech_burst_detected,
+            vad_confidence=vad_confidence,
+            transcript=transcript,
+        )
+        audio_gate_ok = self._passes_human_audio_gate(
+            has_speech_like=has_speech_like,
+            speech_duration_seconds=speech_duration_seconds,
+            human_greeting_detected=human_greeting_detected,
+            short_speech_burst_detected=short_speech_burst_detected,
+            vad_confidence=vad_confidence,
+            transcript=transcript,
+        )
+
         human_conf = 0.0
-        if evidence.hasTimer:
-            human_conf += 0.15
-        if evidence.hasEnabledAnswerControl:
-            human_conf += 0.25
         if human_greeting_detected:
             human_conf += 0.35
         elif short_speech_burst_detected and speech_duration_seconds > 0.0:
@@ -618,6 +695,8 @@ class LocalCallDetector:
             "silence_duration": silence_duration_seconds,
             "beep_detected": bool(beep_detected),
             "human_greeting_detected": bool(human_greeting_detected),
+            "human_audio_score": human_audio_score,
+            "audio_gate_ok": audio_gate_ok,
             "human_reasons": human_detection.reasons,
             "voicemail_confirmation_count": self._voicemail_confirm_count,
             "voicemail_score": voicemail_score,
@@ -650,26 +729,26 @@ class LocalCallDetector:
             and not f_dom_voicemail
         )
 
-        # Vicidial-style AMD fallback: after the answer analysis window, a
-        # picked-up call with no machine signals is treated as human pickup.
+        # After analysis window: stay pending if no audio human pattern (no DOM-only fallback).
         if (
             answer_elapsed_seconds >= self.config.answered_pending_seconds
+            and audio_gate_ok
             and no_machine_signal
-            and (evidence.hasTimer or evidence.hasEnabledAnswerControl)
         ):
-            reason = "answer analysis window completed without machine signals"
+            reason = "analysis window complete with audio human pattern and no machine signals"
             decision_debug["debug_reason"] = reason
-            self._emit(DecisionState.HUMAN, max(0.85, human_conf), reason, **decision_debug)
+            self._emit(DecisionState.HUMAN, max(0.85, human_conf, human_audio_score), reason, **decision_debug)
             return self._build(
                 DecisionState.HUMAN,
-                max(0.85, human_conf),
+                max(0.85, human_conf, human_audio_score),
                 reason,
                 **decision_debug,
                 human_conf=human_conf,
+                human_audio_score=human_audio_score,
             )
 
-        # Human wins if above threshold and no strong voicemail signal.
-        if human_conf >= self.config.human_confidence_threshold:
+        # Human wins only when audio gate passes.
+        if audio_gate_ok and human_conf >= self.config.human_confidence_threshold:
             reason = "human confidence threshold met (human-first)"
             decision_debug["debug_reason"] = reason
             self._emit(DecisionState.HUMAN, min(0.98, human_conf), reason, **decision_debug)

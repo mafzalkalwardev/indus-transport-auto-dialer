@@ -71,9 +71,41 @@ def test_short_hello_promotes_human_in_first_window():
         human_greeting_detected=True,
         short_speech_burst_detected=True,
         speech_duration_seconds=0.8,
+        vad_confidence=0.5,
         rms=0.1,
         is_silent=False,
     )
     det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=15.0)
     decision = det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=15.4)
     assert decision.state == DecisionState.HUMAN
+
+
+def test_dom_timer_alone_never_promotes_human():
+    det = LocalCallDetector(
+        DetectionConfig(
+            decision_stability_window=1,
+            answered_pending_seconds=8,
+            require_audio_for_human=True,
+        )
+    )
+    dom = {
+        "state": "CONNECTED",
+        "hasTimer": True,
+        "hasEnabledAnswerControl": True,
+        "hasRingingText": False,
+        "hasRingingNode": False,
+    }
+    audio = DummyAudio(
+        has_speech_like=False,
+        human_greeting_detected=False,
+        short_speech_burst_detected=False,
+        speech_duration_seconds=0.0,
+        rms=0.01,
+        is_silent=True,
+        vad_confidence=0.0,
+    )
+    det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=20.0)
+    for elapsed in (20.5, 21.0, 22.0, 25.0, 28.5):
+        decision = det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=elapsed)
+    assert decision.state in {DecisionState.ANSWERED_PENDING, DecisionState.UNKNOWN}
+    assert decision.state != DecisionState.HUMAN
