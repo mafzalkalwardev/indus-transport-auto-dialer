@@ -933,21 +933,13 @@ def _js_dial(phone: str, *, click_only: bool = False) -> str:
   }}
 
   var btn=findCallButton(digits);
-  if(btn && btn.disabledButton && fallbackToKeypad()){{
-    btn=findCallButton(digits);
-  }}
   if(btn && btn.disabledButton){{
-    window.__gvDialStatus = nativeKeypadStatus('disabled');
+    window.__gvDialStatus = 'call_button_disabled_for_target|value='+editableValue(inp).slice(0,40);
     return window.__gvDialStatus;
   }}
   if(btn && btn.wrongNumber){{
     window.__gvDialStatus = 'call_button_wrong_number|wanted='+digits.slice(-10)+'|found='+btn.wrongNumber.slice(-10);
     return window.__gvDialStatus;
-  }}
-  if(!btn){{
-    if(fallbackToKeypad()){{
-      btn=findCallButton(digits);
-    }}
   }}
   if(!btn){{
     var anyCall=qsa('button,[role="button"],gv-icon-button,[data-action="call"],[role="option"],[role="menuitem"]').filter(function(b){{
@@ -961,7 +953,7 @@ def _js_dial(phone: str, *, click_only: bool = False) -> str:
         (aria.indexOf('call')!==-1 || text==='call' || icon==='call' || data==='call');
     }})[0];
     if(anyCall && disabled(anyCall)){{
-      window.__gvDialStatus = nativeKeypadStatus('disabled');
+      window.__gvDialStatus = 'call_button_disabled|value='+editableValue(inp).slice(0,40);
       return window.__gvDialStatus;
     }}
     window.__gvDialStatus = nativeKeyStatus('missing');
@@ -1644,12 +1636,16 @@ class GVController(QObject):
         url = self._page.url().toString()
         if "voice.google.com" not in url:
             self._emit_log("Opening Google Voice calls page…")
-            self._page.load(QUrl(GV_CALLS_URL))
+            self._page.load(QUrl(self._current_dial_url()))
             QTimer.singleShot(2500, self._ensure_calls_page_then_dial)
             return
         if "/calls" not in url and "a=nc" not in url and "/dial/" not in url:
             self._emit_log("Opening Google Voice calls page…")
-            self._page.load(QUrl(GV_CALLS_URL))
+            self._page.load(QUrl(self._current_dial_url()))
+            QTimer.singleShot(2500, self._ensure_calls_page_then_dial)
+            return
+        if "a=nc" not in url and "/dial/" not in url and self._dial_step_attempts == 0:
+            self._page.load(QUrl(self._current_dial_url()))
             QTimer.singleShot(2500, self._ensure_calls_page_then_dial)
             return
         self._page.runJavaScript(_JS_REFRESH_LAYOUT)
@@ -1755,15 +1751,20 @@ class GVController(QObject):
                 return
 
             if (
-                status_base in ("call_button_missing", "call_button_disabled")
-                and getattr(self, "_native_key_attempted", False)
+                status_base in (
+                    "call_button_missing",
+                    "call_button_disabled",
+                    "call_button_disabled_for_target",
+                    "number_input_missing",
+                    "number_not_entered",
+                )
                 and self._dial_url_variant < len(_gv_dial_url_variants(
                     self._pending_dial_phone or self._current_call_phone
                 )) - 1
             ):
                 self._dial_url_variant += 1
                 self._emit_log(
-                    f"Native dial field stayed disabled - trying alternate GV URL "
+                    f"Google Voice dial UI not ready - trying alternate GV URL "
                     f"({self._dial_url_variant + 1})…")
                 self._page.load(QUrl(self._current_dial_url()))
                 QTimer.singleShot(2500, self._ensure_calls_page_then_dial)
