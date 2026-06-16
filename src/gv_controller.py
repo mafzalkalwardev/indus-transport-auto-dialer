@@ -67,8 +67,8 @@ def _gv_dial_url_variants(phone: str) -> list[str]:
     else:
         e164 = digits
     return [
-        f"{GV_CALLS_URL}?a=nc,%2B{e164}",
         f"https://voice.google.com/dial/+{e164}",
+        f"{GV_CALLS_URL}?a=nc,%2B{e164}",
         GV_CALLS_URL,
     ]
 

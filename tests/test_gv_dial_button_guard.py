@@ -139,7 +139,7 @@ def test_first_dial_attempt_loads_prefilled_dial_url(monkeypatch):
 
     ctrl._ensure_calls_page_then_dial()
 
-    assert ctrl._page.loaded == ["https://voice.google.com/u/0/calls?a=nc,%2B17085681794"]
+    assert ctrl._page.loaded == ["https://voice.google.com/dial/+17085681794"]
     assert scheduled and scheduled[-1][0] == 2500
 
 
@@ -160,7 +160,7 @@ def test_first_dial_attempt_loads_calls_page_only_when_off_voice(monkeypatch):
 
     ctrl._ensure_calls_page_then_dial()
 
-    assert ctrl._page.loaded == ["https://voice.google.com/u/0/calls?a=nc,%2B17085681794"]
+    assert ctrl._page.loaded == ["https://voice.google.com/dial/+17085681794"]
     assert scheduled and scheduled[-1][0] == 2500
 
 
@@ -183,7 +183,7 @@ def test_disabled_native_field_falls_back_to_direct_dial_url(monkeypatch):
     ctrl._handle_retryable_dial_status("call_button_missing")
 
     assert ctrl._dial_url_variant == 1
-    assert ctrl._page.loaded == ["https://voice.google.com/dial/+17085681794"]
+    assert ctrl._page.loaded == ["https://voice.google.com/u/0/calls?a=nc,%2B17085681794"]
     assert scheduled and scheduled[-1][0] == 2500
 
 
@@ -199,13 +199,13 @@ def test_disabled_target_button_falls_back_to_direct_dial_url(monkeypatch):
     ctrl._current_call_phone = "+17085681794"
     ctrl._dial_url_variant = 0
     ctrl._dial_step_attempts = 1
-    ctrl._page = _FakePage("https://voice.google.com/u/0/calls?a=nc,%2B17085681794")
+    ctrl._page = _FakePage("https://voice.google.com/dial/+17085681794")
     ctrl._emit_log = lambda _msg: None
 
     ctrl._handle_retryable_dial_status("call_button_disabled_for_target")
 
     assert ctrl._dial_url_variant == 1
-    assert ctrl._page.loaded == ["https://voice.google.com/dial/+17085681794"]
+    assert ctrl._page.loaded == ["https://voice.google.com/u/0/calls?a=nc,%2B17085681794"]
     assert scheduled and scheduled[-1][0] == 2500
 
 
