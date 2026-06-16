@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from datetime import datetime
 from glob import glob
 
@@ -22,7 +23,7 @@ from src.webengine_env import configure_webengine_environment
 configure_webengine_environment()
 
 from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QPushButton, QVBoxLayout, QWidget
 
 from src.gv_accounts import load_accounts, profile_dir, has_session_marker
 from src.gv_controller import GVController
@@ -37,6 +38,7 @@ DEFAULT_NUMBERS = [
 ]
 
 TERMINAL_STATES = {"CONNECTED", "VOICEMAIL", "ENDED", "ENDED_MANUALLY", "FAILED", "NO_ANSWER", "BUSY"}
+LIVE_TEST_CONFIRMATION = "I OWN OR HAVE PERMISSION TO CALL THESE NUMBERS"
 
 
 def _parse_numbers(values: list[str]) -> list[str]:
@@ -90,6 +92,39 @@ def _load_crm_numbers(limit: int, exclude: set[str] | None = None) -> list[str]:
     return numbers
 
 
+def _load_excel_numbers(path: str, limit: int) -> list[str]:
+    import pandas as pd
+
+    if not os.path.exists(path):
+        raise SystemExit(f"Live test phone file not found: {path}")
+    df = pd.read_excel(path)
+    df.columns = df.columns.astype(str).str.strip()
+    phone_col = next(
+        (
+            col for col in df.columns
+            if col.strip().lower() in {
+                "phone", "mobile", "number", "tel", "telephone", "cell", "phone number"
+            }
+        ),
+        None,
+    )
+    if not phone_col:
+        raise SystemExit(f"No phone column found in {path}. Columns: {list(df.columns)}")
+    numbers: list[str] = []
+    for raw in df[phone_col]:
+        cleaned = clean_phone(raw)
+        if not cleaned:
+            continue
+        phone = fmt_e164(cleaned)
+        if phone not in numbers:
+            numbers.append(phone)
+        if len(numbers) >= max(1, int(limit)):
+            break
+    if not numbers:
+        raise SystemExit(f"No dialable phone numbers found in {path}")
+    return numbers
+
+
 def _load_recent_report_numbers(hours: float) -> set[str]:
     if hours <= 0:
         return set()
@@ -120,6 +155,9 @@ def _load_recent_report_numbers(hours: float) -> set[str]:
 
 
 def select_smoke_numbers(args: argparse.Namespace, account_count: int) -> list[str]:
+    if getattr(args, "live_test_live_test", False):
+        path = getattr(args, "live_test_file", "") or os.path.join(ROOT, "phones_test.xlsx")
+        return _load_excel_numbers(path, int(getattr(args, "live_test_limit", 45) or 45))
     if args.numbers:
         return _parse_numbers(args.numbers)
     if args.from_crm:
@@ -147,6 +185,9 @@ class LiveCallSmoke:
         report_path: str | None = None,
         print_debug: bool = True,
         visible: bool = False,
+        max_parallel: int | None = None,
+        rate_limit_sec: float = 1.2,
+        stop_on_failure: bool = False,
     ) -> None:
         self.numbers = numbers
         self.call_timeout = call_timeout
@@ -157,12 +198,18 @@ class LiveCallSmoke:
         self.accounts = load_accounts()
         self.controllers: list[GVController] = []
         self.results: dict[int, dict] = {}
+        self.active_by_slot: dict[int, int] = {}
+        self.next_number_idx = 0
         self.events: list[dict] = []
         self.pending_hangups: set[int] = set()
         self.finished = False
         self.report_path = report_path
         self.print_debug = print_debug
         self.visible = visible
+        self.max_parallel = max(1, int(max_parallel or len(numbers) or 1))
+        self.rate_limit_sec = max(1.0, float(rate_limit_sec or 1.2))
+        self.stop_requested = False
+        self.stop_on_failure = bool(stop_on_failure)
 
     def log(self, slot: int | None, message: str) -> None:
         stamp = datetime.now().isoformat(timespec="seconds")
@@ -171,26 +218,26 @@ class LiveCallSmoke:
         self.events.append({"time": stamp, "slot": slot, "message": message})
 
     def start(self) -> None:
-        if len(self.accounts) < len(self.numbers):
+        line_count = min(len(self.numbers), len(self.accounts), self.max_parallel)
+        if line_count <= 0:
             self.log(
                 None,
-                f"BLOCKED: {len(self.accounts)} Google Voice account(s) for "
-                f"{len(self.numbers)} requested live calls.",
+                "BLOCKED: no Google Voice accounts configured for live testing.",
             )
             self.finish()
             return
-        distinct_lines = distinct_line_count(self.accounts, len(self.numbers))
-        if distinct_lines < len(self.numbers):
+        distinct_lines = distinct_line_count(self.accounts, line_count)
+        if distinct_lines < line_count:
             self.log(
                 None,
                 f"BLOCKED: {distinct_lines} distinct Google Voice line(s) for "
-                f"{len(self.numbers)} requested concurrent live calls.",
+                f"{line_count} requested concurrent live calls.",
             )
             self.log(None, "Use one signed-in Google Voice account/email per realtime slot.")
             self.finish()
             return
 
-        for idx, phone in enumerate(self.numbers):
+        for idx in range(line_count):
             acct = self.accounts[idx]
             ctrl = GVController(
                 idx,
@@ -213,22 +260,15 @@ class LiveCallSmoke:
             else:
                 ctrl.prepare_for_background_rendering()
             self.controllers.append(ctrl)
-            self.results[idx] = {
-                "slot": idx,
-                "account": acct.get("name") or acct.get("email"),
-                "profile": acct.get("profile"),
-                "phone": phone,
-                "states": [],
-                "final": "PENDING",
-            }
 
         QTimer.singleShot(3000, lambda: self.wait_for_ready(0))
-        total_ms = (self.call_timeout + self.connected_hold + self.voicemail_hold + 70) * 1000
+        waves = max(1, (len(self.numbers) + line_count - 1) // line_count)
+        total_ms = int((self.call_timeout + self.connected_hold + self.voicemail_hold + 70) * waves * 1000)
         QTimer.singleShot(total_ms, self.timeout_remaining)
 
     def wait_for_ready(self, waited: int) -> None:
         missing = [
-            self.results[idx]["account"]
+            self.accounts[idx].get("name") or self.accounts[idx].get("email") or f"Slot {idx}"
             for idx, ctrl in enumerate(self.controllers)
             if not ctrl.is_logged_in
         ]
@@ -248,27 +288,67 @@ class LiveCallSmoke:
 
     def begin_dialing(self) -> None:
         self.log(None, f"Starting live smoke test for {len(self.numbers)} number(s)")
-        for idx, phone in enumerate(self.numbers):
-            QTimer.singleShot(idx * self.stagger_ms, lambda i=idx, p=phone: self.dial(i, p))
+        for idx, _ctrl in enumerate(self.controllers):
+            QTimer.singleShot(idx * self.stagger_ms, lambda i=idx: self.assign_next(i))
 
-    def dial(self, slot: int, phone: str) -> None:
-        self.log(slot, f"Dialing {phone}")
-        self.results[slot]["dial_started_at"] = datetime.now().isoformat(timespec="seconds")
-        self.controllers[slot].dial(phone)
-        QTimer.singleShot(self.call_timeout * 1000, lambda s=slot: self.mark_no_answer(s))
+    def assign_next(self, slot: int) -> None:
+        if self.finished or self.stop_requested or slot in self.active_by_slot:
+            return
+        if self.next_number_idx >= len(self.numbers):
+            self.check_done()
+            return
+        call_id = self.next_number_idx
+        self.next_number_idx += 1
+        phone = self.numbers[call_id]
+        acct = self.accounts[slot]
+        self.results[call_id] = {
+            "slot": slot,
+            "account": acct.get("name") or acct.get("email"),
+            "profile": acct.get("profile"),
+            "phone": phone,
+            "states": [],
+            "final": "PENDING",
+        }
+        self.active_by_slot[slot] = call_id
+        self.dial(slot, call_id, phone)
+
+    def dial(self, slot: int, call_id: int, phone: str) -> None:
+        self.log(slot, f"Dial attempt started: {phone}")
+        self.results[call_id]["dial_started_at"] = datetime.now().isoformat(timespec="seconds")
+        try:
+            self.controllers[slot].dial(phone)
+        except Exception:
+            self.results[call_id]["final"] = "FAILED"
+            tb = traceback.format_exc()
+            self.results[call_id]["exception_traceback"] = tb
+            self.log(slot, "FAILED: exception while starting dial\n" + tb)
+            self.active_by_slot.pop(slot, None)
+            QTimer.singleShot(int(self.rate_limit_sec * 1000), lambda s=slot: self.assign_next(s))
+            return
+        QTimer.singleShot(self.call_timeout * 1000, lambda s=slot, c=call_id: self.mark_no_answer(s, c))
 
     def on_controller_log(self, slot: int, message: str) -> None:
         self.log(slot, message)
 
     def on_state(self, slot: int, state: str) -> None:
-        rec = self.results.get(slot)
+        call_id = self.active_by_slot.get(slot)
+        if call_id is None:
+            return
+        rec = self.results.get(call_id)
         if rec is None:
             return
         rec["states"].append({
             "time": datetime.now().isoformat(timespec="seconds"),
             "state": state,
         })
-        self.log(slot, f"STATE {state}")
+        status = {
+            "RINGING": "ringing",
+            "ANSWERED_PENDING": "on-call",
+            "CONNECTED": "on-call",
+            "VOICEMAIL": "voicemail",
+            "FAILED": "failed",
+        }.get(state, state.lower())
+        self.log(slot, f"STATE {state} ({status})")
         if state == "CONNECTED":
             rec["final"] = "CONNECTED"
             self.schedule_hangup(slot, self.connected_hold, "connected hold complete")
@@ -278,10 +358,14 @@ class LiveCallSmoke:
         elif state in ("NO_ANSWER", "ENDED", "ENDED_MANUALLY", "FAILED", "BUSY"):
             if rec.get("final") == "PENDING":
                 rec["final"] = state
-            self.check_done()
+            if self.stop_on_failure and state == "FAILED":
+                self.stop_requested = True
+                self.log(None, "Stopping guarded live test after first failed dial")
+            self.release_slot(slot)
 
     def on_detection(self, slot: int, debug: dict) -> None:
-        rec = self.results.get(slot)
+        call_id = self.active_by_slot.get(slot)
+        rec = self.results.get(call_id) if call_id is not None else None
         if rec is not None:
             rec.setdefault("detection", []).append(debug)
         if not self.print_debug:
@@ -308,10 +392,12 @@ class LiveCallSmoke:
             return
         self.log(slot, f"Hangup after {reason}")
         self.controllers[slot].hangup()
-        self.check_done()
+        self.release_slot(slot)
 
-    def mark_no_answer(self, slot: int) -> None:
-        rec = self.results.get(slot)
+    def mark_no_answer(self, slot: int, call_id: int) -> None:
+        if self.active_by_slot.get(slot) != call_id:
+            return
+        rec = self.results.get(call_id)
         if not rec or rec.get("final") != "PENDING":
             return
         state = self.controllers[slot].current_state
@@ -319,19 +405,52 @@ class LiveCallSmoke:
             rec["final"] = "NO_ANSWER"
             self.log(slot, f"NO_ANSWER after {self.call_timeout}s timeout")
             self.controllers[slot].hangup()
+            self.release_slot(slot)
+
+    def release_slot(self, slot: int) -> None:
+        self.active_by_slot.pop(slot, None)
+        if self.stop_requested:
             self.check_done()
+            return
+        QTimer.singleShot(int(self.rate_limit_sec * 1000), lambda s=slot: self.assign_next(s))
+        self.check_done()
 
     def timeout_remaining(self) -> None:
-        for slot, rec in self.results.items():
+        for slot, call_id in list(self.active_by_slot.items()):
+            rec = self.results.get(call_id)
+            if not rec:
+                continue
             if rec.get("final") == "PENDING":
                 rec["final"] = "TIMEOUT"
                 self.log(slot, "TIMEOUT waiting for terminal state")
                 self.controllers[slot].hangup()
+        self.active_by_slot.clear()
         self.finish()
 
     def check_done(self) -> None:
-        if self.results and all(r.get("final") != "PENDING" for r in self.results.values()):
+        if (
+            self.results
+            and self.next_number_idx >= len(self.numbers)
+            and not self.active_by_slot
+            and all(r.get("final") != "PENDING" for r in self.results.values())
+        ):
             QTimer.singleShot(1500, self.finish)
+
+    def emergency_stop(self) -> None:
+        if self.finished:
+            return
+        self.stop_requested = True
+        self.log(None, "EMERGENCY STOP requested")
+        for slot, call_id in list(self.active_by_slot.items()):
+            rec = self.results.get(call_id)
+            if rec and rec.get("final") == "PENDING":
+                rec["final"] = "STOPPED"
+            try:
+                self.controllers[slot].hangup()
+            except Exception:
+                self.log(slot, "Exception during emergency hangup\n" + traceback.format_exc())
+        self.active_by_slot.clear()
+        self.finish()
 
     def finish(self) -> None:
         if self.finished:
@@ -361,6 +480,17 @@ class LiveCallSmoke:
         for rec in report["results"]:
             print(f"Slot {rec['slot']}: {rec['phone']} -> {rec['final']}", flush=True)
         QApplication.instance().quit()
+
+
+class EmergencyStopPanel(QWidget):
+    def __init__(self, smoke: LiveCallSmoke) -> None:
+        super().__init__()
+        self.setWindowTitle("Live Test Emergency Stop")
+        layout = QVBoxLayout(self)
+        btn = QPushButton("EMERGENCY STOP")
+        btn.setMinimumHeight(80)
+        btn.clicked.connect(smoke.emergency_stop)
+        layout.addWidget(btn)
 
 
 def _run_crm_campaign(args: argparse.Namespace, accounts: list[dict]) -> int:
@@ -470,6 +600,11 @@ def _run_crm_campaign(args: argparse.Namespace, accounts: list[dict]) -> int:
 
 
 def main() -> None:
+    def _excepthook(exc_type, exc, tb):
+        print("UNHANDLED EXCEPTION", file=sys.stderr, flush=True)
+        traceback.print_exception(exc_type, exc, tb)
+
+    sys.excepthook = _excepthook
     parser = argparse.ArgumentParser(description="Dial approved live test numbers.")
     parser.add_argument("numbers", nargs="*", help="Phone numbers to dial")
     parser.add_argument("--from-crm", action="store_true", help="Load test numbers from CRM contacts")
@@ -483,11 +618,28 @@ def main() -> None:
     parser.add_argument("--quiet-debug", action="store_true", help="Store detection debug in JSON without printing every poll")
     parser.add_argument("--print-debug", action="store_true", help="Print every child wave detection debug block during CRM campaigns")
     parser.add_argument("--visible", action="store_true", help="Show the WebEngine slot while running the live smoke test")
+    parser.add_argument("--live-test-live-test", action="store_true", help="Guarded live test mode: load phones_test.xlsx and require owner/permission confirmation")
+    parser.add_argument("--live-test-file", default=os.path.join(ROOT, "phones_test.xlsx"), help="Excel file for guarded live tests")
+    parser.add_argument("--live-test-limit", type=int, default=45, help="Numbers to load for guarded live tests; default 45")
+    parser.add_argument("--confirm-live-test", default="", help="Must equal the live-test consent phrase to skip interactive prompt")
+    parser.add_argument("--rate-limit-sec", type=float, default=6.0, help="Minimum delay before each line dials its next live-test number")
+    parser.add_argument("--max-parallel", type=int, default=1, help="Maximum concurrent live-test lines")
     parser.add_argument("--call-timeout", type=int, default=45)
     parser.add_argument("--connected-hold", type=int, default=8)
     parser.add_argument("--voicemail-hold", type=int, default=4)
     parser.add_argument("--stagger-ms", type=int, default=1200)
     args = parser.parse_args()
+
+    if args.live_test_live_test:
+        args.live_test_limit = max(1, int(args.live_test_limit or 45))
+        if not args.confirm_live_test:
+            print("LIVE TEST MODE will place real calls from phones_test.xlsx.", flush=True)
+            print(f"Default guarded batch size is 45; this run will load {args.live_test_limit}.", flush=True)
+            print(f"Type exactly: {LIVE_TEST_CONFIRMATION}", flush=True)
+            args.confirm_live_test = input("Confirmation: ").strip()
+        if args.confirm_live_test != LIVE_TEST_CONFIRMATION:
+            raise SystemExit("Live test confirmation failed; no calls placed.")
+        args.stagger_ms = max(args.stagger_ms, int(float(args.rate_limit_sec) * 1000))
 
     accounts = load_accounts()
     if args.target_voicemails or args.target_live:
@@ -495,6 +647,8 @@ def main() -> None:
 
     numbers = select_smoke_numbers(args, len(accounts))
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
+    app.aboutToQuit.connect(lambda: print("QApplication aboutToQuit", flush=True))
     smoke = LiveCallSmoke(
         numbers,
         call_timeout=args.call_timeout,
@@ -504,7 +658,13 @@ def main() -> None:
         report_path=args.report_path or None,
         print_debug=not args.quiet_debug,
         visible=bool(args.visible),
+        max_parallel=args.max_parallel if args.live_test_live_test else len(numbers),
+        rate_limit_sec=args.rate_limit_sec if args.live_test_live_test else max(1.0, args.stagger_ms / 1000.0),
+        stop_on_failure=bool(args.live_test_live_test),
     )
+    panel = EmergencyStopPanel(smoke) if args.live_test_live_test else None
+    if panel is not None:
+        panel.show()
     QTimer.singleShot(0, smoke.start)
     sys.exit(app.exec())
 

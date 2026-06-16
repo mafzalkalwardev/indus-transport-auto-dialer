@@ -729,13 +729,14 @@ class LocalCallDetector:
             and not f_dom_voicemail
         )
 
-        # After analysis window: stay pending if no audio human pattern (no DOM-only fallback).
+        # After the analysis window, DOM answer evidence plus no machine signal is
+        # enough to release the call as human. Voicemail still requires factors.
         if (
             answer_elapsed_seconds >= self.config.answered_pending_seconds
-            and audio_gate_ok
             and no_machine_signal
+            and (not self.config.require_audio_for_human or not is_silent)
         ):
-            reason = "analysis window complete with audio human pattern and no machine signals"
+            reason = "analysis window complete with no machine signals"
             decision_debug["debug_reason"] = reason
             self._emit(DecisionState.HUMAN, max(0.85, human_conf, human_audio_score), reason, **decision_debug)
             return self._build(
@@ -744,7 +745,6 @@ class LocalCallDetector:
                 reason,
                 **decision_debug,
                 human_conf=human_conf,
-                human_audio_score=human_audio_score,
             )
 
         # Human wins only when audio gate passes.

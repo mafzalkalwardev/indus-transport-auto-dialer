@@ -7,6 +7,8 @@ Agents see the FT Solutions interface and the live Google Voice panel only when 
 import os
 import sys
 import json
+import argparse
+import traceback
 from datetime import datetime, timedelta
 
 from src.webengine_env import configure_webengine_environment
@@ -49,7 +51,7 @@ from src.ui_theme import (
 from src.client_deploy import export_client_package, is_client_deployment
 from src.slot_watchdog import SlotWatchdog, webengine_total_memory_mb
 from src.retry_queue import DialRetryQueue
-from src.dialer_logging import setup_dialer_logging, log_info, log_warning, log_path
+from src.dialer_logging import setup_dialer_logging, log_info, log_warning, log_error, log_path
 from src.process_cleanup import cleanup_stale_webengine_processes
 from src.system_profile import (
     recommended_slots, low_resource_reason, system_ram_gb, chrome_process_count,
@@ -76,6 +78,31 @@ except ImportError:
 APP_NAME     = "FT Solutions — Auto Dialer Pro"
 WHATSAPP_URL = "https://wa.me/923079670503"
 WA_NUMBER    = "+92 307 967 0503"
+
+
+def _load_dotenv_file(path: str = ".env") -> None:
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except Exception:
+        log_error("Failed to load .env\n" + traceback.format_exc())
+
+
+def _admin_env_credentials() -> tuple[str, str]:
+    return (
+        os.environ.get("ADMIN_EMAIL", "").strip(),
+        os.environ.get("ADMIN_PASSWORD", ""),
+    )
 
 # ── Config ────────────────────────────────────────────────────────────────────
 def _load_cfg() -> dict:
@@ -546,16 +573,19 @@ class LoginPage(QWidget):
         outer.addWidget(card)
 
     def _login(self):
-        user = self.db.authenticate(self.e_email.text().strip(),
-                                    self.e_pw.text())
+        email = self.e_email.text().strip()
+        user = self.db.authenticate(email, self.e_pw.text())
         if not user:
+            log_warning(f"Login failed for {email or '<blank>'}")
             self.lbl_err.setText("Incorrect email or password.")
             return
         if self._client_mode and user.get("role") == "admin":
+            log_warning(f"Admin login blocked on client workstation for {email}")
             self.lbl_err.setText(
                 "This PC is for agents only. Use the agent login your "
                 "administrator gave you.")
             return
+        log_info(f"Login success for {user.get('email', email)}")
         self.login_success.emit(user)
 
 
@@ -1761,8 +1791,13 @@ class MainWindow(QMainWindow):
         self.btn_stop.setMinimumHeight(44)
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self._stop_dialing)
+        self.btn_emergency_stop = _btn("Emergency Stop", "red")
+        self.btn_emergency_stop.setMinimumHeight(44)
+        self.btn_emergency_stop.setEnabled(False)
+        self.btn_emergency_stop.clicked.connect(self._emergency_stop)
         btn_row.addWidget(self.btn_start)
         btn_row.addWidget(self.btn_stop)
+        btn_row.addWidget(self.btn_emergency_stop)
         btn_row.addStretch()
         lay.addLayout(btn_row)
 
@@ -1821,10 +1856,14 @@ class MainWindow(QMainWindow):
         btn_start2.clicked.connect(self._start_dialing)
         btn_stop2  = _btn("Stop", "red")
         btn_stop2.clicked.connect(self._stop_dialing)
+        btn_emergency2 = _btn("Emergency Stop", "red")
+        btn_emergency2.clicked.connect(self._emergency_stop)
         self.btn_start_live = btn_start2
         self.btn_stop_live = btn_stop2
+        self.btn_emergency_live = btn_emergency2
         brow.addWidget(btn_start2)
         brow.addWidget(btn_stop2)
+        brow.addWidget(btn_emergency2)
         brow.addStretch()
         lay.addLayout(brow)
 
@@ -2996,8 +3035,10 @@ class MainWindow(QMainWindow):
 
         ok, msg = self._dialing_login_ok()
         if not ok:
+            self._log(f"Google Voice line readiness failed: {msg}")
             QMessageBox.warning(self, "Google Voice Not Ready", msg)
             return
+        self._log("Google Voice line readiness confirmed for selected lines")
 
         n = self.spin_slots.value()
         self.cfg.update({
@@ -3078,6 +3119,11 @@ class MainWindow(QMainWindow):
         log_info(
             f"Campaign stopped — retries still queued: {pending}, "
             f"log: {log_path()}")
+
+    def _emergency_stop(self):
+        self._log("EMERGENCY STOP requested - stopping all live dialing now")
+        log_warning("Emergency stop requested from UI")
+        self._stop_dialing()
 
     def _assign_pending_calls(self):
         """Assign retries first, then new contacts, to idle lines past cooldown."""
@@ -3217,7 +3263,15 @@ class MainWindow(QMainWindow):
             log_info(f"Slot {sid} retry #{retry_attempt} for {phone}")
         else:
             self._log(f"[Slot {sid}] Dialing {phone}…")
-        ctrl.dial(phone)
+        try:
+            self._log(f"[Slot {sid}] Dial attempt started: {phone}")
+            ctrl.dial(phone)
+        except Exception:
+            tb = traceback.format_exc()
+            self._log(f"[Slot {sid}] FAILED: exception while starting dial\n{tb}")
+            log_error(f"Slot {sid} dial exception for {phone}\n{tb}")
+            self._handle_slot_failure(sid, phone)
+            return
         timeout_ms = int(self.cfg.get("call_timeout", 60) * 1000)
         started_at = self._slot_start[sid]
         campaign_generation = self._campaign_generation
@@ -3411,11 +3465,13 @@ class MainWindow(QMainWindow):
             else phone
         if state in ("RINGING", "ANSWERED_PENDING"):
             self._mark_call_time(slot_id, "ringing_at")
+            self._log(f"[Slot {slot_id}] ringing/on-call: {disp}")
             if state == "ANSWERED_PENDING":
                 self.statusBar().showMessage(
                     f"Classifying answer — Line {slot_id + 1}: {disp}")
         elif state == "CONNECTED":
             self._mark_call_time(slot_id, "connected_at")
+            self._log(f"[Slot {slot_id}] on-call: {disp}")
         self._update_card(slot_id, state, phone)
         self._log(f"[Slot {slot_id}] → {state}  {disp}")
 
@@ -3456,6 +3512,7 @@ class MainWindow(QMainWindow):
                 self._voicemail_hangup_and_next(sid, gen, tok),
             )
         elif state == "FAILED":
+            self._log(f"[Slot {slot_id}] failed: {disp}")
             self._handle_slot_failure(slot_id, phone)
         elif state == "ENDED":
             if phone:
@@ -3502,12 +3559,14 @@ class MainWindow(QMainWindow):
         ctrl = self._get_ctrl(slot_id)
         if ctrl:
             ctrl.mark_logged_in()
-        self._log(f"[Slot {slot_id}] Google Voice ready")
+        self._log(f"[Slot {slot_id}] Google Voice line readiness: ready")
         self._update_card(slot_id, "IDLE", "")
         self._refresh_slot_login_badges()
 
     def _on_slot_log(self, slot_id: int, msg: str):
         self._log(f"[Slot {slot_id}] {msg}")
+        if "Traceback (most recent call last)" in msg:
+            log_error(f"Slot {slot_id} traceback from UI log\n{msg}")
         if "Dial UI status:" in msg and slot_id in getattr(self, "_slot_cards", {}):
             detail = msg.split("Dial UI status:", 1)[-1].strip()
             self._slot_cards[slot_id].set_dial_detail(detail[:80])
@@ -3886,6 +3945,10 @@ class MainWindow(QMainWindow):
                          getattr(self, "btn_stop_live", None)):
             if btn_stop is not None:
                 btn_stop.setEnabled(running)
+        for btn_stop in (getattr(self, "btn_emergency_stop", None),
+                         getattr(self, "btn_emergency_live", None)):
+            if btn_stop is not None:
+                btn_stop.setEnabled(running)
 
     def _on_tab_changed(self, index: int) -> None:
         widget = self.tabs.widget(index)
@@ -3975,6 +4038,7 @@ class DialerApp:
         self._stack.show()
 
     def _route_startup(self) -> None:
+        self._bootstrap_admin_from_env()
         if self._client_mode:
             if not self.db.has_any_user():
                 self._show_client_not_configured()
@@ -3985,6 +4049,19 @@ class DialerApp:
             self._show_admin_setup()
         else:
             self._show_login()
+
+    def _bootstrap_admin_from_env(self) -> None:
+        email, password = _admin_env_credentials()
+        if not email or not password or not self.db.needs_admin_setup():
+            return
+        if len(password) < 8:
+            log_warning("ADMIN_PASSWORD is set but too short for admin bootstrap")
+            return
+        try:
+            self.db.create_admin(email, "Environment Admin", password)
+            log_info(f"Admin account bootstrapped from ADMIN_EMAIL={email}")
+        except Exception:
+            log_error("Admin env bootstrap failed\n" + traceback.format_exc())
 
     def _show_admin_setup(self):
         page = AdminSetupPage(self.db)
@@ -4029,6 +4106,16 @@ def _now() -> float:
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--live-test-live-test", action="store_true")
+    args, remaining = parser.parse_known_args()
+    if args.live_test_live_test:
+        from scripts.live_call_smoke import main as live_smoke_main
+        sys.argv = [sys.argv[0], "--live-test-live-test", *remaining]
+        live_smoke_main()
+        raise SystemExit(0)
+
+    _load_dotenv_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
     os.makedirs(LOGS_DIR, exist_ok=True)
     cleanup_stale_webengine_processes()
 

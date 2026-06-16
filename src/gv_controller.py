@@ -10,6 +10,7 @@ import json
 import os
 import re
 import time
+import traceback
 import uuid
 from datetime import datetime
 from typing import Callable, Optional
@@ -49,6 +50,10 @@ SIGNIN_URL = (
 )
 
 POLL_MS = 1000   # state-detection poll interval (active calls)
+
+
+def _format_traceback() -> str:
+    return traceback.format_exc()
 
 
 def _gv_direct_call_url(phone: str) -> str:
@@ -762,6 +767,10 @@ def _js_dial(phone: str, *, click_only: bool = False) -> str:
         if(buttonDigits && sameNumber(buttonDigits, wantedDigits)) disabledMatchingButton=btn;
         continue;
       }}
+      if(!buttonDigits){{
+        var inputDigits=input ? digitsOf(editableValue(input)) : '';
+        if(!sameNumber(inputDigits, wantedDigits)) continue;
+      }}
       if(input){{
         var br=btn.getBoundingClientRect(), ir=input.getBoundingClientRect();
         var nearInput=Math.abs((br.top+br.bottom)/2 - (ir.top+ir.bottom)/2) < 180;
@@ -1100,7 +1109,22 @@ def _js_retry_start_call(phone: str) -> str:
     }}catch(e){{ return false; }}
   }}
   function digitsOf(t){{ return (t||'').replace(/\\D/g,''); }}
+  function sameNumber(candidateDigits, wantedDigits){{
+    if(!candidateDigits || !wantedDigits) return false;
+    if(candidateDigits === wantedDigits) return true;
+    var minLen=Math.min(candidateDigits.length, wantedDigits.length);
+    if(minLen < 7) return false;
+    return candidateDigits.slice(-minLen) === wantedDigits.slice(-minLen) ||
+      candidateDigits.slice(-10) === wantedDigits.slice(-10);
+  }}
+  function valueDigits(el){{
+    if(!el) return '';
+    if('value' in el) return digitsOf(el.value || '');
+    return digitsOf(el.innerText || el.textContent || '');
+  }}
   var wanted=phone.replace(/\\D/g,'');
+  var inp=document.querySelector('input[placeholder*="number" i],input[placeholder*="name" i],[role="combobox"],[contenteditable="true"]');
+  var entered=valueDigits(inp);
   var buttons=Array.from(document.querySelectorAll('button,[role="button"],gv-icon-button'));
   var callBtn=null;
   for(var i=0;i<buttons.length;i++){{
@@ -1111,10 +1135,9 @@ def _js_retry_start_call(phone: str) -> str:
     var icon=(b.getAttribute('icon-name')||'').toLowerCase();
     if(aria.indexOf('call')!==-1 || text==='call' || icon==='call'){{
       var bd=digitsOf(aria+' '+text);
-      if(!bd || bd.slice(-10)===wanted.slice(-10)){{ callBtn=b; break; }}
+      if((bd && sameNumber(bd, wanted)) || (!bd && sameNumber(entered, wanted))){{ callBtn=b; break; }}
     }}
   }}
-  var inp=document.querySelector('input[placeholder*="number" i],input[placeholder*="name" i],[role="combobox"],[contenteditable="true"]');
   if(inp && vis(inp)){{
     inp.focus();
     ['keydown','keypress','keyup'].forEach(function(type){{
@@ -1857,7 +1880,7 @@ class GVController(QObject):
             self._emit_log("Dial UI status: native_number_typed")
             return True
         except Exception as exc:
-            self._emit_log(f"Native number typing failed: {exc}")
+            self._emit_log(f"Native number typing failed: {exc}\n{_format_traceback()}")
             return False
 
     def _click_keypad_from_status(self, status: str) -> bool:
@@ -1911,7 +1934,7 @@ class GVController(QObject):
             self._emit_log("Dial UI status: native_keypad_clicked")
             return True
         except Exception as exc:
-            self._emit_log(f"Native keypad click failed: {exc}")
+            self._emit_log(f"Native keypad click failed: {exc}\n{_format_traceback()}")
             return False
 
     def _clear_dial_field_before_native_input(self, status: str = "") -> bool:
@@ -1976,7 +1999,7 @@ class GVController(QObject):
             self._emit_log("Dial UI status: os_number_typed")
             return True
         except Exception as exc:
-            self._emit_log(f"OS number typing failed: {exc}")
+            self._emit_log(f"OS number typing failed: {exc}\n{_format_traceback()}")
             return False
 
     def _call_button_status_matches_pending(self, status: str) -> bool:
@@ -2030,7 +2053,7 @@ class GVController(QObject):
                 self._click_view_coords_os(click_x, click_y)
             return True
         except Exception as exc:
-            self._emit_log(f"View click failed: {exc}")
+            self._emit_log(f"View click failed: {exc}\n{_format_traceback()}")
             return False
 
     def _click_view_coords_os(self, x: int, y: int) -> bool:
@@ -2050,7 +2073,7 @@ class GVController(QObject):
             pyautogui.click(gx, gy)
             return True
         except Exception as exc:
-            self._emit_log(f"OS click fallback failed: {exc}")
+            self._emit_log(f"OS click fallback failed: {exc}\n{_format_traceback()}")
             return False
 
     def _click_call_button_from_status(self, status: str) -> bool:
@@ -2066,7 +2089,7 @@ class GVController(QObject):
             QTest.keyClick(self.view, Qt.Key.Key_Return)
             return True
         except Exception as exc:
-            self._emit_log(f"Dial UI mouse click failed: {exc}")
+            self._emit_log(f"Dial UI mouse click failed: {exc}\n{_format_traceback()}")
             return False
 
     def _on_dial_stuck(self) -> None:

@@ -10,6 +10,9 @@ def _args(**overrides):
         "numbers": [],
         "from_crm": False,
         "crm_limit": 0,
+        "live_test_live_test": False,
+        "live_test_file": "",
+        "live_test_limit": 45,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -59,3 +62,27 @@ def test_distinct_line_count_treats_duplicate_email_as_one_line():
     ]
 
     assert live_call_smoke.distinct_line_count(accounts, requested=3) == 2
+
+
+def test_live_test_mode_loads_owner_excel_with_default_limit(monkeypatch):
+    calls = {}
+
+    def fake_load_excel(path, limit):
+        calls["path"] = path
+        calls["limit"] = limit
+        return ["+15550000001"]
+
+    monkeypatch.setattr(live_call_smoke, "_load_excel_numbers", fake_load_excel)
+
+    assert live_call_smoke.select_smoke_numbers(
+        _args(live_test_live_test=True, live_test_file="phones_test.xlsx"),
+        account_count=3,
+    ) == ["+15550000001"]
+    assert calls == {"path": "phones_test.xlsx", "limit": 45}
+
+
+def test_live_test_confirmation_phrase_is_stable():
+    assert (
+        live_call_smoke.LIVE_TEST_CONFIRMATION
+        == "I OWN OR HAVE PERMISSION TO CALL THESE NUMBERS"
+    )
