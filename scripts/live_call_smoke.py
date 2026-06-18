@@ -397,6 +397,10 @@ class LiveCallSmoke:
         rec = self.results.get(call_id) if call_id is not None else None
         if rec is not None:
             rec.setdefault("detection", []).append(debug)
+            if str(debug.get("fused_state") or "").upper() == "HUMAN":
+                rec["human_detection"] = "Human Detected"
+                rec["human_detection_reason"] = str(debug.get("reason") or "")
+                rec["human_detection_at"] = datetime.now().isoformat(timespec="seconds")
         if not self.print_debug:
             return
         print("[CALL DEBUG]", flush=True)

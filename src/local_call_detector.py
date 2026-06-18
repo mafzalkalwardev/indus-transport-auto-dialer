@@ -45,6 +45,29 @@ class DecisionState(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+STATE_PRIORITY: Dict[DecisionState, int] = {
+    DecisionState.HUMAN: 100,
+    DecisionState.CONNECTED_AUDIO_EVIDENCE: 90,
+    DecisionState.VOICEMAIL: 80,
+    DecisionState.RINGING: 70,
+    DecisionState.DIALING: 60,
+    DecisionState.UNKNOWN: 50,
+    DecisionState.FAILED: 10,
+}
+
+
+_DEBOUNCE_BYPASS = frozenset({
+    DecisionState.HUMAN,
+    DecisionState.ANSWERED_PENDING,
+    DecisionState.CONNECTED_AUDIO_EVIDENCE,
+    DecisionState.FAILED,
+    DecisionState.ENDED,
+    DecisionState.ENDED_MANUALLY,
+    DecisionState.BUSY,
+    DecisionState.NO_ANSWER,
+})
+
+
 @dataclass
 class DetectionConfig:
     # Time windows (seconds)
@@ -105,6 +128,17 @@ class CallDecision:
 
 
 @dataclass
+class HybridDetectionResult:
+    """Public detector facade result for audio + DOM + previous-state fusion."""
+
+    state: DecisionState
+    confidence: float
+    reason: str
+    evidence: Dict[str, Any] = field(default_factory=dict)
+    priority: int = 0
+
+
+@dataclass
 class Evidence:
     """Structure expected from gv_controller JS."""
 
@@ -126,16 +160,24 @@ class Evidence:
     @staticmethod
     def from_dom(dom: Dict[str, Any] | None) -> "Evidence":
         dom = dom or {}
+        def pick(*keys: str, default: Any = None) -> Any:
+            for key in keys:
+                if key in dom:
+                    return dom.get(key)
+            return default
+
         return Evidence(
-            state=str(dom.get("state") or "IDLE"),
-            callText=str(dom.get("callText") or ""),
-            hasRingingText=bool(dom.get("hasRingingText")),
-            hasRingingNode=bool(dom.get("hasRingingNode")),
-            hasTimer=bool(dom.get("hasTimer")),
-            hasEnabledAnswerControl=bool(dom.get("hasEnabledAnswerControl")),
-            hasVoicemailCue=bool(dom.get("hasVoicemailCue")),
-            timerText=str(dom.get("timerText") or ""),
-            voicemail_match=dom.get("voicemailMatch") or dom.get("voicemailMatch"),
+            state=str(pick("state", default="IDLE") or "IDLE"),
+            callText=str(pick("callText", "call_text", default="") or ""),
+            hasRingingText=bool(pick("hasRingingText", "has_ringing_text", default=False)),
+            hasRingingNode=bool(pick("hasRingingNode", "has_ringing_node", default=False)),
+            hasTimer=bool(pick("hasTimer", "has_timer", default=False)),
+            hasEnabledAnswerControl=bool(
+                pick("hasEnabledAnswerControl", "has_enabled_answer_control", default=False)
+            ),
+            hasVoicemailCue=bool(pick("hasVoicemailCue", "has_voicemail_cue", default=False)),
+            timerText=str(pick("timerText", "timer_text", default="") or ""),
+            voicemail_match=pick("voicemailMatch", "voicemail_match", default=None),
         )
 
 
@@ -167,6 +209,7 @@ class LocalCallDetector:
         self._stable_raw_count: int = 0
         self._voicemail_confirm_count: int = 0
         self._final_emitted: Optional[DecisionState] = None
+        self._human_locked: bool = False
 
         # Answer timeline bookkeeping (relative to decide() elapsed_seconds)
         self._answer_detected_elapsed_seconds: Optional[float] = None
@@ -175,6 +218,7 @@ class LocalCallDetector:
         self._voicemail_stable_cycles: int = 0
         self._human_detector = HumanDetector()
         self._voicemail_detector = VoicemailDetector()
+        self._connected_audio_locked: bool = False
 
     def _human_audio_score(
         self,
@@ -193,7 +237,9 @@ class LocalCallDetector:
             score += 0.35
         if has_speech_like and 0.15 <= speech_duration_seconds <= self.config.human_short_speech_max_duration_seconds:
             score += 0.25
-        if vad_confidence >= 0.45:
+        if vad_confidence >= 0.70:
+            score += 0.35
+        elif vad_confidence >= 0.45:
             score += 0.15
         return min(1.0, score)
 
@@ -232,10 +278,64 @@ class LocalCallDetector:
         self._stable_raw_count = 0
         self._voicemail_confirm_count = 0
         self._final_emitted = None
+        self._human_locked = False
+        self._connected_audio_locked = False
 
         self._answer_detected_elapsed_seconds = None
         self._voicemail_stable_cycles = 0
 
+    def detect(
+        self,
+        audio_chunk: AudioFeatures | Any | Dict[str, Any] | None,
+        dom_state: Dict[str, Any] | None,
+        previous_state: DecisionState | str | Dict[str, Any] | None,
+    ) -> HybridDetectionResult:
+        """Fuse one audio/DOM tick into a priority-ranked detection result.
+
+        ``audio_chunk`` is intentionally duck-typed: callers may pass the
+        existing AudioFeatures object, a dict of audio feature fields, or None.
+        ``previous_state`` may be a state string or a dict containing
+        ``elapsed_seconds`` and ``state`` for offline tools/tests.
+        """
+        elapsed_seconds = 0.0
+        previous_state_value = previous_state
+        if isinstance(previous_state, dict):
+            elapsed_seconds = float(previous_state.get("elapsed_seconds", 0.0) or 0.0)
+            previous_state_value = previous_state.get("state")
+
+        decision = self.decide(
+            dom_evidence=dom_state,
+            audio_features=self._coerce_audio_features(audio_chunk),
+            elapsed_seconds=elapsed_seconds,
+        )
+        evidence = {
+            **decision.debug,
+            "previous_state": str(previous_state_value or ""),
+            "dom_state": str((dom_state or {}).get("state") or ""),
+        }
+        priority = STATE_PRIORITY.get(decision.state, 0)
+        return HybridDetectionResult(
+            state=decision.state,
+            confidence=decision.confidence,
+            reason=decision.reason,
+            evidence=evidence,
+            priority=priority,
+        )
+
+    @staticmethod
+    def _coerce_audio_features(audio_chunk: AudioFeatures | Any | Dict[str, Any] | None) -> AudioFeatures | Any:
+        if audio_chunk is None:
+            return AudioFeatures()
+        if isinstance(audio_chunk, dict):
+            features = AudioFeatures()
+            for key, value in audio_chunk.items():
+                setattr(features, key, value)
+            return features
+        return audio_chunk
+
+    @staticmethod
+    def _priority(state: DecisionState) -> int:
+        return STATE_PRIORITY.get(state, 0)
 
     def decide(
         self,
@@ -251,15 +351,6 @@ class LocalCallDetector:
           - Use 0 for unknown.
         """
 
-        if self._final_emitted is not None:
-            # Once final outcome is emitted, keep stable.
-            return CallDecision(
-                state=self._final_emitted,
-                confidence=1.0,
-                reason="final outcome already emitted",
-                debug={"final": self._final_emitted.value},
-            )
-
         evidence = Evidence.from_dom(dom_evidence)
         af = audio_features or AudioFeatures()
 
@@ -267,8 +358,9 @@ class LocalCallDetector:
         # Critical: do NOT start the answer clock purely from audio "speech-like".
         # In real campaigns, some audio can appear briefly before GV updates the DOM
         # (or when UI/slots are transitioning), which causes early VOICEMAIL gating.
-        timer_evidence0 = bool(getattr(evidence, "hasTimer", False))
-        ctrl_evidence0 = bool(getattr(evidence, "hasEnabledAnswerControl", False) or evidence.state.upper() == "CONNECTED_CTRL")
+        dom_state0 = evidence.state.upper()
+        timer_evidence0 = bool(getattr(evidence, "hasTimer", False)) or dom_state0 == "CONNECTED"
+        ctrl_evidence0 = bool(getattr(evidence, "hasEnabledAnswerControl", False)) or dom_state0 == "CONNECTED_CTRL"
         has_speech_like0 = bool(getattr(af, "has_speech_like", False))
         is_silent0 = bool(getattr(af, "is_silent", False))
 
@@ -301,13 +393,12 @@ class LocalCallDetector:
         beep_detected = bool(_get("beep_detected", False) or False)
         vad_confidence = float(_get("vad_confidence", 0.0) or 0.0)
         transcript = str(_get("transcript", "") or "")
+        voicemail_phrase_seen = (
+            self._voicemail_detector.keyword_count(transcript) > 0
+            or self._voicemail_detector.keyword_count(evidence.callText) > 0
+        )
 
         dom_state = evidence.state.upper()
-
-        # 1) FAILED is reserved for technical errors; dom_state should reflect errors.
-        if dom_state in ("FAILED", "ERROR", "BROWSER_CRASH"):
-            self._emit(DecisionState.FAILED, 0.95, "dom indicates failure", dom_state=dom_state)
-            return self._build(DecisionState.FAILED, 0.95, "dom indicates failure", dom_state=dom_state)
 
         if dom_state in ("ENDED_MANUALLY", "MANUAL_ENDED"):
             self._emit(DecisionState.ENDED_MANUALLY, 0.95, "manual hangup/end requested", dom_state=dom_state)
@@ -318,8 +409,61 @@ class LocalCallDetector:
             self._emit(DecisionState.ENDED, 0.9, "dom indicates ended")
             return self._build(DecisionState.ENDED, 0.9, "dom indicates ended")
 
+        if self._human_locked:
+            return CallDecision(
+                state=DecisionState.HUMAN,
+                confidence=1.0,
+                reason="human pickup locked",
+                debug={"human_locked": True},
+            )
+
+        if self._final_emitted is not None:
+            # Once final outcome is emitted, keep stable unless the DOM says the call ended.
+            return CallDecision(
+                state=self._final_emitted,
+                confidence=1.0,
+                reason="final outcome already emitted",
+                debug={"final": self._final_emitted.value},
+            )
+
         if self._current_state == DecisionState.HUMAN:
             return self._build(DecisionState.HUMAN, 0.95, "human pickup already detected")
+
+        if self._connected_audio_locked:
+            if (
+                not voicemail_phrase_seen
+                and self._passes_human_audio_gate(
+                    has_speech_like=has_speech_like,
+                    speech_duration_seconds=speech_duration_seconds,
+                    human_greeting_detected=human_greeting_detected,
+                    short_speech_burst_detected=short_speech_burst_detected,
+                    vad_confidence=vad_confidence,
+                    transcript=transcript,
+                )
+            ):
+                self._emit(
+                    DecisionState.HUMAN,
+                    0.96,
+                    "human speech confirmed after connected audio evidence",
+                    connected_audio_locked=True,
+                )
+                return self._build(
+                    DecisionState.HUMAN,
+                    0.96,
+                    "human speech confirmed after connected audio evidence",
+                    connected_audio_locked=True,
+                )
+            return self._build(
+                DecisionState.CONNECTED_AUDIO_EVIDENCE,
+                0.95,
+                "connected audio evidence locked",
+                connected_audio_locked=True,
+            )
+
+        # 1) FAILED is reserved for technical errors and cannot override connected evidence.
+        if dom_state in ("FAILED", "ERROR", "BROWSER_CRASH"):
+            self._emit(DecisionState.FAILED, 0.95, "dom indicates failure", dom_state=dom_state)
+            return self._build(DecisionState.FAILED, 0.95, "dom indicates failure", dom_state=dom_state)
 
         # 3) DIALING
         if elapsed_seconds <= 1.0 and dom_state in ("IDLE", "DIALING"):
@@ -361,6 +505,7 @@ class LocalCallDetector:
             and busy_conf < 0.8
             and beep_conf < 0.55
             and not beep_detected
+            and not voicemail_phrase_seen
             and self._passes_human_audio_gate(
                 has_speech_like=has_speech_like,
                 speech_duration_seconds=speech_duration_seconds,
@@ -373,10 +518,22 @@ class LocalCallDetector:
         if post_ringing_audio_pickup:
             if self._answer_detected_elapsed_seconds is None:
                 self._answer_detected_elapsed_seconds = float(elapsed_seconds)
+            human_after_ringing = (
+                timer_evidence0
+                or ctrl_evidence0
+                or human_greeting_detected
+                or self._human_detector.has_human_keyword(transcript)
+            )
+            pickup_state = DecisionState.HUMAN if human_after_ringing else DecisionState.CONNECTED_AUDIO_EVIDENCE
+            reason = (
+                "human detected from post-ringing speech"
+                if human_after_ringing
+                else "post-ringing speech pickup detected despite stale GV ringing text"
+            )
             return self._transition(
-                DecisionState.CONNECTED_AUDIO_EVIDENCE,
-                0.82,
-                "post-ringing speech pickup detected despite stale GV ringing text",
+                pickup_state,
+                0.94 if human_after_ringing else 0.82,
+                reason,
                 audio_state=self._audio_state(
                     has_speech_like=has_speech_like,
                     ring_cad=ring_cad,
@@ -387,6 +544,7 @@ class LocalCallDetector:
                 speech_duration=speech_duration_seconds,
                 vad_confidence=vad_confidence,
                 ringback_detected=False,
+                human_detected=human_after_ringing,
             )
 
         # While ringing, never consider voicemail.
@@ -401,8 +559,8 @@ class LocalCallDetector:
         # If not confidently ringing, we expect answer/voicemail checks.
 
         # Answered pending evidence:
-        timer_evidence = bool(evidence.hasTimer)
-        ctrl_evidence = bool(evidence.hasEnabledAnswerControl or dom_state == "CONNECTED_CTRL")
+        timer_evidence = bool(evidence.hasTimer) or dom_state == "CONNECTED"
+        ctrl_evidence = bool(evidence.hasEnabledAnswerControl) or dom_state == "CONNECTED_CTRL"
         audio_answer_like = (
             self.config.enable_audio_detection and has_speech_like and not is_silent
         )
@@ -411,7 +569,7 @@ class LocalCallDetector:
         if timer_evidence:
             answered_pending_conf += 0.45
         if ctrl_evidence:
-            answered_pending_conf += 0.25
+            answered_pending_conf += 0.4 if dom_state == "CONNECTED_CTRL" else 0.25
         if audio_answer_like:
             answered_pending_conf += 0.3
 
@@ -835,10 +993,20 @@ class LocalCallDetector:
         if self._state_entered_at is None:
             self._state_entered_at = 0.0
 
+        if state in _DEBOUNCE_BYPASS:
+            if state == DecisionState.HUMAN:
+                self._human_locked = True
+            if state == DecisionState.CONNECTED_AUDIO_EVIDENCE:
+                self._connected_audio_locked = True
+            self._current_state = state
+            self._history.append((0.0, state, confidence, reason))
+            return self._build(state, confidence, reason, **debug)
+
         # Debounce: only hold if we already have a meaningful previous state.
         immediate_states = {
             DecisionState.ANSWERED_PENDING,
             DecisionState.CONNECTED_AUDIO_EVIDENCE,
+            DecisionState.HUMAN,
         }
         if (
             self._stable_raw_count < self.config.decision_stability_window
@@ -849,12 +1017,17 @@ class LocalCallDetector:
                 return self._build(self._current_state, 0.3, reason=reason, debug={"debounce": True, **debug})
 
         self._current_state = state
+        if state == DecisionState.CONNECTED_AUDIO_EVIDENCE:
+            self._connected_audio_locked = True
         self._history.append((0.0, state, confidence, reason))
         return self._build(state, confidence, reason, **debug)
 
     def _emit(self, final_state: DecisionState, confidence: float, reason: str, **debug: Any) -> None:
-        if final_state != DecisionState.HUMAN:
-            self._final_emitted = final_state
+        self._final_emitted = final_state
+        if final_state == DecisionState.HUMAN:
+            self._human_locked = True
+        if final_state == DecisionState.CONNECTED_AUDIO_EVIDENCE:
+            self._connected_audio_locked = True
         self._current_state = final_state
         self._history.append((0.0, final_state, confidence, reason))
 
