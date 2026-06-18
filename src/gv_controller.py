@@ -840,14 +840,16 @@ def _js_autofill_login(email: str, password: str) -> str:
 """
 
 
-def _js_dial(phone: str, *, click_only: bool = False) -> str:
+def _js_dial(phone: str, *, click_only: bool = False, force_native: bool = False) -> str:
     """Build the JS dial sequence for a given E.164 phone number."""
     safe = phone.replace("'", "")
     click_only_lit = "true" if click_only else "false"
+    force_native_lit = "true" if force_native else "false"
     return f"""
 (function(){{
   var phone='{safe}';
   var clickOnly={click_only_lit};
+  var forceNative={force_native_lit};
 
   function setNativeVal(el,val){{
     try{{
@@ -1235,6 +1237,11 @@ def _js_dial(phone: str, *, click_only: bool = False) -> str:
     }}
   }}
 
+  if(forceNative && !clickOnly){{
+    window.__gvDialStatus = nativeKeyStatus('forced_after_no_panel');
+    return window.__gvDialStatus;
+  }}
+
   var btn=findCallButton(digits);
   if(btn && btn.disabledButton){{
     window.__gvDialStatus = 'call_button_disabled_for_target|value='+editableValue(inp).slice(0,40);
@@ -1593,6 +1600,7 @@ class GVController(QObject):
         self._current_call_phone = ""
         self._dial_step_attempts = 0
         self._call_start_verify_attempts = 0
+        self._force_native_number_entry = False
         self._dial_url_variant = 0
         self._calls_ready_attempts = 0
         self._native_key_attempted = False
@@ -1893,6 +1901,7 @@ class GVController(QObject):
         self._current_call_phone = phone
         self._dial_step_attempts = 0
         self._dial_url_variant = 0
+        self._force_native_number_entry = False
         self._calls_ready_attempts = 0
         self._native_key_attempted = False
         self._native_key_attempts = 0
@@ -2003,13 +2012,15 @@ class GVController(QObject):
         self.stop_polling()
         self._set_state("FAILED")
 
-    def _dial_step(self, *, click_only: bool = False) -> None:
+    def _dial_step(self, *, click_only: bool = False, force_native: bool = False) -> None:
         if not self._active_call or not self._page_alive() or not self._pending_dial_phone:
             return
         self._dial_step_attempts += 1
         phone = self._pending_dial_phone
+        force_native = bool(force_native or self._force_native_number_entry)
+        self._force_native_number_entry = False
         self._page.runJavaScript(
-            _js_dial(phone, click_only=click_only),
+            _js_dial(phone, click_only=click_only, force_native=force_native),
             self._on_dial_step_result,
         )
 
@@ -2208,9 +2219,13 @@ class GVController(QObject):
             if self._call_start_verify_attempts <= 2:
                 phone = self._current_call_phone or self._pending_dial_phone
                 self._pending_dial_phone = phone
+                self._force_native_number_entry = True
                 self._call_clicked_at = 0.0
                 self._page.runJavaScript(_JS_CLEAR_DIAL_FIELD)
-                QTimer.singleShot(700, lambda: self._dial_step(click_only=False))
+                QTimer.singleShot(
+                    700,
+                    lambda: self._dial_step(click_only=False, force_native=True),
+                )
                 return
 
         self._page.runJavaScript(_JS_ACTIVE_CALL_PRESENT, after_active_check)
@@ -2238,10 +2253,13 @@ class GVController(QObject):
                 digits = digits[1:]
             if not digits:
                 return False
-            if not self._clear_dial_field_before_native_input(status):
-                return False
             self._native_key_attempts = getattr(self, "_native_key_attempts", 0) + 1
             self._native_key_attempted = self._native_key_attempts >= 3
+            if self.__dict__.get("_allow_os_input", False):
+                if self._type_number_os_from_status(status):
+                    return True
+            if not self._clear_dial_field_before_native_input(status):
+                return False
             if not self._click_view_coords(x, y):
                 return False
             QTest.keyClick(self.view, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
@@ -2346,10 +2364,16 @@ class GVController(QObject):
     def _type_number_os_from_status(self, status: str) -> bool:
         try:
             match = re.search(r"(?:^|\|)input=(\d+),(-?\d+)", status)
-            if not match:
-                return False
-            x = int(match.group(1))
-            y = int(match.group(2))
+            if match:
+                x = int(match.group(1))
+                y = int(match.group(2))
+            else:
+                mx = re.search(r"(?:^|\|)x=(\d+)", status)
+                my = re.search(r"(?:^|\|)y=(-?\d+)", status)
+                if not mx or not my:
+                    return False
+                x = int(mx.group(1))
+                y = int(my.group(1))
             if x < 0 or y < 0 or x > self.view.width() or y > self.view.height():
                 return False
             phone = self._pending_dial_phone or self._current_call_phone
@@ -2450,14 +2474,15 @@ class GVController(QObject):
             view.setFocus()
             view.activateWindow()
             QApplication.processEvents()
+            if self.__dict__.get("_allow_os_input", False):
+                if self._click_view_coords_os(click_x, click_y):
+                    return True
             QTest.mouseClick(
                 view,
                 Qt.MouseButton.LeftButton,
                 Qt.KeyboardModifier.NoModifier,
                 QPoint(click_x, click_y),
             )
-            if self.__dict__.get("_allow_os_input", False):
-                self._click_view_coords_os(click_x, click_y)
             return True
         except Exception as exc:
             self._emit_log(f"Trusted view click failed: {exc}\n{_format_traceback()}")
@@ -2472,15 +2497,8 @@ class GVController(QObject):
             except Exception:
                 pass
             screen_pos = self.view.mapToGlobal(QPoint(x, y))
-            scale = 1.0
-            try:
-                scale = float(self.view.devicePixelRatioF() or 1.0)
-            except Exception:
-                scale = 1.0
-            if scale <= 0:
-                scale = 1.0
-            gx = int(round(screen_pos.x() * scale))
-            gy = int(round(screen_pos.y() * scale))
+            gx = int(round(screen_pos.x()))
+            gy = int(round(screen_pos.y()))
             import pyautogui
 
             pyautogui.moveTo(gx, gy, duration=0)
@@ -2611,6 +2629,7 @@ class GVController(QObject):
             return
         self._active_call = False
         self._pending_dial_phone = ""
+        self._force_native_number_entry = False
         self._call_clicked_at = 0.0
         self._amd_answer_at = 0.0
         self._amd_decision_ms = 0
@@ -2897,6 +2916,15 @@ class GVController(QObject):
                 self.stop_polling()
                 self._set_state("ENDED")
                 return
+            retrying_start = (
+                self._state == "DIALING"
+                and bool(self._pending_dial_phone)
+                and 0 < getattr(self, "_call_start_verify_attempts", 0) <= 2
+            )
+            if retrying_start:
+                state = "DIALING"
+                self._idle_count = 0
+                return self._set_state(state)
             if (
                 self._state == "DIALING"
                 and self._call_clicked_at
@@ -2910,7 +2938,7 @@ class GVController(QObject):
             self._idle_count += 1
             idle_reference = self._call_clicked_at or self._dial_started_at
             age = time.monotonic() - idle_reference
-            if age < 22.0:
+            if age < 22.0 or (self._state == "DIALING" and self._pending_dial_phone):
                 state = self._state if self._state != "IDLE" else "DIALING"
             else:
                 self._emit_log("Call UI disappeared before answer")
