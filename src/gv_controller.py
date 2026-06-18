@@ -1592,6 +1592,7 @@ class GVController(QObject):
         self._pending_dial_phone = ""
         self._current_call_phone = ""
         self._dial_step_attempts = 0
+        self._call_start_verify_attempts = 0
         self._dial_url_variant = 0
         self._calls_ready_attempts = 0
         self._native_key_attempted = False
@@ -2024,13 +2025,10 @@ class GVController(QObject):
                 self._handle_retryable_dial_status("call_button_wrong_number")
                 return
             self._call_clicked_at = time.monotonic()
-            self._pending_dial_phone = ""
-            QTimer.singleShot(700, lambda s=status: self._retry_native_click_if_no_panel(s))
-            QTimer.singleShot(1700, lambda s=status: self._retry_native_click_if_no_panel(s))
-            QTimer.singleShot(3500, lambda s=status: self._retry_native_click_if_no_panel(s))
             QTimer.singleShot(800, self._poll_once)
             QTimer.singleShot(1600, self._poll_once)
             QTimer.singleShot(2400, self.start_polling)
+            QTimer.singleShot(4500, self._verify_call_started_after_click)
             return
         if status.startswith("call_button_ready"):
             if not self._call_button_status_matches_pending(status):
@@ -2039,21 +2037,21 @@ class GVController(QObject):
                 status_base = status
             elif self._click_call_button_from_status(status):
                 self._call_clicked_at = time.monotonic()
-                self._pending_dial_phone = ""
                 self._emit_log("Dial UI status: call_button_clicked")
                 QTimer.singleShot(800, self._poll_once)
                 QTimer.singleShot(1600, self._poll_once)
                 QTimer.singleShot(2400, self.start_polling)
+                QTimer.singleShot(4500, self._verify_call_started_after_click)
                 return
             else:
                 status = "call_button_click_failed"
                 status_base = status
         if status_base == "enter_pressed_no_call_button":
             self._call_clicked_at = time.monotonic()
-            self._pending_dial_phone = ""
             QTimer.singleShot(800, self._poll_once)
             QTimer.singleShot(1600, self._poll_once)
             QTimer.singleShot(2400, self.start_polling)
+            QTimer.singleShot(4500, self._verify_call_started_after_click)
             return
         if status_base == "input_needs_native_keys":
             if self._type_number_from_status(status):
@@ -2096,6 +2094,7 @@ class GVController(QObject):
                 if not self._call_clicked_at:
                     self._call_clicked_at = time.monotonic()
                 self._pending_dial_phone = ""
+                self._call_start_verify_attempts = 0
                 QTimer.singleShot(200, self._poll_once)
                 QTimer.singleShot(1000, self._poll_once)
                 QTimer.singleShot(1800, self.start_polling)
@@ -2157,6 +2156,7 @@ class GVController(QObject):
             if self._click_call_button_from_status(status):
                 self._call_clicked_at = time.monotonic()
                 self._emit_log("Dial UI status: view_call_click_retry")
+                QTimer.singleShot(4500, self._verify_call_started_after_click)
             QTimer.singleShot(1200, self._poll_once)
 
         self._page.runJavaScript(_JS_ACTIVE_CALL_PRESENT, after_active_check)
@@ -2169,8 +2169,51 @@ class GVController(QObject):
             self._emit_log(f"Dial UI status: {status}")
             if self._click_call_button_from_status(status):
                 self._call_clicked_at = time.monotonic()
+                QTimer.singleShot(4500, self._verify_call_started_after_click)
             QTimer.singleShot(800, self._poll_once)
             QTimer.singleShot(1800, self.start_polling)
+
+    def _verify_call_started_after_click(self) -> None:
+        """After clicking Call, verify GV opened an active call panel.
+
+        Google Voice can clear the dial input without starting a call if its
+        internal target selection was not committed yet. Keep the pending phone
+        until an active panel is actually visible so a single dial attempt can
+        safely re-arm the same approved number.
+        """
+        if not self._active_call or not self._page_alive():
+            return
+        if self._state not in {"DIALING", "IDLE"}:
+            return
+
+        def after_active_check(active: object) -> None:
+            if not self._active_call:
+                return
+            if bool(active):
+                self._pending_dial_phone = ""
+                self._call_start_verify_attempts = 0
+                self._emit_log("Dial UI status: call_panel_opened")
+                QTimer.singleShot(200, self._poll_once)
+                QTimer.singleShot(900, self.start_polling)
+                return
+
+            self._call_start_verify_attempts = getattr(self, "_call_start_verify_attempts", 0) + 1
+            self._emit_log(
+                "Dial UI status: call_click_no_panel"
+                f"|attempt={self._call_start_verify_attempts}"
+            )
+            self._capture_dial_diagnostics(
+                f"call_click_no_panel_{self._call_start_verify_attempts}"
+            )
+            if self._call_start_verify_attempts <= 2:
+                phone = self._current_call_phone or self._pending_dial_phone
+                self._pending_dial_phone = phone
+                self._call_clicked_at = 0.0
+                self._page.runJavaScript(_JS_CLEAR_DIAL_FIELD)
+                QTimer.singleShot(700, lambda: self._dial_step(click_only=False))
+                return
+
+        self._page.runJavaScript(_JS_ACTIVE_CALL_PRESENT, after_active_check)
 
     def _type_number_from_status(self, status: str) -> bool:
         if getattr(self, "_native_key_attempts", 0) >= 3:
@@ -2456,14 +2499,10 @@ class GVController(QObject):
             x = int(mx.group(1))
             y = int(my.group(1))
             self._capture_dial_diagnostics("before_call_click")
-            self._focus_target_call_button()
-            QTest.keyClick(self.view, Qt.Key.Key_Return)
-            QTest.keyClick(self.view, Qt.Key.Key_Space)
-            self._activate_target_call_button_js()
+            if not self._focus_target_call_button():
+                self._emit_log("Dial UI status: call_button_focus_failed")
             if not self._native_click_view_coords(x, y):
                 return False
-            QTest.keyClick(self.view, Qt.Key.Key_Return)
-            QTest.keyClick(self.view, Qt.Key.Key_Space)
             QTimer.singleShot(700, lambda: self._capture_dial_diagnostics("after_call_click"))
             return True
         except Exception as exc:
@@ -2909,12 +2948,17 @@ class GVController(QObject):
             self._state == "CONNECTED"
             or (self._call_clicked_at and call_age >= self._min_answer_seconds)
         )
+        audio_off = not bool(self._runtime_cfg.get("enable_ai_audio", True))
+        if str(self._runtime_cfg.get("amd_mode", "heuristic") or "heuristic").lower() == "off":
+            audio_off = True
 
         # Debounce answered-controls. Google Voice exposes some controls while
         # still ringing, so require a mature call window and repeated evidence.
         if raw_state == "CONNECTED_CTRL":
             self._ctrl_count += 1
-            if answer_window_ready and self._ctrl_count >= 4 and fused_state == "HUMAN":
+            if answer_window_ready and self._ctrl_count >= 2 and fused_state == "HUMAN":
+                state = "CONNECTED"
+            elif audio_off and answer_window_ready and self._ctrl_count >= 2:
                 state = "CONNECTED"
             elif self._state in {"ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "CONNECTED"} or fused_state in {"ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE"}:
                 state = "ANSWERED_PENDING"
@@ -2925,7 +2969,9 @@ class GVController(QObject):
 
         # Safety: GV in-call controls/timer are not human confirmation by themselves.
         if raw_state == "CONNECTED" and fused_state != "HUMAN":
-            if self._state in ("RINGING", "DIALING", "ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "CONNECTED"):
+            if audio_off and bool(dom_payload.get("hasTimer")):
+                state = "CONNECTED"
+            elif self._state in ("RINGING", "DIALING", "ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "CONNECTED"):
                 state = "ANSWERED_PENDING"
             else:
                 state = "RINGING" if self._state != "CONNECTED" else "CONNECTED"
@@ -2946,6 +2992,9 @@ class GVController(QObject):
             self._set_state("ENDED")
             QTimer.singleShot(2000, lambda: self._set_state("IDLE"))
             return
+
+        if state in ("ANSWERED_PENDING", "CONNECTED") and self._dial_stuck_timer is not None:
+            self._dial_stuck_timer.stop()
 
         self._set_state(state)
 
