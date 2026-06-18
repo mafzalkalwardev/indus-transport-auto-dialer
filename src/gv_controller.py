@@ -1763,11 +1763,24 @@ class GVController(QObject):
         """
         if not self._page_alive():
             return
+        top_level = self.view.parent() is None
+        if top_level:
+            self.view.setWindowFlag(Qt.WindowType.Tool, False)
+            self.view.setWindowTitle(f"Google Voice Slot {self.slot_id}")
         self.view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
         self.view.setMinimumSize(640, 480)
         width = max(1024, int(self.view.width() or 0))
         height = max(720, int(self.view.height() or 0))
         self.view.resize(width, height)
+        if top_level:
+            screen = QApplication.primaryScreen()
+            if screen is not None:
+                rect = screen.availableGeometry()
+                max_x = max(20, rect.width() - width - 20)
+                max_y = max(20, rect.height() - height - 20)
+                x = rect.x() + max(20, min(80 + self.slot_id * 24, max_x))
+                y = rect.y() + max(20, min(80 + self.slot_id * 24, max_y))
+                self.view.move(x, y)
         self._set_render_dimensions(width, height)
         if hasattr(self._page, "setViewportSize"):
             try:
@@ -1775,6 +1788,9 @@ class GVController(QObject):
             except Exception:
                 pass
         self.view.show()
+        if top_level:
+            self.view.raise_()
+            self.view.activateWindow()
         self.view.updateGeometry()
         self.view.repaint()
         self._page.runJavaScript(_JS_FORCE_VISIBLE)
