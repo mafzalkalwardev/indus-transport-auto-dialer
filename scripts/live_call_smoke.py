@@ -283,8 +283,14 @@ class LiveCallSmoke:
             self.log(None, "BLOCKED: Google Voice did not become ready for: " + ", ".join(missing))
             for idx, ctrl in enumerate(self.controllers):
                 if not ctrl.is_logged_in:
+                    acct = self.accounts[idx]
                     self.results.setdefault(idx, {})
-                    self.results[idx]["final"] = "LOGIN_REQUIRED"
+                    self.results[idx].update({
+                        "slot": idx,
+                        "account": acct.get("name") or acct.get("email"),
+                        "profile": acct.get("profile"),
+                        "final": "LOGIN_REQUIRED",
+                    })
             self.finish()
             return
         self.log(None, "Waiting for Google Voice readiness: " + ", ".join(missing))
@@ -572,7 +578,10 @@ class LiveCallSmoke:
             json.dump(report, f, indent=2)
         print(f"\nReport written: {path}", flush=True)
         for rec in report["results"]:
-            print(f"Slot {rec['slot']}: {rec['phone']} -> {rec['final']}", flush=True)
+            slot = rec.get("slot", "?")
+            phone = rec.get("phone", "N/A")
+            final = rec.get("final", "UNKNOWN")
+            print(f"Slot {slot}: {phone} -> {final}", flush=True)
         QApplication.instance().quit()
 
 
