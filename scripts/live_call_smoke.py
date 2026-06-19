@@ -339,7 +339,14 @@ class LiveCallSmoke:
         rec = self.results.get(call_id) if call_id is not None else None
         if rec is None:
             return
-        if "Dial UI status: call_button_clicked" in message and not rec.get("call_clicked_at"):
+        if (
+            (
+                "Dial UI status: call_button_clicked" in message
+                or "Dial UI status: call_suggestion_clicked" in message
+                or "Dial UI status: os_number_submitted" in message
+            )
+            and not rec.get("call_clicked_at")
+        ):
             rec["call_clicked_at"] = datetime.now().isoformat(timespec="seconds")
             QTimer.singleShot(
                 self.call_timeout * 1000,
@@ -359,10 +366,14 @@ class LiveCallSmoke:
         })
         status = {
             "RINGING": "ringing",
-            "ANSWERED_PENDING": "on-call",
-            "CONNECTED_AUDIO_EVIDENCE": "on-call",
-            "CONNECTED": "on-call",
+            "ANSWERED_PENDING": "classifying answer",
+            "CONNECTED_AUDIO_EVIDENCE": "call picked up - talk now",
+            "CONNECTED": "call picked up - talk now",
             "VOICEMAIL": "voicemail",
+            "NO_ANSWER": "no answer / hung up before pickup",
+            "ENDED": "call ended",
+            "ENDED_MANUALLY": "call ended by operator",
+            "BUSY": "busy",
             "FAILED": "failed",
         }.get(state, state.lower())
         self.log(slot, f"STATE {state} ({status})")
@@ -397,6 +408,7 @@ class LiveCallSmoke:
         rec = self.results.get(call_id) if call_id is not None else None
         if rec is not None:
             rec.setdefault("detection", []).append(debug)
+            rec["last_debug"] = debug
             if str(debug.get("fused_state") or "").upper() == "HUMAN":
                 rec["human_detection"] = "Human Detected"
                 rec["human_detection_reason"] = str(debug.get("reason") or "")

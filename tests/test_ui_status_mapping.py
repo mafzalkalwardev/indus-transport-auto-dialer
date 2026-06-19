@@ -1,4 +1,5 @@
 from autodialer_gui import ui_display_state, ui_state_allows_transition
+from src.ui_theme import status_label
 
 
 def test_connected_like_backend_states_display_connected():
@@ -10,6 +11,11 @@ def test_connected_like_backend_states_display_connected():
         "HUMAN",
     ):
         assert ui_display_state(state) == "CONNECTED"
+
+
+def test_connected_label_tells_agent_to_talk_now():
+    assert status_label("CONNECTED") == "Call picked up - talk now"
+    assert status_label("CONNECTED_AUDIO_EVIDENCE") == "Call picked up - talk now"
 
 
 def test_answered_pending_displays_classifying_not_connected():
@@ -31,5 +37,7 @@ def test_stale_dialing_and_ringing_cannot_override_connected():
     assert not ui_state_allows_transition("CONNECTED_AUDIO_EVIDENCE", "RINGING")
     assert not ui_state_allows_transition("CONNECTED", "FAILED")
     assert not ui_state_allows_transition("CONNECTED", "UNKNOWN")
+    assert ui_state_allows_transition("CONNECTED", "ENDED")
+    assert ui_state_allows_transition("CONNECTED", "IDLE")
     assert ui_state_allows_transition("DIALING", "CONNECTED_AUDIO_EVIDENCE")
     assert ui_state_allows_transition("RINGING", "ANSWERED_PENDING")

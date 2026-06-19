@@ -117,3 +117,22 @@ def test_visible_failed_state_can_be_overridden_by_manual_confirmation(monkeypat
     assert smoke.stop_requested is False
     assert hung_up == [True]
     assert released == [0]
+
+
+def test_detection_update_records_last_debug_snapshot():
+    smoke = live_call_smoke.LiveCallSmoke.__new__(live_call_smoke.LiveCallSmoke)
+    smoke.active_by_slot = {0: 0}
+    smoke.results = {0: {"phone": "+15127616455", "states": [], "final": "PENDING"}}
+    smoke.print_debug = False
+
+    debug = {
+        "phone": "+15127616455",
+        "fused_state": "HUMAN",
+        "reason": "human pickup locked",
+    }
+
+    smoke.on_detection(0, debug)
+
+    assert smoke.results[0]["detection"] == [debug]
+    assert smoke.results[0]["last_debug"] == debug
+    assert smoke.results[0]["human_detection"] == "Human Detected"

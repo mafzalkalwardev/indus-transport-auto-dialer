@@ -142,6 +142,8 @@ def ui_state_allows_transition(current: str, incoming: str) -> bool:
         "NO_ANSWER",
     }:
         return False
+    if current_display == "CONNECTED" and incoming_display in {"ENDED", "IDLE"}:
+        return True
     return (
         UI_STATE_ORDER.get(incoming_display, 0) >= UI_STATE_ORDER.get(current_display, 0)
         or incoming_display in {"IDLE", "READY", "SETUP REQUIRED"}
@@ -3533,15 +3535,17 @@ class MainWindow(QMainWindow):
             else phone
         if display_state == "RINGING":
             self._mark_call_time(slot_id, "ringing_at")
-            self._log(f"[Slot {slot_id}] ringing/on-call: {disp}")
+            self._log(f"[Slot {slot_id}] Ringing: {disp}")
             if state == "ANSWERED_PENDING":
                 self.statusBar().showMessage(
                     f"Classifying answer — Line {slot_id + 1}: {disp}")
         elif display_state == "CONNECTED":
             self._mark_call_time(slot_id, "connected_at")
-            self._log(f"[Slot {slot_id}] connected ({state}): {disp}")
+            self._log(
+                f"[Slot {slot_id}] Call picked up - talk now: {disp} ({state})"
+            )
             self.statusBar().showMessage(
-                f"Connected - Line {slot_id + 1}: {disp}")
+                f"Call picked up - talk now - Line {slot_id + 1}: {disp}")
         self._update_card(slot_id, state, phone)
         self._log(f"[Slot {slot_id}] → {state}  {disp}")
 
@@ -3550,8 +3554,10 @@ class MainWindow(QMainWindow):
             panel_delay_ms = int(float(ui_cfg.get("agent_panel_delay_seconds", 0)) * 1000)
 
             def _show_connected(sid=slot_id, d=disp, delay=panel_delay_ms):
-                self.statusBar().showMessage(f"Live call — Line {sid + 1}: {d}")
                 self._focus_answered_slot(sid)
+                self.statusBar().showMessage(
+                    f"Call picked up - talk now - Line {sid + 1}: {d}"
+                )
                 auto_listen = bool(ui_cfg.get("auto_open_panel_on_human", False))
                 if auto_listen and effective_enable_ai_audio(self.cfg):
                     self._open_slot_monitor(sid)
@@ -3571,7 +3577,8 @@ class MainWindow(QMainWindow):
         elif state == "VOICEMAIL":
             vm_sec = int(self.cfg.get("voicemail_hangup_sec", 3))
             self._log(
-                f"[Slot {slot_id}] 📭 Voicemail — auto-hangup in {vm_sec}s, then next number")
+                f"[Slot {slot_id}] Voicemail detected: {disp} - auto-hangup in {vm_sec}s, then next number"
+            )
             self._log_final_call(slot_id, "VOICEMAIL", phone)
             self._watchdog.record_call_completed(slot_id)
             campaign_generation = self._campaign_generation
@@ -3597,6 +3604,7 @@ class MainWindow(QMainWindow):
                 self._finish_slot_call(slot_id)
         elif display_state == "NO_ANSWER":
             if phone:
+                self._log(f"[Slot {slot_id}] No answer / hung up before pickup: {disp}")
                 self._log_final_call(
                     slot_id, "NO_ANSWER", phone,
                     contact_name=self._slot_name.get(slot_id, ""),
