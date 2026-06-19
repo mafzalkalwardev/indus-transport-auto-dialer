@@ -20,6 +20,8 @@ class DummyAudio:
         continuous_greeting_duration_seconds=0.0,
         beep_detected=False,
         busy_tone_cadence_confidence=0.0,
+        vad_confidence=0.0,
+        transcript="",
     ):
         self.rms = rms
         self.is_silent = is_silent
@@ -35,6 +37,8 @@ class DummyAudio:
         self.continuous_greeting_duration_seconds = continuous_greeting_duration_seconds
         self.beep_detected = beep_detected
         self.busy_tone_cadence_confidence = busy_tone_cadence_confidence
+        self.vad_confidence = vad_confidence
+        self.transcript = transcript
 
 
 
@@ -86,6 +90,66 @@ def test_answered_without_timer_becomes_answered_pending():
     assert decision.state == DecisionState.ANSWERED_PENDING.value or decision.state == DecisionState.UNKNOWN.value
 
 
+def test_connected_ctrl_state_counts_as_answer_control_evidence():
+    cfg = DetectionConfig(max_ring_seconds=55, answered_pending_seconds=10)
+    det = LocalCallDetector(cfg)
+    dom = {
+        "state": "CONNECTED_CTRL",
+        "hasEnabledAnswerControl": False,
+        "hasTimer": False,
+        "hasVoicemailCue": False,
+    }
+    audio = DummyAudio(
+        rms=0.0,
+        is_silent=False,
+        has_speech_like=True,
+        ringback_cadence_confidence=0.35,
+        speech_duration_seconds=0.69,
+        vad_confidence=0.75,
+    )
+    decision = det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=25)
+    assert decision.state in {
+        DecisionState.ANSWERED_PENDING.value,
+        DecisionState.HUMAN.value,
+    }
+
+
+def test_connected_ctrl_with_vad_speech_becomes_human():
+    cfg = DetectionConfig(
+        max_ring_seconds=60,
+        answered_pending_seconds=8,
+        answered_pending_safe_min_seconds=5,
+        human_first_seconds=5,
+    )
+    det = LocalCallDetector(cfg)
+    dom = {
+        "state": "CONNECTED_CTRL",
+        "hasEnabledAnswerControl": True,
+        "hasTimer": False,
+    }
+    silent = DummyAudio(is_silent=True, has_speech_like=False)
+
+    d0 = det.decide(dom_evidence=dom, audio_features=silent, elapsed_seconds=22)
+    assert d0.state in (
+        DecisionState.ANSWERED_PENDING.value,
+        DecisionState.HUMAN.value,
+    )
+
+    class VadAudio(DummyAudio):
+        def __init__(self):
+            super().__init__(
+                rms=0.2,
+                is_silent=False,
+                has_speech_like=True,
+                speech_duration_seconds=0.74,
+            )
+            self.vad_confidence = 0.75
+
+    d1 = det.decide(dom_evidence=dom, audio_features=VadAudio(), elapsed_seconds=29)
+    d2 = det.decide(dom_evidence=dom, audio_features=VadAudio(), elapsed_seconds=31)
+    assert DecisionState.HUMAN.value in (d1.state, d2.state)
+
+
 def test_human_short_hello_becomes_human():
     cfg = DetectionConfig(max_ring_seconds=55, answered_pending_seconds=10)
     det = LocalCallDetector(cfg)
@@ -100,6 +164,47 @@ def test_human_short_hello_becomes_human():
     )
     decision = det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=12)
     assert decision.state == DecisionState.HUMAN.value
+
+
+def test_human_is_locked_and_never_demoted():
+    det = LocalCallDetector(DetectionConfig(answered_pending_seconds=10))
+    dom = {"state": "CONNECTED", "hasTimer": True, "hasEnabledAnswerControl": True}
+    audio = DummyAudio(
+        has_speech_like=True,
+        speech_duration_seconds=1.0,
+        human_greeting_detected=True,
+        short_speech_burst_detected=True,
+    )
+
+    d1 = det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=12)
+    assert d1.state == DecisionState.HUMAN.value
+
+    silent = DummyAudio(is_silent=True)
+    d2 = det.decide(
+        dom_evidence={"state": "RINGING", "hasRingingText": True},
+        audio_features=silent,
+        elapsed_seconds=13,
+    )
+    assert d2.state == DecisionState.HUMAN.value
+
+
+def test_human_bypasses_debounce_on_first_poll():
+    det = LocalCallDetector(
+        DetectionConfig(
+            decision_stability_window=3,
+            answered_pending_seconds=10,
+        )
+    )
+    dom = {"state": "CONNECTED", "hasTimer": True, "hasEnabledAnswerControl": True}
+    audio = DummyAudio(
+        has_speech_like=True,
+        speech_duration_seconds=1.0,
+        human_greeting_detected=True,
+        short_speech_burst_detected=True,
+    )
+
+    d = det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=12)
+    assert d.state == DecisionState.HUMAN.value
 
 
 
@@ -215,6 +320,230 @@ def test_busy_tone_becomes_busy():
     )
     decision = det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=5)
     assert decision.state == DecisionState.BUSY.value
+
+
+def test_post_ringing_speech_evidence_becomes_connected_audio_evidence():
+    cfg = DetectionConfig(max_ring_seconds=55)
+    det = LocalCallDetector(cfg)
+    ringing_dom = {
+        "state": "RINGING",
+        "hasRingingText": True,
+        "hasRingingNode": True,
+        "hasTimer": False,
+        "hasEnabledAnswerControl": False,
+    }
+    ring_audio = DummyAudio(ringback_cadence_confidence=0.9, is_silent=False)
+
+    det.decide(dom_evidence=ringing_dom, audio_features=ring_audio, elapsed_seconds=4)
+    decision = det.decide(
+        dom_evidence=ringing_dom,
+        audio_features=DummyAudio(
+            rms=0.22,
+            is_silent=False,
+            has_speech_like=True,
+            ringback_cadence_confidence=0.1,
+            speech_duration_seconds=0.67,
+            short_speech_burst_detected=True,
+            vad_confidence=0.75,
+        ),
+        elapsed_seconds=8,
+    )
+
+    assert decision.state == DecisionState.CONNECTED_AUDIO_EVIDENCE.value
+
+
+def test_human_speech_after_ringing_becomes_connected():
+    cfg = DetectionConfig(max_ring_seconds=55)
+    det = LocalCallDetector(cfg)
+    ringing_dom = {
+        "state": "RINGING",
+        "hasRingingText": True,
+        "hasRingingNode": True,
+    }
+    det.decide(
+        dom_evidence=ringing_dom,
+        audio_features=DummyAudio(ringback_cadence_confidence=0.85),
+        elapsed_seconds=4,
+    )
+    decision = det.decide(
+        dom_evidence={
+            "state": "CONNECTED_CTRL",
+            "hasEnabledAnswerControl": True,
+            "hasRingingText": True,
+            "hasRingingNode": False,
+        },
+        audio_features=DummyAudio(
+            rms=0.2,
+            is_silent=False,
+            has_speech_like=True,
+            ringback_cadence_confidence=0.0,
+            speech_duration_seconds=0.7,
+            short_speech_burst_detected=True,
+            vad_confidence=0.76,
+            transcript="hello hello",
+        ),
+        elapsed_seconds=9,
+    )
+    assert decision.state == DecisionState.HUMAN.value
+    assert decision.debug.get("human_detected") is True
+
+
+def test_public_detect_interface_returns_priority_result():
+    det = LocalCallDetector(DetectionConfig(decision_stability_window=1))
+    result = det.detect(
+        {
+            "has_speech_like": True,
+            "is_silent": False,
+            "speech_duration_seconds": 0.7,
+            "short_speech_burst_detected": True,
+            "vad_confidence": 0.75,
+            "transcript": "hello hello",
+        },
+        {"state": "CONNECTED_CTRL", "has_enabled_answer_control": True},
+        {"state": "RINGING", "elapsed_seconds": 12},
+    )
+    assert result.state == DecisionState.HUMAN
+    assert result.priority > 0
+    assert result.evidence["previous_state"] == "RINGING"
+
+
+def test_voicemail_phrase_becomes_voicemail_after_confirmation():
+    det = LocalCallDetector(
+        DetectionConfig(
+            voicemail_confirmation_count=2,
+            voicemail_stability_cycles_required=2,
+            decision_stability_window=1,
+        )
+    )
+    dom = {
+        "state": "CONNECTED",
+        "hasTimer": True,
+        "callText": "your call has been forwarded to the mailbox please record your message at the tone",
+        "hasVoicemailCue": True,
+    }
+    audio = DummyAudio(
+        is_silent=False,
+        continuous_greeting_duration_seconds=8.0,
+        voicemail_keywords_detected_count=2,
+        beep_detected=True,
+        beep_hz_confidence=0.9,
+        transcript="your call has been forwarded to the mailbox please record your message at the tone",
+    )
+    det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=1)
+    d1 = det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=9)
+    d2 = det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=10)
+    assert d1.state in (DecisionState.ANSWERED_PENDING.value, DecisionState.VOICEMAIL.value)
+    assert d2.state == DecisionState.VOICEMAIL.value
+
+
+def test_stale_dialing_cannot_override_connected():
+    det = LocalCallDetector(DetectionConfig())
+    connected = det.decide(
+        dom_evidence={"state": "CONNECTED", "hasTimer": True},
+        audio_features=DummyAudio(
+            has_speech_like=True,
+            speech_duration_seconds=0.8,
+            human_greeting_detected=True,
+            short_speech_burst_detected=True,
+        ),
+        elapsed_seconds=8,
+    )
+    assert connected.state == DecisionState.HUMAN.value
+    stale = det.decide(
+        dom_evidence={"state": "DIALING"},
+        audio_features=DummyAudio(is_silent=True),
+        elapsed_seconds=9,
+    )
+    assert stale.state == DecisionState.HUMAN.value
+
+
+def test_stale_ringing_text_does_not_override_connected_audio_evidence():
+    cfg = DetectionConfig(max_ring_seconds=55)
+    det = LocalCallDetector(cfg)
+    stale_dom = {
+        "state": "RINGING",
+        "callText": "Latest calls Outgoing call Calling",
+        "hasRingingText": True,
+        "hasRingingNode": False,
+        "hasTimer": False,
+        "hasEnabledAnswerControl": False,
+    }
+
+    det.decide(
+        dom_evidence=stale_dom,
+        audio_features=DummyAudio(ringback_cadence_confidence=0.8, is_silent=False),
+        elapsed_seconds=3,
+    )
+    decision = det.decide(
+        dom_evidence=stale_dom,
+        audio_features=DummyAudio(
+            rms=0.2,
+            is_silent=False,
+            has_speech_like=True,
+            ringback_cadence_confidence=0.0,
+            speech_duration_seconds=0.7,
+            short_speech_burst_detected=True,
+            vad_confidence=0.76,
+        ),
+        elapsed_seconds=9,
+    )
+
+    assert decision.state == DecisionState.CONNECTED_AUDIO_EVIDENCE.value
+
+
+def test_failed_cannot_override_connected():
+    det = LocalCallDetector(DetectionConfig())
+    connected = det.decide(
+        dom_evidence={"state": "CONNECTED", "hasTimer": True},
+        audio_features=DummyAudio(
+            has_speech_like=True,
+            speech_duration_seconds=0.8,
+            human_greeting_detected=True,
+            short_speech_burst_detected=True,
+        ),
+        elapsed_seconds=8,
+    )
+    assert connected.state == DecisionState.HUMAN.value
+    failed = det.decide(
+        dom_evidence={"state": "FAILED"},
+        audio_features=DummyAudio(),
+        elapsed_seconds=9,
+    )
+    assert failed.state == DecisionState.HUMAN.value
+
+
+def test_debounce_cannot_demote_connected_audio_to_unknown():
+    det = LocalCallDetector(DetectionConfig(decision_stability_window=3))
+    stale_dom = {
+        "state": "RINGING",
+        "hasRingingText": True,
+        "hasRingingNode": False,
+    }
+    det.decide(
+        dom_evidence=stale_dom,
+        audio_features=DummyAudio(ringback_cadence_confidence=0.8),
+        elapsed_seconds=4,
+    )
+    connected_audio = det.decide(
+        dom_evidence=stale_dom,
+        audio_features=DummyAudio(
+            rms=0.2,
+            is_silent=False,
+            has_speech_like=True,
+            ringback_cadence_confidence=0.0,
+            speech_duration_seconds=0.7,
+            short_speech_burst_detected=True,
+            vad_confidence=0.76,
+        ),
+        elapsed_seconds=9,
+    )
+    assert connected_audio.state == DecisionState.CONNECTED_AUDIO_EVIDENCE.value
+    unknown = det.decide(
+        dom_evidence={"state": "IDLE", "callText": "latest calls"},
+        audio_features=DummyAudio(is_silent=True),
+        elapsed_seconds=10,
+    )
+    assert unknown.state == DecisionState.CONNECTED_AUDIO_EVIDENCE.value
 
 
 def test_manual_end_becomes_ended_manually():

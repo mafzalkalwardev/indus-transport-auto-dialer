@@ -3,6 +3,9 @@ dist/
 __pycache__/
 *.pyc
 *.pyo
+.env
+.env.*
+!.env.example
 logo.ico
 call_logs.csv
 .codegraph/
@@ -11,6 +14,10 @@ Archive_OldProjects/
 New Project/Auto Dialer Pro/
 chrome_profiles/
 logs/
+*.log
+*.sqlite3
+*.db
 data/gv_accounts.json
 phones_test.xlsx
+phones.xlsx
 dialer_config.json
