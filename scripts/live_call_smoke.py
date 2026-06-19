@@ -283,6 +283,7 @@ class LiveCallSmoke:
             self.log(None, "BLOCKED: Google Voice did not become ready for: " + ", ".join(missing))
             for idx, ctrl in enumerate(self.controllers):
                 if not ctrl.is_logged_in:
+                    self.results.setdefault(idx, {})
                     self.results[idx]["final"] = "LOGIN_REQUIRED"
             self.finish()
             return
