@@ -28,6 +28,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from .human_detector import HumanDetector
 from .voicemail_detector import VoicemailDetector
 
+try:
+    from .external_evidence import ExternalEvidence
+except Exception:
+    ExternalEvidence = None  # type: ignore[misc,assignment]
+
 
 class DecisionState(str, Enum):
     IDLE = "IDLE"
@@ -343,16 +348,29 @@ class LocalCallDetector:
         dom_evidence: Dict[str, Any] | None,
         audio_features: AudioFeatures | Any | None,
         elapsed_seconds: float,
+        external_evidence: "ExternalEvidence | None" = None,
     ) -> CallDecision:
         """Make a decision.
 
         elapsed_seconds:
           - time since dial click for that slot.
           - Use 0 for unknown.
+
+        external_evidence:
+          - Optional normalized evidence from Chrome extension prototypes.
+          - Evidence-only: never bypasses DOM-first answer timer,
+            voicemail safe window, or human audio gate.
         """
 
         evidence = Evidence.from_dom(dom_evidence)
         af = audio_features or AudioFeatures()
+
+        if ExternalEvidence is not None and external_evidence is not None:
+            try:
+                from .external_evidence_mapper import ExternalEvidenceMapper
+                af = ExternalEvidenceMapper.merge_into_audio_features(af, external_evidence)
+            except Exception:
+                pass
 
         # Track when we first see answer evidence.
         # Critical: do NOT start the answer clock purely from audio "speech-like".

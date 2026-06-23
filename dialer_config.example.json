@@ -37,5 +37,13 @@
             "agent_panel_delay_seconds": 0
         },
   "campaign_contact_idx": 0,
-  "campaign_excel_path": ""
+  "campaign_excel_path": "",
+  "external_detector_enabled": false,
+  "external_detector_mode": "prototype_a",
+  "external_detector_merge_mode": "evidence_only",
+  "external_detector_timeout_ms": 1500,
+  "external_detector_fail_open": true,
+  "external_detector_debug": true,
+  "external_detector_backend_url": "127.0.0.1",
+  "external_detector_backend_port": 8787
 }

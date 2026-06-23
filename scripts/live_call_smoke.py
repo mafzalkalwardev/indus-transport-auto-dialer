@@ -430,6 +430,8 @@ class LiveCallSmoke:
             "speech_duration", "silence_duration", "beep_detected",
             "human_greeting_detected", "voicemail_confirmations",
             "should_hangup", "audio_backend_name", "vad_backend", "vad_confidence",
+            "external_provider_health", "external_last_label", "external_confidence",
+            "external_transcript", "external_accepted",
         ):
             print(f"{key}={debug.get(key)}", flush=True)
 

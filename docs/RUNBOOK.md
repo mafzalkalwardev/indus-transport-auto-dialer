@@ -20,6 +20,29 @@
 3. Check `data/gv_accounts.json` has email and password for automatic login.
 4. Restart the app after profile changes.
 
+## External extension evidence (optional)
+
+The Auto Dialer can optionally ingest live evidence from Chrome extension prototypes.
+
+- **Default:** disabled (`external_detector_enabled: false`).
+- **Enable:** set `"external_detector_enabled": true` in `dialer_config.json`.
+- **Modes:**
+  - `prototype_a` — preferred live provider (FastAPI + Deepgram backend).
+  - `prototype_b` — offline/testing provider (whisper.cpp + rules backend).
+- **Safety:** all extension outputs are evidence-only. The local Python detector remains the final arbiter. Extension results never bypass DOM-first answer timer, voicemail safe window, or human audio gate.
+- **Disable instantly:** set `"external_detector_enabled": false` and restart the app, or edit `dialer_config.json` while the app is running via Settings apply.
+
+## Rollback: disable external detector instantly
+
+1. In **Settings** or by editing `dialer_config.json`, set:
+   ```json
+   {
+     "external_detector_enabled": false
+   }
+   ```
+2. Restart the affected GVController lines, or restart the app fully.
+3. The local `LocalCallDetector` continues working without any external dependency.
+
 ## Terminal messages (usually safe to ignore)
 
 | Message | Meaning |
@@ -66,6 +89,9 @@ Settings:
 - `enable_ai_audio`: enable local audio fusion.
 - `audio_device`: blank uses default output loopback, or set a device index from `scripts/audio_device_test.py`.
 - `live_debug_mode`: prints `[CALL DEBUG]` blocks during live polling.
+- `external_detector_enabled`: enable external Chrome extension evidence (disabled by default).
+- `external_detector_mode`: `prototype_a` or `prototype_b`.
+- `external_detector_backend_url` / `external_detector_backend_port`: where the extension backend is reachable.
 
 Device test:
 
@@ -79,24 +105,13 @@ Expected statuses:
 - **AI Audio: ON** - local capture is active.
 - **AI Audio: NO BACKEND** - sounddevice/PortAudio or the selected device cannot capture; DOM detection still runs.
 - **AI Audio: OFF** - audio detection disabled in settings.
+- **Ext AMD: off / Ext prototype_a: connected / Ext prototype_a: disconnected** - external extension provider status (shown in slot cards).
 
 Voicemail guardrails:
 
 - Ringing never becomes voicemail directly.
 - Voicemail requires answer evidence, at least 7 seconds after answer, high confidence, stable confirmations, and at least two strong signals.
-- Short hello, short speech burst, or hello with background noise is treated as human or answered-pending, never voicemail.
-- Background noise alone stays answered-pending.
-
-Live test checklist:
-
-1. Run `python scripts/audio_device_test.py` and confirm **AI Audio: ON**.
-2. Configure one Google Voice account per simultaneous test number.
-3. Enable `live_debug_mode` in `dialer_config.json` or Settings.
-4. Run `python scripts/live_call_smoke.py`.
-5. Check the JSON report under `logs/`.
-6. Confirm each `[CALL DEBUG]` block has `dom_state`, `audio_state`, `fused_state`, `confidence`, `reason`, and `should_hangup`.
-
-With no numbers passed, `python scripts/live_call_smoke.py` loads fresh CRM contacts and caps the run to the configured Google Voice account count. You can force the CRM path with `python scripts/live_call_smoke.py --from-crm --crm-limit 2`.
+- Extension evidence must also obey these rails.
 
 ## Long campaigns (1000+ numbers, 8 slots)
 
@@ -115,7 +130,13 @@ With no numbers passed, `python scripts/live_call_smoke.py` loads fresh CRM cont
   "watchdog_stuck_state_sec": 90,
   "slot_memory_limit_mb": 700,
   "slot_recycle_after_calls": 75,
-  "watchdog_check_interval_sec": 5
+  "watchdog_check_interval_sec": 5,
+  "external_detector_enabled": false,
+  "external_detector_mode": "prototype_a",
+  "external_detector_merge_mode": "evidence_only",
+  "external_detector_timeout_ms": 1500,
+  "external_detector_fail_open": true,
+  "external_detector_debug": true
 }
 ```
 
@@ -130,3 +151,4 @@ With no numbers passed, `python scripts/live_call_smoke.py` loads fresh CRM cont
 - [ ] Number of active GV lines vs `n_slots`
 - [ ] Windows version and available RAM
 - [ ] Whether issue happens on admin PC or client package only
+- [ ] External detector health (`external_provider_health` in debug or slot card)

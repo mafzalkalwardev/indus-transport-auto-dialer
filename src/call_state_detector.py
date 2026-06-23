@@ -12,6 +12,11 @@ from typing import Any
 
 from .local_call_detector import CallDecision, DetectionConfig, LocalCallDetector
 
+try:
+    from .detection.external_evidence import ExternalEvidence
+except Exception:
+    ExternalEvidence = None  # type: ignore[misc,assignment]
+
 
 class CallStateDetector:
     def __init__(self, config: DetectionConfig | None = None):
@@ -26,9 +31,11 @@ class CallStateDetector:
         dom_evidence: dict[str, Any] | None,
         audio_features: Any | None,
         elapsed_seconds: float,
+        external_evidence: "ExternalEvidence | None" = None,
     ) -> CallDecision:
         return self._detector.decide(
             dom_evidence=dom_evidence,
             audio_features=audio_features,
             elapsed_seconds=elapsed_seconds,
+            external_evidence=external_evidence,
         )

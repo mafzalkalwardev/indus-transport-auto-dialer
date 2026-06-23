@@ -37,6 +37,7 @@ from src.call_state_engine import CallStateEngine
 from src.call_audio_monitor import CallAudioMonitor
 from src.call_decision_engine import CallDecisionEngine
 from src.local_call_detector import DetectionConfig
+from src.detection.external_evidence_manager import ExternalEvidenceManager
 from src.gv_accounts import (
     SESSION_MARKER,
     has_session_marker,
@@ -1570,8 +1571,13 @@ class GVController(QObject):
         amd_mode = str(self._runtime_cfg.get("amd_mode", "heuristic") or "heuristic").lower()
         if amd_mode == "off":
             audio_enabled = False
+
+        self._external_evidence_manager = ExternalEvidenceManager(self._runtime_cfg)
+        self._external_evidence_manager.initialize()
+
         self._decision_engine = CallDecisionEngine(
             detector_config=self._detection_config_from_runtime(),
+            external_evidence_manager=self._external_evidence_manager,
         )
         self._audio_monitor = CallAudioMonitor(
             enabled=audio_enabled,
@@ -1735,8 +1741,20 @@ class GVController(QObject):
         amd_mode = str(self._runtime_cfg.get("amd_mode", "heuristic") or "heuristic").lower()
         if amd_mode == "off":
             audio_enabled = False
+
+        if getattr(self, "_external_evidence_manager", None) is not None:
+            self._external_evidence_manager.config = self._runtime_cfg
+            self._external_evidence_manager.enabled = bool(
+                self._runtime_cfg.get("external_detector_enabled", False)
+            )
+            if self._external_evidence_manager.enabled:
+                self._external_evidence_manager.initialize()
+            else:
+                self._external_evidence_manager.shutdown()
+
         self._decision_engine = CallDecisionEngine(
             detector_config=self._detection_config_from_runtime(),
+            external_evidence_manager=self._external_evidence_manager,
         )
         self._audio_monitor.set_enabled(audio_enabled)
         if amd_mode == "whisper" and self._whisper_thread is None:
@@ -1774,6 +1792,11 @@ class GVController(QObject):
         self._active_call = False
         if getattr(self, "_audio_monitor", None) is not None:
             self._audio_monitor.shutdown()
+        if getattr(self, "_external_evidence_manager", None) is not None:
+            try:
+                self._external_evidence_manager.shutdown()
+            except Exception:
+                pass
 
         page = getattr(self, "_page", None)
         view = getattr(self, "view", None)
@@ -2993,10 +3016,23 @@ class GVController(QObject):
         if self._state in ("RINGING", "ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "CONNECTED", "DIALING"):
             audio_features = self._audio_monitor.poll()
         elapsed = time.monotonic() - self._dial_started_at if self._dial_started_at else 0.0
+
+        external_evidence = None
+        try:
+            mgr = self._external_evidence_manager  # type: ignore[attr-defined]
+            if mgr is not None:
+                external_evidence = mgr.get_latest(
+                    call_id=str(self._current_call_phone or self._pending_dial_phone or ""),
+                    line_id=str(self.slot_id),
+                )
+        except Exception:
+            external_evidence = None
+
         fused = self._decision_engine.update(
             dom_evidence=dom_payload,
             audio_features=audio_features,
             elapsed_seconds=elapsed,
+            external_evidence=external_evidence,
         )
         fused_state = fused.state or decision.state or "IDLE"
         if decision.state in {"IDLE", "ENDED", "ENDED_MANUALLY"}:
@@ -3063,6 +3099,12 @@ class GVController(QObject):
             "vad_backend": getattr(audio_features, "vad_backend", ""),
             "vad_confidence": float(getattr(audio_features, "vad_confidence", 0.0) or 0.0),
         }
+        try:
+            mgr = self._external_evidence_manager  # type: ignore[attr-defined]
+            if mgr is not None:
+                debug.update(mgr.get_diagnostics())
+        except Exception:
+            pass
         # Emit detection debug for UI/DB layers.
         self.detection_update.emit(self.slot_id, debug)
         if bool(self._runtime_cfg.get("live_debug_mode", False)):

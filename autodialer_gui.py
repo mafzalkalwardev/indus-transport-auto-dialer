@@ -354,6 +354,10 @@ class SlotCard(QGroupBox):
         self.lbl_ai_decision.setWordWrap(True)
         lay.addWidget(self.lbl_ai_decision)
 
+        self.lbl_external_provider = _label("Ext AMD: off", "muted")
+        self.lbl_external_provider.setWordWrap(True)
+        lay.addWidget(self.lbl_external_provider)
+
         btn_col = QVBoxLayout()
         btn_col.setSpacing(6)
 
@@ -469,7 +473,7 @@ class SlotCard(QGroupBox):
         if backend == "ON":
             self.lbl_ai_audio.setText("AI Audio: ON")
         elif backend == "NO_BACKEND":
-            self.lbl_ai_audio.setText("AI Audio: NO BACKEND")
+            self.lbl_ai_audio.setText("AI Audio: NO_BACKEND")
         else:
             self.lbl_ai_audio.setText("AI Audio: OFF")
         fused = str(debug.get("fused_state") or debug.get("ui_state") or "--")
@@ -481,6 +485,21 @@ class SlotCard(QGroupBox):
         latency_txt = f" {latency}ms" if latency > 0 else ""
         self.lbl_ai_decision.setText(f"Decision: {fused} ({conf}){latency_txt} {reason}")
         self.set_dial_detail(f"AMD: {fused}{latency_txt} — {reason}" if reason else f"AMD: {fused}{latency_txt}")
+
+        ext_enabled = bool(debug.get("external_detector_enabled", False))
+        ext_mode = str(debug.get("external_detector_mode", "off"))
+        ext_health = str(debug.get("external_provider_health", "unknown"))
+        ext_label = str(debug.get("external_last_label", "none"))
+        ext_conf = float(debug.get("external_confidence", 0.0) or 0.0)
+        if ext_enabled:
+            health_color = "green" if ext_health == "connected" else "red" if ext_health == "error" else "orange"
+            self.lbl_external_provider.setText(
+                f"Ext {ext_mode}: {ext_health} | {ext_label} ({ext_conf:.2f})"
+            )
+            self.lbl_external_provider.setStyleSheet(f"color: {health_color}; font-size: 9pt;")
+        else:
+            self.lbl_external_provider.setText("Ext AMD: off")
+            self.lbl_external_provider.setStyleSheet("color: gray; font-size: 9pt;")
 
     def set_ai_audio_enabled(self, enabled: bool) -> None:
         self.lbl_ai_audio.setText("AI Audio: ON" if enabled else "AI Audio: OFF")
