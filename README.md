@@ -27,19 +27,19 @@ Professional Windows desktop dialer for FT Solutions. Agents use a simple brande
 
 ## 🖼 Screenshots
 
-![Login page](docs/screenshots/login-page.png)
+![Login page](docs/screenshots/login-dark.png)
 
-![Dialer tab](docs/screenshots/dialer-tab.png)
+![Dialer tab](docs/screenshots/dialer-dark.png)
 
-![Live calls dashboard](docs/screenshots/live-calls-tab.png)
+![Live calls dashboard](docs/screenshots/live-calls-dark.png)
 
-![Call logs](docs/screenshots/call-logs-tab.png)
+![Call logs](docs/screenshots/call-logs-dark.png)
 
-![CRM contacts](docs/screenshots/crm-tab.png)
+![CRM contacts](docs/screenshots/crm-dark.png)
 
-![Settings panel](docs/screenshots/settings-tab.png)
+![Settings panel](docs/screenshots/settings-dark.png)
 
-![Administration panel](docs/screenshots/administration-tab.png)
+![Administration panel](docs/screenshots/administration-dark.png)
 
 ## 🐍 Contribution graph
 
