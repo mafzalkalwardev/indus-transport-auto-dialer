@@ -101,7 +101,7 @@ def test_health_check_disabled():
         os.unlink(cfg_path)
 
 
-def test_health_check_offline_backend_fail_closed():
+def test_health_check_offline_backend_fail_closed(monkeypatch):
     import scripts.external_detector_health as health_mod
     original_load = health_mod.load_config
 
@@ -113,6 +113,11 @@ def test_health_check_offline_backend_fail_closed():
             "external_detector_fail_open": False,
         }
 
+    monkeypatch.setattr(
+        health_mod,
+        "check_http",
+        lambda url, timeout=2.0: {"url": url, "status": "FAIL", "code": None, "latency_ms": None},
+    )
     health_mod.load_config = fake_load
     try:
         sys.argv = ["scripts/external_detector_health.py"]
@@ -122,7 +127,7 @@ def test_health_check_offline_backend_fail_closed():
     assert rc == 1
 
 
-def test_health_check_offline_backend_fail_open():
+def test_health_check_offline_backend_fail_open(monkeypatch):
     import scripts.external_detector_health as health_mod
     original_load = health_mod.load_config
 
@@ -134,6 +139,11 @@ def test_health_check_offline_backend_fail_open():
             "external_detector_fail_open": True,
         }
 
+    monkeypatch.setattr(
+        health_mod,
+        "check_http",
+        lambda url, timeout=2.0: {"url": url, "status": "FAIL", "code": None, "latency_ms": None},
+    )
     health_mod.load_config = fake_load
     try:
         sys.argv = ["scripts/external_detector_health.py"]
