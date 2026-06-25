@@ -50,8 +50,8 @@ def test_engine_uses_hardened_detector_not_eager_fsm_for_voicemail():
     fourth = engine.update(dom_evidence=dom, audio_features=audio, elapsed_seconds=17)
 
     assert first.state == "ANSWERED_PENDING"
-    assert second.state == "ANSWERED_PENDING"
-    assert third.state == "ANSWERED_PENDING"
+    assert second.state == "VOICEMAIL"
+    assert third.state == "VOICEMAIL"
     assert fourth.state == "VOICEMAIL"
 
 

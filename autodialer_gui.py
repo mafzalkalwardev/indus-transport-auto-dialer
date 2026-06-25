@@ -1335,6 +1335,10 @@ class MainWindow(QMainWindow):
             "amd_early_decision_ms": int(self.cfg.get("amd_early_decision_ms", 800)),
             "amd_max_decision_ms": int(self.cfg.get("amd_max_decision_ms", 2500)),
             "amd_human_first_seconds": float(self.cfg.get("amd_human_first_seconds", 5)),
+            "amd_safe_window_seconds": float(self.cfg.get("amd_safe_window_seconds", 5)),
+            "amd_analysis_seconds": float(self.cfg.get("amd_analysis_seconds", 8)),
+            "amd_require_audio_human": bool(self.cfg.get("amd_require_audio_human", True)),
+            "amd_min_human_audio_score": float(self.cfg.get("amd_min_human_audio_score", 0.30)),
             "audio_device": self.cfg.get("audio_device", ""),
             "live_debug_mode": bool(self.cfg.get("live_debug_mode", False)),
         }

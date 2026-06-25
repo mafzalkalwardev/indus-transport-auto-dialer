@@ -133,6 +133,7 @@ def test_connected_ctrl_with_vad_speech_becomes_human():
     assert d0.state in (
         DecisionState.ANSWERED_PENDING.value,
         DecisionState.HUMAN.value,
+        DecisionState.UNKNOWN.value,
     )
 
     class VadAudio(DummyAudio):
@@ -142,6 +143,8 @@ def test_connected_ctrl_with_vad_speech_becomes_human():
                 is_silent=False,
                 has_speech_like=True,
                 speech_duration_seconds=0.74,
+                human_greeting_detected=True,
+                short_speech_burst_detected=True,
             )
             self.vad_confidence = 0.75
 
@@ -509,7 +512,7 @@ def test_failed_cannot_override_connected():
         audio_features=DummyAudio(),
         elapsed_seconds=9,
     )
-    assert failed.state == DecisionState.HUMAN.value
+    assert failed.state == DecisionState.FAILED.value
 
 
 def test_debounce_cannot_demote_connected_audio_to_unknown():

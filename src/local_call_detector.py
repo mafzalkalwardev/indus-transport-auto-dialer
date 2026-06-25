@@ -248,6 +248,19 @@ class LocalCallDetector:
             score += 0.15
         return min(1.0, score)
 
+    def _has_human_speech_evidence(
+        self,
+        *,
+        human_greeting_detected: bool,
+        short_speech_burst_detected: bool,
+        transcript: str,
+    ) -> bool:
+        return bool(
+            human_greeting_detected
+            or short_speech_burst_detected
+            or self._human_detector.has_human_keyword(transcript)
+        )
+
     def _passes_human_audio_gate(
         self,
         *,
@@ -428,12 +441,21 @@ class LocalCallDetector:
             return self._build(DecisionState.ENDED, 0.9, "dom indicates ended")
 
         if self._human_locked:
-            return CallDecision(
-                state=DecisionState.HUMAN,
-                confidence=1.0,
-                reason="human pickup locked",
-                debug={"human_locked": True},
-            )
+            if (
+                dom_state in ("IDLE", "FAILED", "ENDED")
+                and not timer_evidence0
+                and not ctrl_evidence0
+                and not has_speech_like0
+            ):
+                self._human_locked = False
+                self._current_state = DecisionState.IDLE
+            else:
+                return CallDecision(
+                    state=DecisionState.HUMAN,
+                    confidence=1.0,
+                    reason="human pickup locked",
+                    debug={"human_locked": True},
+                )
 
         if self._final_emitted is not None:
             # Once final outcome is emitted, keep stable unless the DOM says the call ended.
@@ -585,11 +607,11 @@ class LocalCallDetector:
 
         answered_pending_conf = 0.0
         if timer_evidence:
-            answered_pending_conf += 0.45
+            answered_pending_conf += 0.5
         if ctrl_evidence:
-            answered_pending_conf += 0.4 if dom_state == "CONNECTED_CTRL" else 0.25
+            answered_pending_conf += 0.2 if dom_state == "CONNECTED_CTRL" else 0.15
         if audio_answer_like:
-            answered_pending_conf += 0.3
+            answered_pending_conf += 0.25
 
         # Audio features that may be populated by analyzer / tests (duck-typed).
         voicemail_keywords_detected_count = int(_get("voicemail_keywords_detected_count", 0) or 0)
@@ -602,8 +624,12 @@ class LocalCallDetector:
         continuous_greeting_duration_seconds = float(_get("continuous_greeting_duration_seconds", 0.0) or 0.0)
         background_noise_level = float(_get("background_noise_level", rms) or 0.0)
 
+        can_classify_answer = bool(
+            timer_evidence or (ctrl_evidence and audio_answer_like)
+        )
+
         # Start pending window if evidence suggests answer has happened.
-        if answered_pending_conf >= 0.4:
+        if can_classify_answer and answered_pending_conf >= 0.35:
             current_debug_base = {
                 "current_state": self._current_state.value,
                 "candidate_state": "ANSWERED_PENDING",
@@ -652,7 +678,14 @@ class LocalCallDetector:
                 )
                 if (
                     answer_elapsed_seconds <= self.config.human_first_seconds
+                    and has_speech_like
+                    and not is_silent
                     and audio_gate_ok
+                    and self._has_human_speech_evidence(
+                        human_greeting_detected=human_greeting_detected,
+                        short_speech_burst_detected=short_speech_burst_detected,
+                        transcript=transcript,
+                    )
                 ):
                     human_conf = min(0.98, max(answered_pending_conf, self.config.human_confidence_threshold) + 0.25)
                     return self._transition(
@@ -687,13 +720,22 @@ class LocalCallDetector:
 
             # 3) After safe window, promote HUMAN only with audio human pattern.
             vad_confidence = float(_get("vad_confidence", 0.0) or 0.0)
-            if self._passes_human_audio_gate(
-                has_speech_like=has_speech_like,
-                speech_duration_seconds=speech_duration_seconds,
-                human_greeting_detected=human_greeting_detected,
-                short_speech_burst_detected=short_speech_burst_detected,
-                vad_confidence=vad_confidence,
-                transcript=transcript,
+            if (
+                has_speech_like
+                and not is_silent
+                and self._passes_human_audio_gate(
+                    has_speech_like=has_speech_like,
+                    speech_duration_seconds=speech_duration_seconds,
+                    human_greeting_detected=human_greeting_detected,
+                    short_speech_burst_detected=short_speech_burst_detected,
+                    vad_confidence=vad_confidence,
+                    transcript=transcript,
+                )
+                and self._has_human_speech_evidence(
+                    human_greeting_detected=human_greeting_detected,
+                    short_speech_burst_detected=short_speech_burst_detected,
+                    transcript=transcript,
+                )
             ):
                 human_conf = min(0.98, max(answered_pending_conf, self.config.human_confidence_threshold) + 0.2)
                 return self._transition(
@@ -943,35 +985,55 @@ class LocalCallDetector:
                 voicemail_conf=voicemail_score,
             )
 
-        no_machine_signal = (
-            not f_continuous
-            and not f_keywords
-            and not f_beep
-            and not f_repeated_pattern
-            and not f_dom_voicemail
-        )
-
-        # After the analysis window, DOM answer evidence plus no machine signal is
-        # enough to release the call as human. Voicemail still requires factors.
         if (
-            answer_elapsed_seconds >= self.config.answered_pending_seconds
-            and no_machine_signal
-            and (not self.config.require_audio_for_human or not is_silent)
+            self.config.enable_beep_detection
+            and f_beep
+            and answer_elapsed_seconds >= max(1.0, self.config.beep_immediate_vm_seconds)
+            and not human_greeting_detected
+            and not self._human_detector.has_human_keyword(transcript)
         ):
-            reason = "analysis window complete with no machine signals"
+            reason = "beep tone after answer — voicemail"
             decision_debug["debug_reason"] = reason
-            self._emit(DecisionState.HUMAN, max(0.85, human_conf, human_audio_score), reason, **decision_debug)
+            self._emit(DecisionState.VOICEMAIL, min(0.95, max(0.85, voicemail_score, beep_conf)), reason, **decision_debug)
             return self._build(
-                DecisionState.HUMAN,
-                max(0.85, human_conf, human_audio_score),
+                DecisionState.VOICEMAIL,
+                min(0.95, max(0.85, voicemail_score, beep_conf)),
                 reason,
                 **decision_debug,
-                human_conf=human_conf,
+                voicemail_conf=voicemail_score,
             )
 
-        # Human wins only when audio gate passes.
-        if audio_gate_ok and human_conf >= self.config.human_confidence_threshold:
-            reason = "human confidence threshold met (human-first)"
+        if (
+            continuous_greeting_duration_seconds >= 3.5
+            and answer_elapsed_seconds >= 4.0
+            and not self._has_human_speech_evidence(
+                human_greeting_detected=human_greeting_detected,
+                short_speech_burst_detected=short_speech_burst_detected,
+                transcript=transcript,
+            )
+        ):
+            reason = "long greeting without human keywords — voicemail"
+            decision_debug["debug_reason"] = reason
+            self._emit(DecisionState.VOICEMAIL, 0.88, reason, **decision_debug)
+            return self._build(
+                DecisionState.VOICEMAIL,
+                0.88,
+                reason,
+                **decision_debug,
+                voicemail_conf=0.88,
+            )
+
+        # Human wins only when audio gate passes and speech sounds like a live pickup.
+        if (
+            audio_gate_ok
+            and human_conf >= self.config.human_confidence_threshold
+            and self._has_human_speech_evidence(
+                human_greeting_detected=human_greeting_detected,
+                short_speech_burst_detected=short_speech_burst_detected,
+                transcript=transcript,
+            )
+        ):
+            reason = "human confidence threshold met"
             decision_debug["debug_reason"] = reason
             self._emit(DecisionState.HUMAN, min(0.98, human_conf), reason, **decision_debug)
             return self._build(

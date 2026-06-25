@@ -583,6 +583,22 @@ _JS_DETECT_STATE = r"""
     return out('IDLE', {callText:callText, idleDialpadPage:true});
   }
 
+  var failPhrases=[
+    "couldn't complete your call","could not complete your call",
+    "we couldn't complete","unable to connect","not able to connect",
+    "call failed","there was an error","couldn't connect",
+    "unable to place your call","cannot place your call",
+    "call was not completed","problem connecting your call"
+  ];
+  for(var fp=0;fp<failPhrases.length;fp++){
+    if(callText.indexOf(failPhrases[fp])!==-1) {
+      return out('FAILED', {failureMatch:failPhrases[fp],
+        hasTimer:hasTimer, timerText:timerText,
+        hasEnabledAnswerControl:hasEnabledAnswerControl, answerControl:answerControl,
+        hasRingingText:hasRingingText, hasRingingNode:hasRingingNode});
+    }
+  }
+
   var hasEnabledAnswerControl = false;
   var answerControl = '';
   var ansCtrl=['button[aria-label*="Hold call" i]','button[aria-label*="Mute call" i]',
@@ -1593,7 +1609,7 @@ class GVController(QObject):
         self._state      = "IDLE"
         self._ctrl_count = 0   # debounce for answered-controls
         self._call_state_engine = CallStateEngine()
-        self._runtime_cfg = runtime_cfg or self._load_runtime_cfg()
+        self._runtime_cfg = {**self._load_runtime_cfg(), **(runtime_cfg or {})}
         self._allow_os_input = bool(self._runtime_cfg.get("allow_os_input", False))
         audio_enabled = bool(self._runtime_cfg.get("enable_ai_audio", True))
         amd_mode = str(self._runtime_cfg.get("amd_mode", "heuristic") or "heuristic").lower()
