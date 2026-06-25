@@ -98,6 +98,47 @@ _JS_REFRESH_LAYOUT = """
 })();
 """
 
+_JS_BLANK_CHECK = """
+(function(){
+  try {
+    var u = (location.href || '').toLowerCase();
+    if (!u || u === 'about:blank') return {blank: true, reason: 'about_blank'};
+    var body = document.body;
+    if (!body) return {blank: true, reason: 'no_body'};
+    var text = ((body.innerText || '') + (document.documentElement && document.documentElement.innerText || ''))
+      .replace(/\\s+/g, ' ').trim();
+    var roots = [document], seen = new Set(roots);
+    for (var i = 0; i < roots.length; i++) {
+      var nodes = [];
+      try { nodes = Array.from(roots[i].querySelectorAll('*')); } catch(e) {}
+      for (var j = 0; j < nodes.length; j++) {
+        var n = nodes[j];
+        if (n.shadowRoot && !seen.has(n.shadowRoot)) {
+          seen.add(n.shadowRoot);
+          roots.push(n.shadowRoot);
+        }
+      }
+    }
+    var visible = 0;
+    for (var r = 0; r < roots.length; r++) {
+      var els = [];
+      try { els = Array.from(roots[r].querySelectorAll('input,button,form,iframe,[role],img,svg')); } catch(e) {}
+      for (var k = 0; k < els.length; k++) {
+        var el = els[k];
+        var rect = el.getBoundingClientRect();
+        if (rect.width > 8 && rect.height > 8) visible++;
+      }
+    }
+    if (text.length < 8 && visible < 2) {
+      return {blank: true, reason: 'empty_dom', textLen: text.length, visible: visible};
+    }
+    return {blank: false, textLen: text.length, visible: visible};
+  } catch(e) {
+    return {blank: true, reason: 'error', err: String(e)};
+  }
+})();
+"""
+
 _JS_CLICK_AT = """
 (function(x, y){
   try {
@@ -1679,6 +1720,19 @@ class GVController(QObject):
         )
         if playback_attr is not None:
             settings.setAttribute(playback_attr, False)
+        try:
+            from src.system_profile import system_ram_gb
+            if system_ram_gb() < 12:
+                webgl = getattr(QWebEngineSettings.WebAttribute, "WebGLEnabled", None)
+                if webgl is not None:
+                    settings.setAttribute(webgl, False)
+                accel = getattr(
+                    QWebEngineSettings.WebAttribute, "Accelerated2dCanvasEnabled", None
+                )
+                if accel is not None:
+                    settings.setAttribute(accel, False)
+        except Exception:
+            pass
 
         self.view = QWebEngineView()
         self.view.setPage(self._page)
@@ -1743,6 +1797,9 @@ class GVController(QObject):
         self._last_whisper_at = 0.0
         self._post_answer_polls = 0
         self._min_answer_seconds = 10.0
+        self._visible_embedded = False
+        self._blank_recover_attempts = 0
+        self._blank_recover_scheduled = False
         self.prepare_for_background_rendering()
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -1910,6 +1967,7 @@ class GVController(QObject):
         """
         if not self._page_alive():
             return
+        self._visible_embedded = True
         top_level = self.view.parent() is None
         self.view.setWindowFlag(Qt.WindowType.Tool, False)
         self.view.setWindowFlag(Qt.WindowType.FramelessWindowHint, False)
@@ -1947,13 +2005,70 @@ class GVController(QObject):
             self.view.activateWindow()
         self.view.setFocus(Qt.FocusReason.OtherFocusReason)
         self.view.updateGeometry()
+        self.view.update()
         self.view.repaint()
+        if parent is not None:
+            parent.update()
+            ancestor = parent.parentWidget()
+            while ancestor is not None:
+                ancestor.update()
+                ancestor = ancestor.parentWidget()
         QApplication.processEvents()
         self._page.runJavaScript(_JS_FORCE_VISIBLE)
         QTimer.singleShot(80, lambda: self._page.runJavaScript(_JS_FORCE_VISIBLE))
         QTimer.singleShot(200, lambda: self._page.runJavaScript(_JS_REFRESH_LAYOUT))
         QTimer.singleShot(400, lambda: self.view.repaint())
         QTimer.singleShot(600, lambda: self._page.runJavaScript(_JS_REFRESH_LAYOUT))
+
+    def schedule_visible_refresh(self, delays_ms: tuple[int, ...] | None = None) -> None:
+        """Repaint embedded browser after dialog layout settles (fixes white screen)."""
+        if delays_ms is None:
+            delays_ms = (0, 80, 200, 500, 1200)
+        for delay_ms in delays_ms:
+            QTimer.singleShot(delay_ms, self._refresh_visible_once)
+
+    def _refresh_visible_once(self) -> None:
+        if not self._page_alive():
+            return
+        self.prepare_for_visible_display()
+        self._page.runJavaScript(_JS_BLANK_CHECK, self._on_blank_check)
+
+    def _on_blank_check(self, result: object) -> None:
+        if not self._visible_embedded or not isinstance(result, dict):
+            return
+        if not result.get("blank"):
+            self._blank_recover_attempts = 0
+            return
+        if self._blank_recover_scheduled:
+            return
+        self._blank_recover_attempts += 1
+        if self._blank_recover_attempts > 4:
+            self._emit_log(
+                "Browser view still blank — click Reload or check RAM/disk space.")
+            return
+        self._blank_recover_scheduled = True
+        self._emit_log("Browser view blank — recovering…")
+        QTimer.singleShot(250, self._retry_blank_recovery)
+
+    def _retry_blank_recovery(self) -> None:
+        self._blank_recover_scheduled = False
+        if not self._page_alive() or not self._visible_embedded:
+            return
+        url = self._page.url().toString() if self._page else ""
+        self.prepare_for_visible_display()
+        if not url or url.startswith("about:blank"):
+            if self._setup_mode:
+                self._page.load(QUrl(SIGNIN_URL))
+            else:
+                self._page.load(QUrl(GV_URL))
+            return
+        try:
+            self._page.triggerAction(QWebEnginePage.WebAction.Reload)
+        except Exception:
+            if self._setup_mode:
+                self._page.load(QUrl(SIGNIN_URL))
+            else:
+                self._page.load(QUrl(GV_URL))
 
     def set_audio_muted(self, muted: bool) -> None:
         if not self._page_alive():
@@ -2011,6 +2126,8 @@ class GVController(QObject):
 
     def prepare_for_background_rendering(self) -> None:
         """Keep Google Voice rendered off-screen with a small footprint."""
+        self._visible_embedded = False
+        self._blank_recover_attempts = 0
         max_dim = 16777215
         viewport_w, viewport_h = 1280, 900
         native_w, native_h = 1024, 720
@@ -2976,6 +3093,9 @@ class GVController(QObject):
         self._page.runJavaScript(_JS_FORCE_VISIBLE)
         if ok:
             self._load_retry_count = 0
+            self._blank_recover_attempts = 0
+            if self._visible_embedded:
+                self.schedule_visible_refresh((80, 300, 800))
             QTimer.singleShot(400, self._try_auto_login)
             QTimer.singleShot(800, self._check_login)
             if not self._setup_mode:

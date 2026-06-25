@@ -712,6 +712,26 @@ class LoginPage(QWidget):
 #  GV SETUP DIALOG  (shown when profile not yet logged in)
 # ══════════════════════════════════════════════════════════════════════════════
 
+class _BrowserFrame(QFrame):
+    """Host for embedded WebEngine; repaints when the dialog is resized."""
+
+    def __init__(self, on_resize=None, parent=None):
+        super().__init__(parent)
+        self._on_resize = on_resize
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(120)
+        self._resize_timer.timeout.connect(self._emit_resize)
+
+    def _emit_resize(self) -> None:
+        if self._on_resize:
+            self._on_resize((0, 150))
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._resize_timer.start()
+
+
 class GVSetupDialog(QDialog):
     """Shows the embedded browser so user can log into Google Voice."""
 
@@ -728,6 +748,7 @@ class GVSetupDialog(QDialog):
         self._on_password_saved = on_password_saved
         self._login_email = login_email
         self._profile_dir = profile_dir
+        self._signin_started = False
         self.setWindowTitle(f"Google Voice — {account_label}")
         self.setMinimumSize(960, 740)
         self.resize(980, 760)
@@ -771,7 +792,9 @@ class GVSetupDialog(QDialog):
         self.lbl_status.setObjectName("statusPill")
         lay.addWidget(self.lbl_status)
 
-        self.browser_frame = QFrame()
+        self.browser_frame = _BrowserFrame(
+            on_resize=controller.schedule_visible_refresh,
+        )
         self.browser_frame.setObjectName("browserFrame")
         self.browser_frame.setMinimumHeight(420)
         flay = QVBoxLayout(self.browser_frame)
@@ -780,6 +803,7 @@ class GVSetupDialog(QDialog):
             main_window._embed_browser_visible(controller.view, flay)
         else:
             flay.addWidget(controller.view)
+            controller.schedule_visible_refresh()
         lay.addWidget(self.browser_frame, stretch=1)
 
         btn_row = QHBoxLayout()
@@ -812,7 +836,12 @@ class GVSetupDialog(QDialog):
         controller.login_detected.connect(on_login)
         controller._page.loadProgress.connect(self._on_load_progress)
 
-        QTimer.singleShot(50, self._start_signin)
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.controller.schedule_visible_refresh()
+        if not self._signin_started:
+            self._signin_started = True
+            QTimer.singleShot(120, self._start_signin)
 
     def _start_signin(self) -> None:
         self.load_bar.setRange(0, 0)
@@ -825,7 +854,9 @@ class GVSetupDialog(QDialog):
     def _reload_signin(self) -> None:
         self.load_bar.setRange(0, 0)
         self.lbl_status.setText("Reloading sign-in page…")
+        self.controller._blank_recover_attempts = 0
         self.controller.load(for_setup=True)
+        self.controller.schedule_visible_refresh()
 
     def _open_profile(self) -> None:
         os.makedirs(self._profile_dir, exist_ok=True)
@@ -977,7 +1008,7 @@ class SlotMonitorDialog(QDialog):
         lay.addWidget(_label(msg, "muted"))
         self.lbl_monitor = _label("Loading Google Voice view…", "statusPill")
         lay.addWidget(self.lbl_monitor)
-        frame = QFrame()
+        frame = _BrowserFrame(on_resize=controller.schedule_visible_refresh)
         frame.setObjectName("browserFrame")
         frame.setMinimumHeight(520)
         fl = QVBoxLayout(frame)
@@ -1018,10 +1049,8 @@ class SlotMonitorDialog(QDialog):
 
     def _schedule_visible_refresh(self) -> None:
         """Repaint Google Voice after the dialog layout has real dimensions."""
-        self.controller.prepare_for_visible_display()
+        self.controller.schedule_visible_refresh()
         self.lbl_monitor.setText("Showing current Google Voice screen.")
-        for delay_ms in (120, 300, 600, 1200):
-            QTimer.singleShot(delay_ms, self.controller.prepare_for_visible_display)
         QTimer.singleShot(450, self._retry_dial_if_needed)
 
     def _retry_dial_if_needed(self) -> None:
@@ -1049,6 +1078,10 @@ class SlotMonitorDialog(QDialog):
             max(self.minimumHeight(), rect.height() - margin * 2),
         )
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.controller.schedule_visible_refresh((0, 150))
+
     def _toggle_maximized(self) -> None:
         if self.isMaximized():
             self.showNormal()
@@ -1057,13 +1090,14 @@ class SlotMonitorDialog(QDialog):
         else:
             self.showMaximized()
             self._max_btn.setText("Restore")
-        QTimer.singleShot(80, self.controller.prepare_for_visible_display)
+        QTimer.singleShot(80, self.controller.schedule_visible_refresh)
 
     def _on_log(self, _sid: int, msg: str) -> None:
         self.lbl_monitor.setText(msg)
 
     def _refresh_view(self) -> None:
-        self.controller.prepare_for_visible_display()
+        self.controller._blank_recover_attempts = 0
+        self.controller.schedule_visible_refresh()
         self.lbl_monitor.setText(
             "Redrew the existing Google Voice screen without reloading the call.")
 
@@ -1431,14 +1465,26 @@ class MainWindow(QMainWindow):
         if view.parent() is self._browser_host:
             self._browser_layout.removeWidget(view)
         elif view.parent() is not None:
+            parent_widget = view.parentWidget()
+            parent_layout = parent_widget.layout() if parent_widget else None
+            if parent_layout is not None:
+                parent_layout.removeWidget(view)
             view.setParent(None)
         view.setWindowFlag(Qt.WindowType.Tool, False)
         view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
+        max_dim = 16777215
+        view.setMinimumSize(400, 300)
+        view.setMaximumSize(max_dim, max_dim)
+        view.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(view, stretch=1)
-        self._show_browser_for_setup(view)
         QApplication.processEvents()
         if ctrl:
-            ctrl.prepare_for_visible_display()
+            ctrl.schedule_visible_refresh()
+        else:
+            view.show()
+            view.updateGeometry()
+            view.repaint()
         return ctrl
 
     def _hide_browser_after_setup(self, view: QWebEngineView) -> None:
