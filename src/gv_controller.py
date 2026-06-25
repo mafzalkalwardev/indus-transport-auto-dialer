@@ -3163,11 +3163,12 @@ class GVController(QObject):
             "CONNECTED_AUDIO_EVIDENCE",
             "CONNECTED",
             "RINGING",
+            "DIALING",
         }:
             return
         if mode == "hybrid" and fused_state in {"HUMAN", "VOICEMAIL", "BUSY", "NO_ANSWER", "ENDED"}:
             return
-        if mode == "hybrid" and answer_ready and self._post_answer_polls < 3:
+        if mode == "hybrid" and answer_ready and self._post_answer_polls < 1:
             return
         now = time.monotonic()
         if now - self._last_whisper_at < 2.0:
@@ -3278,6 +3279,7 @@ class GVController(QObject):
             "has_ringing_node": bool(dom_payload.get("hasRingingNode", False)),
             "has_timer": bool(dom_payload.get("hasTimer", False)),
             "timer_text": str(dom_payload.get("timerText", "")),
+            "transcript": str(getattr(audio_features, "transcript", "") or "")[:240],
             "audio_state": fused.debug.get("audio_state") or self._audio_state_from_features(audio_features),
             "fused_state": fused_state,
             "confidence": round(float(fused.confidence), 3),

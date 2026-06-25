@@ -20,6 +20,11 @@ def test_call_screening():
     assert result.classification == "call_screening_prompt"
 
 
+def test_carrier_could_not_complete():
+    result = classify_transcript("We couldn't complete your call. Please try again later.")
+    assert result.classification == "disconnected_or_failed"
+
+
 def test_transcript_scorer_weights():
     scored = TranscriptEvidenceScorer().score("Hi, yes speaking")
     assert scored.human_score >= 0.65

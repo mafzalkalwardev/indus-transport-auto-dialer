@@ -75,6 +75,11 @@ CARRIER_PHRASES = [
     "the number you have dialed",
     "cannot be completed",
     "call cannot be completed",
+    "couldn't complete your call",
+    "could not complete your call",
+    "we couldn't complete",
+    "unable to connect",
+    "not able to connect",
 ]
 
 BUSY_PHRASES = [

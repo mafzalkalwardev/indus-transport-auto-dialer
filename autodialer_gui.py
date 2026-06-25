@@ -436,29 +436,46 @@ class SlotCard(QGroupBox):
         if not ui_state_allows_transition(getattr(self, "_current_state", "IDLE"), display_state):
             return
         self._current_state = display_state
+        status_key = display_state
         if display_state == "IDLE":
-            display_state = "READY" if self._gv_ready else "SETUP REQUIRED"
-        self.lbl_status.setText(status_label(display_state))
-        self._apply_status_style(display_state)
-        if display_state == "CONNECTED":
-            phone_text = phone if phone else "Answered call"
+            status_key = "READY" if self._gv_ready else "SETUP REQUIRED"
+        self.lbl_status.setText(status_label(status_key))
+        self._apply_status_style(status_key)
+
+        active_phone = phone.strip()
+        if active_phone and display_state not in (
+            "IDLE", "READY", "SETUP REQUIRED", "ENDED", "NO_ANSWER", "FAILED",
+        ):
+            self.lbl_phone.setText(active_phone)
+        elif display_state in ("IDLE", "READY", "SETUP REQUIRED"):
+            self.lbl_phone.setText("No active number")
+        elif display_state in ("ENDED", "NO_ANSWER", "FAILED"):
+            self.lbl_phone.setText(active_phone or "No active number")
+
+        if display_state == "DIALING":
+            self.lbl_pickup.setText("Dialing…")
+        elif display_state == "RINGING":
+            self.lbl_pickup.setText("Ringing…")
+        elif display_state == "VOICEMAIL":
+            self.lbl_pickup.setText("Voicemail — hanging up soon")
+        elif display_state == "CONNECTED":
             self.lbl_pickup.setText("CALL PICKED UP — talk now")
-        elif display_state in ("DIALING", "RINGING", "VOICEMAIL", "BUSY", "ANSWERED_PENDING"):
-            phone_text = (
-                "Classifying answer…" if display_state == "ANSWERED_PENDING" else "Screening in background"
-            )
-            self.lbl_pickup.setText("")
+        elif display_state == "ANSWERED_PENDING":
+            self.lbl_pickup.setText("Answer detected — classifying…")
+        elif display_state == "BUSY":
+            self.lbl_pickup.setText("Line busy")
+        elif display_state == "FAILED":
+            self.lbl_pickup.setText("Call could not connect")
         else:
-            phone_text = "No active number"
             self.lbl_pickup.setText("")
-        self.lbl_phone.setText(phone_text)
+
         self.lbl_dur.setText(
             f"Call time: {elapsed}" if elapsed else "Call time: —")
-        active = display_state in ("DIALING", "RINGING", "CONNECTED", "VOICEMAIL", "BUSY")
+        active = display_state in ("DIALING", "RINGING", "CONNECTED", "VOICEMAIL", "BUSY", "ANSWERED_PENDING")
         self.btn_next.setEnabled(display_state == "CONNECTED")
         self.btn_cut.setEnabled(active)
         self.btn_listen.setEnabled(display_state == "CONNECTED")
-        self.btn_monitor.setEnabled(display_state in ("DIALING", "RINGING", "CONNECTED", "VOICEMAIL", "BUSY"))
+        self.btn_monitor.setEnabled(display_state in ("DIALING", "RINGING", "CONNECTED", "VOICEMAIL", "BUSY", "ANSWERED_PENDING"))
         self.btn_test.setEnabled(not active)
         self.btn_redial.setEnabled(display_state == "DIALING")
 
@@ -490,7 +507,12 @@ class SlotCard(QGroupBox):
             reason = reason[:69] + "..."
         latency_txt = f" {latency}ms" if latency > 0 else ""
         self.lbl_ai_decision.setText(f"Decision: {fused} ({conf}){latency_txt} {reason}")
-        self.set_dial_detail(f"AMD: {fused}{latency_txt} — {reason}" if reason else f"AMD: {fused}{latency_txt}")
+        transcript = str(debug.get("transcript") or debug.get("external_transcript") or "").strip()
+        if transcript:
+            short = transcript if len(transcript) <= 72 else transcript[:69] + "..."
+            self.set_dial_detail(f"Transcript: {short}")
+        else:
+            self.set_dial_detail(f"AMD: {fused}{latency_txt} — {reason}" if reason else f"AMD: {fused}{latency_txt}")
 
         ext_enabled = bool(debug.get("external_detector_enabled", False))
         ext_mode = str(debug.get("external_detector_mode", "off"))
@@ -3743,9 +3765,34 @@ class MainWindow(QMainWindow):
         self._slot_detection_debug[slot_id] = debug
         if hasattr(self, "_slot_cards") and slot_id in self._slot_cards:
             self._slot_cards[slot_id].update_detection(debug)
+        if not self._slot_has_active_phone(slot_id):
+            return
+        phone = self._slot_phone.get(slot_id, "")
         fused_state = str(debug.get("fused_state") or debug.get("ui_state") or "").upper()
-        if ui_display_state(fused_state) == "CONNECTED" and self._slot_has_active_phone(slot_id):
-            self._update_card(slot_id, fused_state, self._slot_phone.get(slot_id, ""))
+        dom_state = str(debug.get("dom_state") or "").upper()
+        audio_state = str(debug.get("audio_state") or "").upper()
+
+        ui_state = ""
+        if fused_state == "HUMAN" or fused_state in UI_CONNECTED_STATES:
+            ui_state = "CONNECTED"
+        elif fused_state == "VOICEMAIL":
+            ui_state = "VOICEMAIL"
+        elif fused_state in ("ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE"):
+            ui_state = "ANSWERED_PENDING"
+        elif fused_state == "RINGING" or dom_state == "RINGING":
+            ui_state = "RINGING"
+        elif fused_state in ("DIALING", "IDLE") and self._get_ctrl(slot_id) and self._get_ctrl(slot_id).current_state == "DIALING":
+            ui_state = "DIALING"
+        elif fused_state == "FAILED" or dom_state == "FAILED":
+            ui_state = "FAILED"
+        elif fused_state == "BUSY" or dom_state == "BUSY":
+            ui_state = "BUSY"
+        elif dom_state == "CONNECTED_CTRL" and audio_state in ("SPEECH", "BEEP"):
+            ui_state = "ANSWERED_PENDING"
+
+        if ui_state:
+            self._update_card(slot_id, ui_state, phone)
+
         if fused_state in ("HUMAN", "VOICEMAIL", "CONNECTED", "CONNECTED_AUDIO_EVIDENCE", "ANSWERED_PENDING"):
             self._broadcast_amd_event(slot_id, debug)
             if fused_state in {"HUMAN", "CONNECTED", "CONNECTED_AUDIO_EVIDENCE"}:
