@@ -1,4 +1,4 @@
-"""Build script for FT Solutions Auto Dialer Pro.
+"""Build script for INDUS TRANSPORTS LLC Auto Dialer.
 
 Run:
     python build_exe.py
@@ -30,7 +30,7 @@ DEPS = [
 
 
 print("=" * 60)
-print("  FT Solutions - Auto Dialer Pro  |  Build")
+print("  INDUS TRANSPORTS LLC — Auto Dialer  |  Build")
 print("=" * 60)
 print("\nInstalling dependencies...")
 for dep in DEPS:
@@ -60,7 +60,7 @@ if not os.path.exists("dialer_config.json"):
         )
     print("\nCreated default dialer_config.json")
 
-LOGO_PNG = "ftsolutionslogo.jpg"
+LOGO_PNG = "indus_transports_logo.jpg"
 LOGO_ICO = "logo.ico"
 icon_arg: list[str] = []
 if os.path.exists(LOGO_PNG):
@@ -89,7 +89,7 @@ cmd = [
     "--onefile",
     "--windowed",
     "--name",
-    "FTSolutions_AutoDialer",
+    "IndusTransports_AutoDialer",
     f"--add-data=dialer_config.json{sep}.",
     f"--add-data=src{sep}src",
     "--hidden-import=PyQt6.QtWebEngineWidgets",
@@ -120,7 +120,7 @@ print()
 if result.returncode == 0:
     print("=" * 60)
     print("  BUILD SUCCESSFUL")
-    print("  dist/FTSolutions_AutoDialer.exe")
+    print("  dist/IndusTransports_AutoDialer.exe")
     print("=" * 60)
 else:
     print("Build failed - check output above.")

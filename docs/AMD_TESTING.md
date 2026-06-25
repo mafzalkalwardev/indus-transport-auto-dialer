@@ -26,7 +26,7 @@ python -m pytest tests/test_external_evidence.py tests/test_external_evidence_in
 
 | Key | Purpose |
 |-----|---------|
-| `amd_mode` | `heuristic`, `whisper`, or `off` |
+| `amd_mode` | `heuristic`, `hybrid`, `whisper`, or `off` |
 | `amd_early_decision_ms` | Target early decision window |
 | `amd_max_decision_ms` | Max classification window |
 | `enable_ai_audio` | WASAPI loopback fusion (capped on 8GB) |

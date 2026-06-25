@@ -1,4 +1,4 @@
-"""Client-ready UI themes for FT Solutions Auto Dialer."""
+"""Client-ready UI themes for INDUS TRANSPORTS LLC Auto Dialer."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ STATUS_LABELS = {
     "CONNECTED_MANUAL_CONFIRMATION": "Call picked up - talk now",
     "VOICEMAIL": "Voicemail",
     "BUSY": "Busy",
-    "ANSWERED_PENDING": "Classifying",
-    "CLASSIFYING": "Classifying",
+    "ANSWERED_PENDING": "Classifying answer…",
+    "CLASSIFYING": "Classifying answer…",
     "ENDED_MANUALLY": "Ended by operator",
     "ENDED": "Call ended",
     "NO_ANSWER": "No answer",

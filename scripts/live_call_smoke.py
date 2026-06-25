@@ -275,25 +275,46 @@ class LiveCallSmoke:
             for idx, ctrl in enumerate(self.controllers)
             if not ctrl.is_logged_in
         ]
-        if not missing:
+        blank_slots = [
+            f"Slot {idx}"
+            for idx, ctrl in enumerate(self.controllers)
+            if ctrl.is_logged_in and not ctrl.is_gv_page_ready()
+        ]
+        if blank_slots:
+            for slot in blank_slots:
+                ctrl = self.controllers[int(slot.split()[-1])]
+                if ctrl._needs_gv_navigation():
+                    ctrl._ensure_gv_page(reason="Reloading Google Voice before live test…")
+        if not missing and not blank_slots:
             self.log(None, "Google Voice ready; waiting for call UI to settle")
             QTimer.singleShot(8000, self.begin_dialing)
             return
         if waited >= 60:
-            self.log(None, "BLOCKED: Google Voice did not become ready for: " + ", ".join(missing))
+            if blank_slots:
+                self.log(
+                    None,
+                    "BLOCKED: Google Voice page stuck on about:blank for: "
+                    + ", ".join(blank_slots),
+                )
+                self.log(None, "Check internet connection, sign in again, or reload the line.")
+            if missing:
+                self.log(None, "BLOCKED: Google Voice did not become ready for: " + ", ".join(missing))
             for idx, ctrl in enumerate(self.controllers):
-                if not ctrl.is_logged_in:
+                if not ctrl.is_logged_in or not ctrl.is_gv_page_ready():
                     acct = self.accounts[idx]
                     self.results.setdefault(idx, {})
                     self.results[idx].update({
                         "slot": idx,
                         "account": acct.get("name") or acct.get("email"),
                         "profile": acct.get("profile"),
-                        "final": "LOGIN_REQUIRED",
+                        "final": "LOGIN_REQUIRED" if not ctrl.is_logged_in else "GV_PAGE_BLANK",
                     })
             self.finish()
             return
-        self.log(None, "Waiting for Google Voice readiness: " + ", ".join(missing))
+        if blank_slots:
+            self.log(None, "Waiting for Google Voice page load: " + ", ".join(blank_slots))
+        if missing:
+            self.log(None, "Waiting for Google Voice readiness: " + ", ".join(missing))
         QTimer.singleShot(3000, lambda: self.wait_for_ready(waited + 3))
 
     def begin_dialing(self) -> None:

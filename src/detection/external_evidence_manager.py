@@ -10,6 +10,7 @@ import threading
 from typing import Any, Dict, Optional
 
 from .external_evidence import ExternalEvidence, ProviderHealth, ProviderName
+from .providers.local_amd_publisher import LocalAmdPublisher, classify_transcript_remote
 from .providers.prototype_a_adapter import PrototypeAAdapter
 from .providers.prototype_b_adapter import PrototypeBAdapter
 
@@ -28,7 +29,7 @@ class ExternalEvidenceManager:
 
         self._lock = threading.Lock()
         self._latest: Optional[ExternalEvidence] = None
-        self._provider: Optional[PrototypeAAdapter | PrototypeBAdapter] = None
+        self._provider: Optional[LocalAmdPublisher | PrototypeAAdapter | PrototypeBAdapter] = None
         self._initialized = False
 
     @property
@@ -53,12 +54,20 @@ class ExternalEvidenceManager:
             else:
                 backend_url = str(self.config.get("external_detector_backend_url", "127.0.0.1"))
                 backend_port = int(self.config.get("external_detector_backend_port", 8787))
-                self._provider = PrototypeAAdapter(
-                    backend_url=backend_url,
-                    backend_port=backend_port,
-                    timeout_ms=self._timeout_ms,
-                    debug=self._debug,
-                )
+                use_publisher = bool(self.config.get("external_detector_publish_audio", True))
+                if use_publisher:
+                    self._provider = LocalAmdPublisher(
+                        backend_url=backend_url,
+                        backend_port=backend_port,
+                        debug=self._debug,
+                    )
+                else:
+                    self._provider = PrototypeAAdapter(
+                        backend_url=backend_url,
+                        backend_port=backend_port,
+                        timeout_ms=self._timeout_ms,
+                        debug=self._debug,
+                    )
             self._provider.start()
             self._initialized = True
             if self._debug:
@@ -127,6 +136,29 @@ class ExternalEvidenceManager:
             if self._debug:
                 logger.debug("update failed: %s", exc)
             return None
+
+    def push_audio_pcm(self, pcm_mono: list[float], *, sample_rate: int = 16000) -> None:
+        if not self._enabled or self._provider is None:
+            return
+        if hasattr(self._provider, "push_pcm"):
+            try:
+                self._provider.push_pcm(pcm_mono, sample_rate=sample_rate)  # type: ignore[attr-defined]
+            except Exception as exc:
+                if self._debug:
+                    logger.debug("push_audio_pcm failed: %s", exc)
+
+    def classify_transcript_remote(self, transcript: str) -> dict | None:
+        if not self._enabled:
+            return None
+        backend_url = str(self.config.get("external_detector_backend_url", "127.0.0.1"))
+        backend_port = int(self.config.get("external_detector_backend_port", 8787))
+        timeout = float(self._timeout_ms) / 1000.0
+        return classify_transcript_remote(
+            transcript,
+            backend_url=backend_url,
+            backend_port=backend_port,
+            timeout_sec=timeout,
+        )
 
     def load_fixture(self, fixture: Dict[str, Any]) -> None:
         """Inject a simulated payload (testing only)."""

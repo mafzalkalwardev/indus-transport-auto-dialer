@@ -15,7 +15,7 @@
   "slot_recycle_after_calls": 75,
   "watchdog_check_interval_sec": 5,
         "enable_ai_audio": true,
-        "amd_mode": "heuristic",
+        "amd_mode": "hybrid",
         "amd_early_decision_ms": 800,
         "amd_max_decision_ms": 2500,
         "amd_human_first_seconds": 5,
@@ -45,5 +45,6 @@
   "external_detector_fail_open": true,
   "external_detector_debug": true,
   "external_detector_backend_url": "127.0.0.1",
-  "external_detector_backend_port": 8787
+  "external_detector_backend_port": 8787,
+  "external_detector_publish_audio": true
 }

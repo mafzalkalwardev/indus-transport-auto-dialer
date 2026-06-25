@@ -1,10 +1,10 @@
 <div align="center">
 
 <p align="center">
-  <img src="ftsolutionslogo.jpg" alt="FT Solutions logo" width="120" />
+  <img src="indus_transports_logo.jpg" alt="INDUS TRANSPORTS LLC logo" width="120" />
 </p>
 
-# 📞 Indus Transport Auto Dialer
+# Indus Transports Auto Dialer
 
 **Professional Windows auto dialer — Google Voice, AMD, predictive pacing.**
 
@@ -23,7 +23,7 @@ Multi-line dialing · AMD · CRM · Excel lists · Predictive pacing
 
 ---
 
-Professional Windows desktop dialer for FT Solutions. Agents use a simple branded app while Google Voice runs in the background on each line.
+Professional Windows desktop dialer for **INDUS TRANSPORTS LLC**. Agents use a simple branded app while Google Voice runs in the background on each line.
 
 ## 🖼 Screenshots
 
@@ -40,14 +40,6 @@ Professional Windows desktop dialer for FT Solutions. Agents use a simple brande
 ![Settings panel](docs/screenshots/settings-dark.png)
 
 ![Administration panel](docs/screenshots/administration-dark.png)
-
-## 🐍 Contribution graph
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mafzalkalwardev/indus-transport-auto-dialer/output/snake-dark.svg" />
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/mafzalkalwardev/indus-transport-auto-dialer/output/snake.svg" />
-  <img alt="Contribution snake" src="https://raw.githubusercontent.com/mafzalkalwardev/indus-transport-auto-dialer/output/snake.svg" />
-</picture>
 
 ---
 
@@ -88,7 +80,7 @@ Use this when you configure everything on **your** machine and deliver a ready f
 1. Complete Google Voice setup in **Settings**.
 2. **Administration** → **Export client package…**
 3. Enter the client’s name, login email, and password (8+ characters).
-4. Choose a save location (e.g. Desktop). You get a folder like `FTSolutions_AutoDialer_Client` with:
+4. Choose a save location (e.g. Desktop). You get a folder like `IndusTransports_AutoDialer_Client` with:
    - `dialer_config.json` (`deployment_mode: client`)
    - `logs/crm.sqlite3` (single agent account)
    - `data/gv_accounts.json` and `chrome_profiles/` (signed-in voice lines)
@@ -306,7 +298,7 @@ Pipeline details and dataset layout: [docs/DETECTION_PIPELINE.md](docs/DETECTION
 python build_exe.py
 ```
 
-Output: `dist/FTSolutions_AutoDialer.exe`
+Output: `dist/IndusTransports_AutoDialer.exe`
 
 ## Data on disk (do not share)
 

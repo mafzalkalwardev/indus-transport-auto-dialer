@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-FT Solutions — Auto Dialer Pro
+INDUS TRANSPORTS LLC — Auto Dialer Pro
 Google Voice runs silently inside an embedded browser.
-Agents see the FT Solutions interface and the live Google Voice panel only when needed.
+Agents see the INDUS TRANSPORTS LLC interface and the live Google Voice panel only when needed.
 """
 import os
 import sys
@@ -76,7 +76,7 @@ except ImportError:
     PIL_OK = False
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-APP_NAME     = "FT Solutions — Auto Dialer Pro"
+APP_NAME     = "INDUS TRANSPORTS LLC — Auto Dialer"
 WHATSAPP_URL = "https://wa.me/923079670503"
 WA_NUMBER    = "+92 307 967 0503"
 
@@ -193,7 +193,7 @@ def _load_cfg() -> dict:
         "slot_recycle_after_calls": 75,
         "watchdog_check_interval_sec": 5,
         "enable_ai_audio": True,
-        "amd_mode": "heuristic",
+        "amd_mode": "hybrid",
         "amd_early_decision_ms": 800,
         "amd_max_decision_ms": 2500,
         "amd_human_first_seconds": 5,
@@ -207,6 +207,10 @@ def _load_cfg() -> dict:
         "websocket_enabled": False,
         "websocket_port": 8765,
         "ui": {"auto_open_panel_on_human": False},
+        "external_detector_enabled": False,
+        "external_detector_mode": "prototype_a",
+        "external_detector_publish_audio": True,
+        "external_detector_fail_open": True,
     }
     if os.path.exists(CONFIG_FILE):
         try:
@@ -438,9 +442,11 @@ class SlotCard(QGroupBox):
         self._apply_status_style(display_state)
         if display_state == "CONNECTED":
             phone_text = phone if phone else "Answered call"
-            self.lbl_pickup.setText("CALL PICKED UP - talk now")
-        elif display_state in ("DIALING", "RINGING", "VOICEMAIL", "BUSY"):
-            phone_text = "Screening in background"
+            self.lbl_pickup.setText("CALL PICKED UP — talk now")
+        elif display_state in ("DIALING", "RINGING", "VOICEMAIL", "BUSY", "ANSWERED_PENDING"):
+            phone_text = (
+                "Classifying answer…" if display_state == "ANSWERED_PENDING" else "Screening in background"
+            )
             self.lbl_pickup.setText("")
         else:
             phone_text = "No active number"
@@ -526,7 +532,7 @@ class AdminSetupPage(QWidget):
             lbl_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lay.addWidget(lbl_logo)
 
-        lay.addWidget(_label("FT Solutions", bold=True, size=16,
+        lay.addWidget(_label("INDUS TRANSPORTS LLC", bold=True, size=16,
                               parent=self))
         lay.addWidget(_label("Create your Administrator account to get started",
                               "muted", parent=self))
@@ -631,7 +637,7 @@ class LoginPage(QWidget):
             lay.addWidget(lbl)
             lay.addSpacing(4)
 
-        lay.addWidget(_label("FT Solutions", "brandName", bold=True, size=16))
+        lay.addWidget(_label("INDUS TRANSPORTS LLC", "brandName", bold=True, size=16))
         if client_mode:
             lay.addWidget(_label("Agent sign-in", "accent"))
         else:
@@ -986,8 +992,24 @@ class SlotMonitorDialog(QDialog):
         super().showEvent(event)
         if not self.isMaximized():
             self._fit_to_screen()
+        self._schedule_visible_refresh()
+
+    def _schedule_visible_refresh(self) -> None:
+        """Repaint Google Voice after the dialog layout has real dimensions."""
         self.controller.prepare_for_visible_display()
         self.lbl_monitor.setText("Showing current Google Voice screen.")
+        for delay_ms in (120, 300, 600, 1200):
+            QTimer.singleShot(delay_ms, self.controller.prepare_for_visible_display)
+        QTimer.singleShot(450, self._retry_dial_if_needed)
+
+    def _retry_dial_if_needed(self) -> None:
+        state = getattr(self.controller, "current_state", "")
+        if state in {"DIALING", "RINGING", "IDLE"} and (
+            self.controller._pending_dial_phone or self.controller._current_call_phone
+        ):
+            self.controller.retry_dial_if_pending()
+            self.lbl_monitor.setText(
+                "Refreshed Google Voice view and retried dial with expanded viewport.")
 
     def _fit_to_screen(self) -> None:
         parent = self.parent()
@@ -1157,7 +1179,7 @@ class MainWindow(QMainWindow):
         self.cfg  = cfg
         self._client_workstation = is_client_deployment(cfg)
 
-        self.setWindowTitle("FT Solutions - Auto Dialer")
+        self.setWindowTitle("INDUS TRANSPORTS LLC - Auto Dialer")
         self.setWindowIcon(_icon())
         self.resize(1280, 820)
         self.setMinimumSize(1024, 680)
@@ -1382,9 +1404,13 @@ class MainWindow(QMainWindow):
                 break
         if view.parent() is self._browser_host:
             self._browser_layout.removeWidget(view)
-        view.setParent(None)
+        elif view.parent() is not None:
+            view.setParent(None)
+        view.setWindowFlag(Qt.WindowType.Tool, False)
+        view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
         layout.addWidget(view, stretch=1)
         self._show_browser_for_setup(view)
+        QApplication.processEvents()
         if ctrl:
             ctrl.prepare_for_visible_display()
         return ctrl
@@ -1647,7 +1673,7 @@ class MainWindow(QMainWindow):
             left.addSpacing(12)
         col = QVBoxLayout()
         col.setSpacing(2)
-        name_lbl = _label("FT Solutions", bold=True, size=14)
+        name_lbl = _label("INDUS TRANSPORTS LLC", bold=True, size=14)
         name_lbl.setObjectName("brandName")
         sub_lbl = _label("Auto Dialer Pro", "brandTagline")
         sub_lbl.setObjectName("brandTagline")
@@ -2127,6 +2153,20 @@ class MainWindow(QMainWindow):
         self.chk_ai_audio = QCheckBox("AI audio detection")
         self.chk_ai_audio.setChecked(bool(self.cfg.get("enable_ai_audio", True)))
         dlay.addWidget(self.chk_ai_audio)
+        dlay.addWidget(QLabel("AMD mode:"))
+        self.amd_mode_combo = QComboBox()
+        self.amd_mode_combo.addItem("Hybrid (heuristic + whisper)", "hybrid")
+        self.amd_mode_combo.addItem("Heuristic only", "heuristic")
+        self.amd_mode_combo.addItem("Whisper transcript", "whisper")
+        self.amd_mode_combo.addItem("Off", "off")
+        saved_amd = str(self.cfg.get("amd_mode", "hybrid") or "hybrid")
+        amd_idx = self.amd_mode_combo.findData(saved_amd)
+        if amd_idx >= 0:
+            self.amd_mode_combo.setCurrentIndex(amd_idx)
+        dlay.addWidget(self.amd_mode_combo)
+        self.chk_external_amd = QCheckBox("External AMD backend (Deepgram sidecar)")
+        self.chk_external_amd.setChecked(bool(self.cfg.get("external_detector_enabled", False)))
+        dlay.addWidget(self.chk_external_amd)
         dlay.addWidget(QLabel("Audio device:"))
         self.audio_device_combo = QComboBox()
         try:
@@ -3561,10 +3601,13 @@ class MainWindow(QMainWindow):
         elif display_state == "CONNECTED":
             self._mark_call_time(slot_id, "connected_at")
             self._log(
-                f"[Slot {slot_id}] Call picked up - talk now: {disp} ({state})"
+                f"[Slot {slot_id}] Call picked up — Line {slot_id + 1}: talk now: {disp} ({state})"
             )
             self.statusBar().showMessage(
-                f"Call picked up - talk now - Line {slot_id + 1}: {disp}")
+                f"Call picked up — Line {slot_id + 1}: {disp}")
+        elif display_state == "ANSWERED_PENDING" or state == "ANSWERED_PENDING":
+            self.statusBar().showMessage(
+                f"Classifying answer — Line {slot_id + 1}: {disp}")
         self._update_card(slot_id, state, phone)
         self._log(f"[Slot {slot_id}] → {state}  {disp}")
 
@@ -3805,7 +3848,7 @@ class MainWindow(QMainWindow):
     def _export_logs(self):
         path, _ = QFileDialog.getSaveFileName(
             self, "Export Logs",
-            f"FTSolutions_CallLog_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
+            f"IndusTransports_CallLog_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
             "Excel (*.xlsx);;CSV (*.csv)"
         )
         if not path or not self._all_logs:
@@ -4087,6 +4130,10 @@ class MainWindow(QMainWindow):
         self.cfg["n_slots"] = self.settings_slots.value()
         if hasattr(self, "chk_ai_audio"):
             self.cfg["enable_ai_audio"] = self.chk_ai_audio.isChecked()
+        if hasattr(self, "amd_mode_combo"):
+            self.cfg["amd_mode"] = self.amd_mode_combo.currentData() or "hybrid"
+        if hasattr(self, "chk_external_amd"):
+            self.cfg["external_detector_enabled"] = self.chk_external_amd.isChecked()
         if hasattr(self, "audio_device_combo"):
             self.cfg["audio_device"] = self.audio_device_combo.currentData() or ""
         if hasattr(self, "chk_live_debug"):
@@ -4095,6 +4142,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_slot_cards"):
             for card in self._slot_cards.values():
                 card.set_ai_audio_enabled(bool(self.cfg.get("enable_ai_audio", True)))
+        for ctrl in getattr(self, "_controllers", []) or []:
+            if ctrl is not None:
+                ctrl.apply_runtime_cfg(self._runtime_cfg_for_controller())
         QMessageBox.information(self, "Saved", "Settings saved.")
 
     # ── Utility ───────────────────────────────────────────────────────────────
@@ -4233,7 +4283,7 @@ if __name__ == "__main__":
     cleanup_stale_webengine_processes()
 
     app = QApplication(sys.argv)
-    app_lock = QLockFile(os.path.join(LOGS_DIR, "ftsolutions_autodialer.lock"))
+    app_lock = QLockFile(os.path.join(LOGS_DIR, "indus_transports_autodialer.lock"))
     app_lock.setStaleLockTime(30_000)
     if not app_lock.tryLock(800):
         cleanup_stale_webengine_processes()
@@ -4241,14 +4291,14 @@ if __name__ == "__main__":
         if not app_lock.tryLock(800):
             QMessageBox.warning(
                 None,
-                "FT Solutions Auto Dialer is already open",
+                "INDUS TRANSPORTS LLC Auto Dialer is already open",
                 "Close the existing Auto Dialer window before opening another one.\n\n"
                 "If no window is visible, open Task Manager and end "
                 "QtWebEngineProcess.exe, then try again.",
             )
             sys.exit(1)
-    app.setApplicationName("FTSolutions AutoDialer")
-    app.setOrganizationName("FT Solutions")
+    app.setApplicationName("IndusTransports AutoDialer")
+    app.setOrganizationName("INDUS TRANSPORTS LLC")
     setup_dialer_logging()
 
     dialer = DialerApp()

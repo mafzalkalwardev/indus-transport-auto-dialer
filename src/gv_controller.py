@@ -339,15 +339,46 @@ _JS_READY_FOR_DIAL = """
     });
     return found;
   }
-  var body=(document.body&&document.body.innerText||'').toLowerCase();
-  if(body && body.trim()==='voice') return {ready:false, reason:'voice_shell_only'};
+  function allBodyText(){
+    var chunks=[];
+    roots().forEach(function(root){
+      try{
+        var el=root.body || root.host;
+        if(el) chunks.push((el.innerText||el.textContent||''));
+      }catch(e){}
+    });
+    return chunks.join(' ').replace(/\\s+/g,' ').trim().toLowerCase();
+  }
+  var url=(window.location.href||'').toLowerCase();
+  var body=allBodyText() || (document.body&&document.body.innerText||'').toLowerCase();
+  if(body && body.trim()==='voice') return {ready:false, reason:'voice_shell_only', url:url};
+  var controls=[
+    'button[aria-label*="keypad" i]','button[aria-label*="dialpad" i]',
+    'button[aria-label*="new call" i]','button[aria-label*="make a call" i]',
+    'input[placeholder*="name" i]','input[placeholder*="number" i]',
+    '[role="combobox"]','[role="textbox"]'
+  ];
+  for(var ci=0;ci<controls.length;ci++){
+    var matches=qsa(controls[ci]);
+    for(var cm=0;cm<matches.length;cm++){
+      if(vis(matches[cm])) return {ready:true, reason:'ready_controls', url:url};
+    }
+  }
   var readyText = (
     body.indexOf('latest calls')!==-1 ||
     body.indexOf('enter a name or number')!==-1 ||
     body.indexOf('keypad')!==-1 ||
-    body.indexOf('calls')!==-1
+    body.indexOf('receiving calls')!==-1 ||
+    body.indexOf('call as')!==-1 ||
+    body.indexOf('calls')!==-1 ||
+    body.indexOf('messages')!==-1
   );
-  if(!readyText) return {ready:false, reason:'calls_ui_text_missing'};
+  if(!readyText){
+    if(url.indexOf('voice.google.com')!==-1 && url.indexOf('accounts.google.com')===-1 &&
+       (!body || body.length < 12))
+      return {ready:false, reason:'page_still_loading', url:url, bodyLen:(body||'').length};
+    return {ready:false, reason:'calls_ui_text_missing', url:url, bodyLen:(body||'').length};
+  }
   var buttons=qsa('button,[role="button"],gv-icon-button').filter(vis);
   var availabilityLabels=[];
   for(var b=0;b<buttons.length;b++){
@@ -369,18 +400,15 @@ _JS_READY_FOR_DIAL = """
   if(!receivingReady && !callAsReady){
     return {ready:false, reason:'line_availability_not_ready', availabilityLabels: availabilityLabels};
   }
-  var controls=[
-    'button[aria-label*="keypad" i]','button[aria-label*="dialpad" i]',
-    'button[aria-label*="new call" i]','button[aria-label*="make a call" i]',
-    'input[placeholder*="name" i]','input[placeholder*="number" i]'
-  ];
   for(var i=0;i<controls.length;i++){
     var matches=qsa(controls[i]);
     for(var m=0;m<matches.length;m++){
       if(vis(matches[m])) return {ready:true, reason:'ready', availabilityLabels: availabilityLabels};
     }
   }
-  return {ready:false, reason:'dial_controls_missing', availabilityLabels: availabilityLabels};
+  if(url.indexOf('voice.google.com/calls')!==-1 || url.indexOf('a=nc')!==-1)
+    return {ready:true, reason:'ready_url', availabilityLabels: availabilityLabels};
+  return {ready:false, reason:'dial_controls_missing', availabilityLabels: availabilityLabels, url:url};
 })();
 """
 
@@ -1695,6 +1723,9 @@ class GVController(QObject):
         self._render_h = 600
         self._whisper_pending = False
         self._whisper_thread = None
+        self._whisper_transcript = ""
+        self._last_whisper_at = 0.0
+        self._post_answer_polls = 0
         self._min_answer_seconds = 10.0
         self.prepare_for_background_rendering()
 
@@ -1757,13 +1788,13 @@ class GVController(QObject):
             external_evidence_manager=self._external_evidence_manager,
         )
         self._audio_monitor.set_enabled(audio_enabled)
-        if amd_mode == "whisper" and self._whisper_thread is None:
+        if amd_mode in {"whisper", "hybrid"} and self._whisper_thread is None:
             try:
                 from src.detection.whisper_worker import WhisperTranscriptionThread
                 self._whisper_thread = WhisperTranscriptionThread(parent=self)
             except Exception:
                 self._whisper_thread = None
-        elif amd_mode != "whisper" and self._whisper_thread is not None:
+        elif amd_mode not in {"whisper", "hybrid"} and self._whisper_thread is not None:
             self._whisper_thread.shutdown()
             self._whisper_thread = None
         if self._page_alive():
@@ -1864,13 +1895,20 @@ class GVController(QObject):
         if not self._page_alive():
             return
         top_level = self.view.parent() is None
+        self.view.setWindowFlag(Qt.WindowType.Tool, False)
+        self.view.setWindowFlag(Qt.WindowType.FramelessWindowHint, False)
         if top_level:
-            self.view.setWindowFlag(Qt.WindowType.Tool, False)
             self.view.setWindowTitle(f"Google Voice Slot {self.slot_id}")
         self.view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, False)
+        self.view.setUpdatesEnabled(True)
         self.view.setMinimumSize(640, 480)
-        width = max(1024, int(self.view.width() or 0))
-        height = max(720, int(self.view.height() or 0))
+        parent = self.view.parentWidget()
+        if parent is not None:
+            width = max(1024, int(parent.width() or 0), int(self.view.width() or 0))
+            height = max(720, int(parent.height() or 0), int(self.view.height() or 0))
+        else:
+            width = max(1024, int(self.view.width() or 0))
+            height = max(720, int(self.view.height() or 0))
         self.view.resize(width, height)
         if top_level:
             screen = QApplication.primaryScreen()
@@ -1891,12 +1929,15 @@ class GVController(QObject):
         if top_level:
             self.view.raise_()
             self.view.activateWindow()
+        self.view.setFocus(Qt.FocusReason.OtherFocusReason)
         self.view.updateGeometry()
         self.view.repaint()
+        QApplication.processEvents()
         self._page.runJavaScript(_JS_FORCE_VISIBLE)
         QTimer.singleShot(80, lambda: self._page.runJavaScript(_JS_FORCE_VISIBLE))
         QTimer.singleShot(200, lambda: self._page.runJavaScript(_JS_REFRESH_LAYOUT))
         QTimer.singleShot(400, lambda: self.view.repaint())
+        QTimer.singleShot(600, lambda: self._page.runJavaScript(_JS_REFRESH_LAYOUT))
 
     def set_audio_muted(self, muted: bool) -> None:
         if not self._page_alive():
@@ -2030,6 +2071,8 @@ class GVController(QObject):
         self._amd_answer_at = 0.0
         self._amd_decision_ms = 0
         self._whisper_pending = False
+        self._whisper_transcript = ""
+        self._post_answer_polls = 0
         self._decision_engine.start_call()
         if bool(self._runtime_cfg.get("enable_ai_audio", True)):
             self._audio_monitor.prime()
@@ -2074,7 +2117,14 @@ class GVController(QObject):
     def _ensure_calls_page_then_dial(self) -> None:
         if not self._active_call or not self._page_alive() or not self._pending_dial_phone:
             return
-        url = self._page.url().toString()
+        if self._needs_gv_navigation():
+            self._ensure_gv_page(
+                reason="Opening Google Voice calls page…",
+                prefer_dial_url=True,
+            )
+            QTimer.singleShot(2500, self._ensure_calls_page_then_dial)
+            return
+        url = self._current_page_url()
         if "voice.google.com" not in url:
             self._emit_log("Opening Google Voice calls page…")
             self._page.load(QUrl(self._current_dial_url()))
@@ -2115,7 +2165,13 @@ class GVController(QObject):
         self._calls_ready_attempts += 1
         if self._calls_ready_attempts in (1, 3, 6, 10, 15, 20):
             detail = f" ({'; '.join(availability_labels)})" if availability_labels else ""
-            self._emit_log(f"Google Voice line not ready for dialing: {reason}{detail}")
+            if reason == "page_still_loading":
+                self._emit_log("Google Voice page still loading…")
+            else:
+                self._emit_log(f"Google Voice line not ready for dialing: {reason}{detail}")
+        if reason in {"page_still_loading", "voice_shell_only", "calls_ui_text_missing"}:
+            if self._calls_ready_attempts in (3, 6, 12):
+                self.prepare_for_visible_display()
         if self._calls_ready_attempts in (3, 10, 20):
             self._capture_dial_diagnostics(f"ready_wait_{self._calls_ready_attempts}")
         if self._calls_ready_attempts < 24:
@@ -2842,8 +2898,14 @@ class GVController(QObject):
     def is_logged_in(self) -> bool:
         return self._logged_in
 
+    def is_gv_page_ready(self) -> bool:
+        url = self._current_page_url()
+        if not url or url.startswith("about:blank"):
+            return False
+        return "voice.google.com" in url
+
     def is_session_ready(self) -> bool:
-        return self._logged_in or has_session_marker(self.profile_dir)
+        return (self._logged_in or has_session_marker(self.profile_dir)) and self.is_gv_page_ready()
 
     def mark_logged_in(self) -> None:
         """Persist login success for this profile (survives controller recreation)."""
@@ -2853,8 +2915,37 @@ class GVController(QObject):
         self._login_fill_timer.stop()
         self._stop_autofill()
         self._emit_log("Google Voice session saved")
+        if self._needs_gv_navigation():
+            QTimer.singleShot(
+                400,
+                lambda: self._ensure_gv_page(reason="Opening Google Voice after sign-in…"),
+            )
         if self._active_call and self._pending_dial_phone:
             QTimer.singleShot(1000, self._ensure_calls_page_then_dial)
+
+    def _current_page_url(self) -> str:
+        if not self._page_alive():
+            return ""
+        return self._page.url().toString().strip().lower()
+
+    def _needs_gv_navigation(self) -> bool:
+        if self._setup_mode:
+            return False
+        url = self._current_page_url()
+        if not url or url.startswith("about:blank"):
+            return True
+        return "voice.google.com" not in url
+
+    def _ensure_gv_page(self, *, reason: str = "", prefer_dial_url: bool = False) -> None:
+        if not self._page_alive() or self._setup_mode:
+            return
+        if not self._needs_gv_navigation():
+            return
+        self._emit_log(reason or "Navigating to Google Voice…")
+        target = GV_URL
+        if prefer_dial_url and (self._pending_dial_phone or self._current_call_phone):
+            target = self._current_dial_url()
+        self._page.load(QUrl(target))
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
@@ -2871,6 +2962,8 @@ class GVController(QObject):
             self._load_retry_count = 0
             QTimer.singleShot(400, self._try_auto_login)
             QTimer.singleShot(800, self._check_login)
+            if not self._setup_mode:
+                QTimer.singleShot(900, lambda: self._ensure_gv_page())
             if self._setup_mode:
                 QTimer.singleShot(1200, self._maybe_redirect_signin)
         else:
@@ -2907,6 +3000,8 @@ class GVController(QObject):
             self.mark_logged_in()
             self._emit_log("Google account detected — ready")
             self.login_detected.emit(self.slot_id)
+        elif logged_in and self._logged_in and self._needs_gv_navigation():
+            self._ensure_gv_page(reason="Reloading Google Voice…")
         elif not logged_in:
             if self._logged_in:
                 self._logged_in = False
@@ -3003,6 +3098,87 @@ class GVController(QObject):
             return
         self._page.runJavaScript(_JS_DETECT_STATE, self._on_poll_result)
 
+    def _amd_uses_whisper(self) -> bool:
+        mode = str(self._runtime_cfg.get("amd_mode", "heuristic") or "heuristic").lower()
+        return mode in {"whisper", "hybrid"}
+
+    def _apply_transcript_to_features(self, audio_features: object, transcript: str) -> object:
+        if not transcript:
+            return audio_features
+        from src.detection.transcript_evidence import TranscriptEvidenceScorer
+
+        existing = str(getattr(audio_features, "transcript", "") or "")
+        merged = transcript if not existing else f"{existing} {transcript}".strip()
+        scored = TranscriptEvidenceScorer().score(merged)
+        setattr(audio_features, "transcript", merged)
+        if scored.human_score >= 0.65:
+            setattr(audio_features, "human_greeting_detected", True)
+            setattr(audio_features, "has_speech_like", True)
+        if scored.voicemail_score >= 0.65:
+            count = int(getattr(audio_features, "voicemail_keywords_detected_count", 0) or 0)
+            setattr(audio_features, "voicemail_keywords_detected_count", count + 1)
+        if scored.busy_score >= 0.65:
+            busy = float(getattr(audio_features, "busy_tone_cadence_confidence", 0.0) or 0.0)
+            setattr(audio_features, "busy_tone_cadence_confidence", max(busy, scored.busy_score))
+        return audio_features
+
+    def _maybe_push_external_audio(self, audio_features: object) -> None:
+        mgr = self.__dict__.get("_external_evidence_manager")
+        if mgr is None or not mgr.enabled:
+            return
+        analyzer = getattr(self._audio_monitor, "analyzer", None)
+        if analyzer is None or not hasattr(analyzer, "last_pcm_chunk"):
+            return
+        pcm, sample_rate = analyzer.last_pcm_chunk()
+        if pcm:
+            mgr.push_audio_pcm(pcm, sample_rate=sample_rate)
+
+    def _maybe_run_whisper(self, audio_features: object, dom_payload: dict, fused_state: str = "") -> None:
+        if not self._amd_uses_whisper() or self._whisper_thread is None or self._whisper_pending:
+            return
+        mode = str(self._runtime_cfg.get("amd_mode", "heuristic") or "heuristic").lower()
+        dom_state = str(dom_payload.get("state", "")).upper()
+        answer_ready = bool(dom_payload.get("hasTimer")) or dom_state in {
+            "CONNECTED",
+            "CONNECTED_CTRL",
+        }
+        if not answer_ready and self._state not in {
+            "ANSWERED_PENDING",
+            "CONNECTED_AUDIO_EVIDENCE",
+            "CONNECTED",
+            "RINGING",
+        }:
+            return
+        if mode == "hybrid" and fused_state in {"HUMAN", "VOICEMAIL", "BUSY", "NO_ANSWER", "ENDED"}:
+            return
+        if mode == "hybrid" and answer_ready and self._post_answer_polls < 3:
+            return
+        now = time.monotonic()
+        if now - self._last_whisper_at < 2.0:
+            return
+        analyzer = getattr(self._audio_monitor, "analyzer", None)
+        if analyzer is None or not hasattr(analyzer, "last_pcm_chunk"):
+            return
+        pcm, sample_rate = analyzer.last_pcm_chunk()
+        if not pcm or len(pcm) < 1600:
+            return
+        self._whisper_pending = True
+        self._last_whisper_at = now
+
+        def _on_whisper_result(result: object) -> None:
+            self._whisper_pending = False
+            if not self._active_call:
+                return
+            text = str(getattr(result, "text", "") or "").strip()
+            if not text:
+                return
+            self._whisper_transcript = text
+            mgr = self.__dict__.get("_external_evidence_manager")
+            if mgr is not None and mgr.enabled:
+                mgr.classify_transcript_remote(text)
+
+        self._whisper_thread.submit(pcm, sample_rate=sample_rate, callback=_on_whisper_result)
+
     def _on_poll_result(self, raw: object) -> None:
         if not self._active_call:
             return
@@ -3015,18 +3191,25 @@ class GVController(QObject):
         audio_features = self._audio_monitor.last_features
         if self._state in ("RINGING", "ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "CONNECTED", "DIALING"):
             audio_features = self._audio_monitor.poll()
+        whisper_transcript = self.__dict__.get("_whisper_transcript", "")
+        if whisper_transcript:
+            audio_features = self._apply_transcript_to_features(
+                audio_features,
+                whisper_transcript,
+            )
+        self._maybe_push_external_audio(audio_features)
         elapsed = time.monotonic() - self._dial_started_at if self._dial_started_at else 0.0
 
         external_evidence = None
-        try:
-            mgr = self._external_evidence_manager  # type: ignore[attr-defined]
-            if mgr is not None:
+        mgr = self.__dict__.get("_external_evidence_manager")
+        if mgr is not None:
+            try:
                 external_evidence = mgr.get_latest(
                     call_id=str(self._current_call_phone or self._pending_dial_phone or ""),
                     line_id=str(self.slot_id),
                 )
-        except Exception:
-            external_evidence = None
+            except Exception:
+                external_evidence = None
 
         fused = self._decision_engine.update(
             dom_evidence=dom_payload,
@@ -3035,6 +3218,10 @@ class GVController(QObject):
             external_evidence=external_evidence,
         )
         fused_state = fused.state or decision.state or "IDLE"
+        dom_state = str(dom_payload.get("state", "")).upper()
+        if bool(dom_payload.get("hasTimer")) or dom_state in {"CONNECTED", "CONNECTED_CTRL"}:
+            self._post_answer_polls += 1
+        self._maybe_run_whisper(audio_features, dom_payload, fused_state=fused_state)
         if decision.state in {"IDLE", "ENDED", "ENDED_MANUALLY"}:
             fused_state = decision.state
         if fused_state in {"HUMAN", "VOICEMAIL"} and self._amd_answer_at > 0 and self._amd_decision_ms <= 0:
@@ -3100,7 +3287,7 @@ class GVController(QObject):
             "vad_confidence": float(getattr(audio_features, "vad_confidence", 0.0) or 0.0),
         }
         try:
-            mgr = self._external_evidence_manager  # type: ignore[attr-defined]
+            mgr = self.__dict__.get("_external_evidence_manager")
             if mgr is not None:
                 debug.update(mgr.get_diagnostics())
         except Exception:
