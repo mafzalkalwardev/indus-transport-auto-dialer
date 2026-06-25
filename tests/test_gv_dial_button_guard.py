@@ -15,6 +15,7 @@ def _controller_for(phone: str) -> GVController:
     ctrl._ctrl_count = 0
     ctrl._amd_answer_at = 0.0
     ctrl._amd_decision_ms = 0
+    ctrl._amd_pending_since = 0.0
     ctrl._dial_started_at = 0.0
     ctrl._state = "IDLE"
     ctrl._active_call = False
@@ -444,6 +445,99 @@ def test_call_panel_confirmation_emits_ringing_before_polling(monkeypatch):
     assert ctrl._awaiting_call_panel_since == 0.0
     assert states == ["RINGING"]
     assert [ms for ms, _fn in scheduled] == [200, 900]
+
+
+def test_amd_classify_timeout_promotes_voicemail_when_audio_evidence_oscillates():
+    """CONNECTED_AUDIO_EVIDENCE must not block AMD fuse timeout indefinitely."""
+    import time
+
+    class Signal:
+        def __init__(self):
+            self.items = []
+
+        def emit(self, *args):
+            self.items.append(args)
+
+    class Features:
+        backend_status = "ON"
+        backend_name = "test"
+        reason = ""
+        rms = 0.01
+        is_silent = True
+        has_speech_like = False
+        ringback_cadence_confidence = 0.0
+        beep_hz_confidence = 0.0
+        busy_tone_cadence_confidence = 0.0
+        speech_duration_seconds = 0.0
+        silence_duration_seconds = 2.0
+        beep_detected = False
+        human_greeting_detected = False
+        transcript = ""
+        vad_backend = ""
+        vad_confidence = 0.0
+
+    class OscillatingEngine:
+        def __init__(self):
+            self._tick = 0
+
+        def update(self, **_kwargs):
+            self._tick += 1
+            state = (
+                "CONNECTED_AUDIO_EVIDENCE"
+                if self._tick % 2
+                else "ANSWERED_PENDING"
+            )
+            return type(
+                "Decision",
+                (),
+                {
+                    "state": state,
+                    "confidence": 0.7,
+                    "reason": "awaiting more evidence for final classification",
+                    "debug": {"audio_state": "SILENCE"},
+                },
+            )()
+
+    ctrl = _controller_for("+15127616455")
+    ctrl._active_call = True
+    ctrl._state = "ANSWERED_PENDING"
+    ctrl._runtime_cfg = {"amd_analysis_seconds": 8}
+    ctrl._audio_monitor = type("AudioMonitor", (), {"poll": lambda self: Features()})()
+    ctrl._audio_monitor.last_features = Features()
+    ctrl._decision_engine = OscillatingEngine()
+    from src.call_state_engine import CallStateEngine
+
+    ctrl._call_state_engine = CallStateEngine()
+    ctrl._dial_started_at = time.monotonic() - 40.0
+    ctrl._amd_pending_since = time.monotonic() - 12.0
+    ctrl._amd_answer_at = ctrl._amd_pending_since
+    ctrl._post_answer_polls = 0
+    ctrl._had_classify_speech = False
+    ctrl._current_call_phone = "+15127616455"
+    ctrl._pending_dial_phone = ""
+    ctrl._vm_count = 0
+    ctrl._ctrl_count = 0
+    ctrl._dial_stuck_timer = None
+    ctrl.slot_id = 0
+    ctrl._page = _FakePage("https://voice.google.com/u/0/calls")
+    ctrl._page_alive = lambda: True
+    ctrl._pulse_heartbeat = lambda: None
+    ctrl.stop_polling = lambda: None
+    ctrl._schedule_voicemail_hangup = lambda: None
+    ctrl._emit_log = lambda _msg: None
+    ctrl.detection_update = Signal()
+    states = []
+    ctrl._set_state = states.append
+
+    dom = {
+        "state": "CONNECTED_CTRL",
+        "hasEnabledAnswerControl": True,
+        "hasTimer": False,
+        "callText": "hold mute keypad",
+    }
+    ctrl._on_poll_result(dom)
+
+    assert states and states[-1] == "VOICEMAIL"
 
 
 def test_dom_idle_overrides_sticky_human_after_connected_call():

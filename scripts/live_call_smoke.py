@@ -38,7 +38,7 @@ DEFAULT_NUMBERS = [
 ]
 
 TERMINAL_STATES = {"CONNECTED", "VOICEMAIL", "ENDED", "ENDED_MANUALLY", "FAILED", "NO_ANSWER", "BUSY"}
-ANSWERED_SUCCESS_STATES = {"ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE"}
+ANSWERED_SUCCESS_STATES = {"HUMAN", "CONNECTED", "CONNECTED_AUDIO_EVIDENCE"}
 LIVE_TEST_CONFIRMATION = "I OWN OR HAVE PERMISSION TO CALL THESE NUMBERS"
 
 
@@ -408,6 +408,9 @@ class LiveCallSmoke:
         if state == "CONNECTED":
             rec["final"] = "CONNECTED"
             self.schedule_hangup(slot, self.connected_hold, "connected hold complete")
+        elif state == "HUMAN":
+            rec["final"] = "HUMAN"
+            self.schedule_hangup(slot, self.connected_hold, "human pickup hold complete")
         elif state in ANSWERED_SUCCESS_STATES:
             if rec.get("final") == "PENDING":
                 rec["final"] = state
@@ -441,6 +444,11 @@ class LiveCallSmoke:
                 rec["human_detection"] = "Human Detected"
                 rec["human_detection_reason"] = str(debug.get("reason") or "")
                 rec["human_detection_at"] = datetime.now().isoformat(timespec="seconds")
+            fused = str(debug.get("fused_state") or "").upper()
+            if fused == "VOICEMAIL" and rec.get("final") == "PENDING":
+                rec["final"] = "VOICEMAIL"
+                self.log(slot, "VOICEMAIL detected — scheduling hangup")
+                self.schedule_hangup(slot, self.voicemail_hold, "voicemail detected")
         if not self.print_debug:
             return
         print("[CALL DEBUG]", flush=True)
@@ -485,6 +493,12 @@ class LiveCallSmoke:
             self.release_slot(slot)
             return
         if self._confirm_connected_manually(slot, rec):
+            self.controllers[slot].hangup()
+            self.release_slot(slot)
+            return
+        if state in ("ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE"):
+            rec["final"] = "VOICEMAIL"
+            self.log(slot, f"AMD classify timeout after {self.call_timeout}s — treating as voicemail")
             self.controllers[slot].hangup()
             self.release_slot(slot)
             return

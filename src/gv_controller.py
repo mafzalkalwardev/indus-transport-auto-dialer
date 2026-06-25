@@ -17,6 +17,7 @@ from typing import Callable, Optional
 from urllib.parse import quote
 
 from src.webengine_env import configure_webengine_environment
+from src.dialer_logging import log_call_event
 
 configure_webengine_environment()
 
@@ -642,8 +643,10 @@ _JS_DETECT_STATE = r"""
 
   var hasEnabledAnswerControl = false;
   var answerControl = '';
-  var ansCtrl=['button[aria-label*="Hold call" i]','button[aria-label*="Mute call" i]',
-    'button[aria-label*="Unmute call" i]','button[aria-label*="Transfer" i]'];
+  // Mute/keypad can be enabled while GV is still ringing. Pickup evidence requires
+  // an enabled Hold/Unhold or Transfer control, or a live call timer.
+  var ansCtrl=['button[aria-label*="Hold call" i]','button[aria-label*="Unhold call" i]',
+    'button[aria-label*="Transfer" i]','button[aria-label*="Transfer the call" i]'];
   for(var a=0;a<ansCtrl.length;a++){
     var btn=q(activeRoot, ansCtrl[a]);
     if(vis(btn) && !btn.disabled && btn.getAttribute('aria-disabled')!=='true') {
@@ -1676,6 +1679,7 @@ class GVController(QObject):
         self._login_required_logged = False
         self._console_messages: list[dict] = []
         self._state_diag_seen: set[str] = set()
+        self._last_call_event_key: str = ""
 
         # ── WebEngine setup ───────────────────────────────────────────────────
         os.makedirs(profile_dir, exist_ok=True)
@@ -1797,6 +1801,9 @@ class GVController(QObject):
         self._last_whisper_at = 0.0
         self._post_answer_polls = 0
         self._min_answer_seconds = 10.0
+        self._amd_pending_since = 0.0
+        self._vm_hangup_scheduled = False
+        self._had_classify_speech = False
         self._visible_embedded = False
         self._blank_recover_attempts = 0
         self._blank_recover_scheduled = False
@@ -2015,10 +2022,10 @@ class GVController(QObject):
                 ancestor = ancestor.parentWidget()
         QApplication.processEvents()
         self._page.runJavaScript(_JS_FORCE_VISIBLE)
-        QTimer.singleShot(80, lambda: self._page.runJavaScript(_JS_FORCE_VISIBLE))
-        QTimer.singleShot(200, lambda: self._page.runJavaScript(_JS_REFRESH_LAYOUT))
-        QTimer.singleShot(400, lambda: self.view.repaint())
-        QTimer.singleShot(600, lambda: self._page.runJavaScript(_JS_REFRESH_LAYOUT))
+        QTimer.singleShot(80, lambda: self._page.runJavaScript(_JS_FORCE_VISIBLE) if self._page_alive() else None)
+        QTimer.singleShot(200, lambda: self._page.runJavaScript(_JS_REFRESH_LAYOUT) if self._page_alive() else None)
+        QTimer.singleShot(400, lambda: self.view.repaint() if getattr(self, "view", None) is not None else None)
+        QTimer.singleShot(600, lambda: self._page.runJavaScript(_JS_REFRESH_LAYOUT) if self._page_alive() else None)
 
     def schedule_visible_refresh(self, delays_ms: tuple[int, ...] | None = None) -> None:
         """Repaint embedded browser after dialog layout settles (fixes white screen)."""
@@ -2197,12 +2204,16 @@ class GVController(QObject):
         self._native_key_attempts = 0
         self._native_submit_scheduled = False
         self._state_diag_seen = set()
+        self._last_call_event_key = ""
         self._dial_started_at = time.monotonic()
         self._vm_count = 0
         self._idle_count = 0
         self._ctrl_count = 0
         self._amd_answer_at = 0.0
         self._amd_decision_ms = 0
+        self._amd_pending_since = 0.0
+        self._vm_hangup_scheduled = False
+        self._had_classify_speech = False
         self._whisper_pending = False
         self._whisper_transcript = ""
         self._post_answer_polls = 0
@@ -3011,6 +3022,7 @@ class GVController(QObject):
             "ANSWERED_PENDING",
             "CONNECTED_AUDIO_EVIDENCE",
             "CONNECTED",
+            "VOICEMAIL",
         }:
             self._set_state("ENDED")
         self._current_call_phone = ""
@@ -3018,6 +3030,8 @@ class GVController(QObject):
 
     def run_js(self, js: str,
                callback: Optional[Callable] = None) -> None:
+        if not self._page_alive():
+            return
         if callback:
             self._page.runJavaScript(js, callback)
         else:
@@ -3123,15 +3137,21 @@ class GVController(QObject):
 
     def _grant_permission(self, url, feature) -> None:
         """Auto-grant mic + camera permissions so GV calls work."""
+        if not self._page_alive():
+            return
         self._page.setFeaturePermission(
             url, feature,
             QWebEnginePage.PermissionPolicy.PermissionGrantedByUser
         )
 
     def _check_login(self) -> None:
+        if not self._page_alive():
+            return
         self._page.runJavaScript(_JS_CHECK_LOGIN, self._on_login_check)
 
     def _on_login_check(self, logged_in: bool) -> None:
+        if not self._page_alive():
+            return
         if logged_in and not self._logged_in:
             self.mark_logged_in()
             self._emit_log("Google account detected — ready")
@@ -3145,12 +3165,18 @@ class GVController(QObject):
             if not self._login_required_logged:
                 self._login_required_logged = True
                 self._emit_log("Waiting for Google Voice sign-in")
-            if (self._login_email or self._login_password) and not self._redirected_to_signin:
+            if (
+                (self._login_email or self._login_password)
+                and not self._redirected_to_signin
+                and self._page_alive()
+            ):
                 self._redirected_to_signin = True
                 self._emit_log("Opening Google sign-in…")
                 self._page.load(QUrl(SIGNIN_URL))
 
     def _try_auto_login(self) -> None:
+        if not self._page_alive():
+            return
         if (self._logged_in or self._autofill_paused
                 or not (self._login_email or self._login_password)):
             return
@@ -3366,9 +3392,44 @@ class GVController(QObject):
         if fused_state in {"ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "HUMAN"} and self._amd_answer_at <= 0:
             if (
                 bool(dom_payload.get("hasTimer"))
+                or bool(dom_payload.get("hasEnabledAnswerControl"))
                 or fused_state in {"CONNECTED_AUDIO_EVIDENCE", "HUMAN"}
             ):
                 self._amd_answer_at = time.monotonic()
+
+        speech_dur = float(getattr(audio_features, "speech_duration_seconds", 0.0) or 0.0)
+        silence_dur = float(getattr(audio_features, "silence_duration_seconds", 0.0) or 0.0)
+        beep_now = bool(getattr(audio_features, "beep_detected", False)) or float(
+            getattr(audio_features, "beep_hz_confidence", 0.0) or 0.0
+        ) >= 0.55
+        if speech_dur >= 0.5 or beep_now or (
+            self._state == "ANSWERED_PENDING"
+            and bool(getattr(audio_features, "has_speech_like", False))
+        ):
+            self._had_classify_speech = True
+
+        analysis_seconds = float(self._runtime_cfg.get("amd_analysis_seconds", 8))
+        safe_min = float(self._runtime_cfg.get("answered_pending_safe_min_seconds", 5))
+        if fused_state == "VOICEMAIL":
+            pass
+        elif beep_now and self._amd_answer_at > 0 and fused_state != "HUMAN":
+            fused_state = "VOICEMAIL"
+        elif (
+            self._state in ("ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE")
+            and self._amd_pending_since > 0
+            and (time.monotonic() - self._amd_pending_since) >= analysis_seconds
+            and fused_state not in {"HUMAN", "CONNECTED"}
+        ):
+            fused_state = "VOICEMAIL"
+        elif (
+            self._state in ("ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE")
+            and self._amd_pending_since > 0
+            and silence_dur >= 6.0
+            and (time.monotonic() - self._amd_pending_since) >= safe_min
+            and fused_state not in {"HUMAN", "CONNECTED"}
+        ):
+            fused_state = "VOICEMAIL"
+
         state = {
             "HUMAN": "CONNECTED",
             "ANSWERED_PENDING": "ANSWERED_PENDING",
@@ -3481,6 +3542,10 @@ class GVController(QObject):
 
         # Debounce + ringing-safety for voicemail.
         # Rule: RINGING is NOT voicemail and must not trigger hangup before timeout.
+        classify_timed_out = (
+            self._amd_pending_since > 0
+            and (time.monotonic() - self._amd_pending_since) >= analysis_seconds
+        )
         if state == "VOICEMAIL":
             if self._state in {"DIALING", "RINGING"}:
                 # Treat as non-terminal evidence until we have real CONNECTED/PICKUP evidence.
@@ -3489,7 +3554,7 @@ class GVController(QObject):
                 self._vm_count += 1
             else:
                 self._vm_count += 1
-                if self._vm_count < 2:
+                if self._vm_count < 2 and not classify_timed_out:
                     state = self._state if self._state != "IDLE" else "RINGING"
                 else:
                     self._emit_log("Voicemail detected")
@@ -3517,11 +3582,18 @@ class GVController(QObject):
         # still ringing, so require a mature call window and repeated evidence.
         if raw_state == "CONNECTED_CTRL":
             self._ctrl_count += 1
+            has_real_answer_dom = bool(dom_payload.get("hasEnabledAnswerControl")) or bool(
+                dom_payload.get("hasTimer")
+            )
             if answer_window_ready and self._ctrl_count >= 2 and fused_state == "HUMAN":
                 state = "CONNECTED"
-            elif audio_off and answer_window_ready and self._ctrl_count >= 2:
+            elif audio_off and answer_window_ready and self._ctrl_count >= 2 and has_real_answer_dom:
                 state = "CONNECTED"
-            elif self._state in {"ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "CONNECTED"} or fused_state in {"ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE"}:
+            elif fused_state in {"ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "VOICEMAIL"}:
+                state = fused_state if fused_state != "CONNECTED_AUDIO_EVIDENCE" else "ANSWERED_PENDING"
+            elif has_real_answer_dom and self._state in {
+                "ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "CONNECTED",
+            }:
                 state = "ANSWERED_PENDING"
             else:
                 state = "RINGING" if self._state != "CONNECTED" else "CONNECTED"
@@ -3532,8 +3604,12 @@ class GVController(QObject):
         if raw_state == "CONNECTED" and fused_state != "HUMAN":
             if audio_off and bool(dom_payload.get("hasTimer")):
                 state = "CONNECTED"
-            elif self._state in ("RINGING", "DIALING", "ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "CONNECTED"):
-                state = "ANSWERED_PENDING"
+            elif (
+                bool(dom_payload.get("hasTimer"))
+                or bool(dom_payload.get("hasEnabledAnswerControl"))
+                or fused_state in {"ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "VOICEMAIL"}
+            ) and self._state in ("RINGING", "DIALING", "ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "CONNECTED"):
+                state = "ANSWERED_PENDING" if fused_state != "VOICEMAIL" else "VOICEMAIL"
             else:
                 state = "RINGING" if self._state != "CONNECTED" else "CONNECTED"
 
@@ -3545,6 +3621,7 @@ class GVController(QObject):
         if state == "RINGING" and self._state == "DIALING":
             self._emit_log("Ringing…")
         if state in {"ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE"} and self._state not in {"ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "CONNECTED"}:
+            self._amd_pending_since = time.monotonic()
             self._emit_log("Answer detected — AMD classifying (waiting for human audio pattern)…")
 
         # Map ENDED back to IDLE after a brief pause
@@ -3562,6 +3639,7 @@ class GVController(QObject):
         # Auto-stop polling once a terminal state is reached
         if state == "VOICEMAIL":
             self.stop_polling()
+            self._schedule_voicemail_hangup()
         elif state == "BUSY":
             self.stop_polling()
         elif state == "IDLE" and not self._active_call:
@@ -3598,14 +3676,53 @@ class GVController(QObject):
             lines.append(f"{key}={debug.get(key)}")
         self._emit_log("\n".join(lines))
 
+    def _schedule_voicemail_hangup(self) -> None:
+        if self._vm_hangup_scheduled:
+            return
+        self._vm_hangup_scheduled = True
+        delay_ms = int(float(self._runtime_cfg.get("voicemail_hangup_sec", 4)) * 1000)
+        QTimer.singleShot(max(500, delay_ms), self._hangup_after_voicemail)
+
+    def _hangup_after_voicemail(self) -> None:
+        if not self._active_call or self._state != "VOICEMAIL":
+            return
+        self._emit_log("Voicemail — hanging up and moving to next")
+        self.hangup()
+
+    _TERMINAL_CALL_STATES = frozenset({
+        "HUMAN", "VOICEMAIL", "NO_ANSWER", "FAILED", "ENDED", "ENDED_MANUALLY", "BUSY",
+    })
+
     def _set_state(self, state: str) -> None:
         if state != self._state:
             self._state = state
             self.state_changed.emit(self.slot_id, state)
             self._pulse_heartbeat()
             self._capture_state_transition_diagnostics(state)
+            self._emit_terminal_call_event(state)
         if state != "DIALING" and self._dial_stuck_timer is not None:
             self._dial_stuck_timer.stop()
+
+    def _emit_terminal_call_event(self, state: str) -> None:
+        if state not in self._TERMINAL_CALL_STATES:
+            return
+        phone = self._current_call_phone or self._pending_dial_phone
+        if not phone:
+            return
+        key = f"{phone}:{state}"
+        if key == self._last_call_event_key:
+            return
+        self._last_call_event_key = key
+        elapsed = 0.0
+        if self._dial_started_at:
+            elapsed = round(time.monotonic() - self._dial_started_at, 2)
+        log_call_event({
+            "slot": self.slot_id,
+            "phone": phone,
+            "state": state,
+            "elapsed_sec": elapsed,
+            "at": datetime.now().isoformat(timespec="seconds"),
+        })
 
     def _capture_state_transition_diagnostics(self, state: str) -> None:
         phone = self._current_call_phone or self._pending_dial_phone
