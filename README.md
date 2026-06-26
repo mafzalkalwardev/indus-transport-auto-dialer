@@ -39,7 +39,7 @@ Professional Windows desktop dialer for dispatch and outbound calling teams. Age
 
 1. Install the app and create the **administrator** account (once).
 2. In **Settings**, add each Google Voice line (email + password) - the app signs in automatically in the background.
-3. In **Administration â†’ Export client packageâ€¦**, create a folder for each client PC (agent login + voice profiles + config).
+3. In **Administration -> Export client package...**, create a folder for each client PC (agent login + voice profiles + config).
 4. On the **client PC**, install the app, copy the package contents into the app folder, run once - they see **Agent sign-in** only (no admin setup wizard).
 5. Give each client **only** their email and password from the export step.
 
@@ -52,7 +52,7 @@ Use this when you configure everything on **your** machine and deliver a ready f
 ### On your PC (administrator)
 
 1. Complete Google Voice setup in **Settings**.
-2. **Administration** â†’ **Export client packageâ€¦**
+2. **Administration** -> **Export client package...**
 3. Enter the client's name, login email, and password (8+ characters).
 4. Choose a save location (e.g. Desktop). You get a folder like `FTSolutions_AutoDialer_Client` with:
    - `dialer_config.json` (`deployment_mode: client`)
@@ -73,7 +73,7 @@ python scripts/prepare_client_install.py --name "Jane Agent" --email jane@exampl
 3. Run the app - first screen is **Agent sign-in** only.
 4. Client signs in with the email/password you set during export.
 
-If the client sees "Workstation not configuredâ€, the `logs` folder from the package was not copied correctly.
+If the client sees "Workstation not configured", the `logs` folder from the package was not copied correctly.
 
 ## Screenshots
 
@@ -112,11 +112,11 @@ python autodialer_gui.py
 
 ### Add a line
 
-1. **Settings** â†’ **Add account**
+1. **Settings** -> **Add account**
 2. Fill in **Display name**, **Google email**, and **Password**
 3. Leave **Sign in automatically in background** selected (recommended)
 4. The app signs in headless - no window unless Google requires CAPTCHA/2FA
-5. If verification is needed: **Settings** â†’ select the line â†’ **Connect account**, finish in the browser, then close
+5. If verification is needed: **Settings** -> select the line -> **Connect account**, finish in the browser, then close
 
 Passwords are stored only in `data/gv_accounts.json` on this PC (not committed to git).
 
@@ -135,7 +135,7 @@ Passwords are stored only in `data/gv_accounts.json` on this PC (not committed t
 
 ## Dialing workflow (agent or admin)
 
-1. **Dialer** â†’ choose Excel file â†’ **Load contacts** (or **Sample list** for testing)
+1. **Dialer** -> choose Excel file -> **Load contacts** (or **Sample list** for testing)
 2. Set **Lines at once**, **Call timeout**, **Voicemail hangup**
 3. Confirm each line shows **Ready** on **Live Calls**
 4. **Start dialing**
@@ -168,7 +168,7 @@ The app reads Google Voice page state and fuses it with optional local AI audio 
 |--------|---------|
 | Ringing | Outbound ring |
 | On call | Person answered (timer or hold/mute controls) |
-| Voicemail | Greeting / beep detected â†’ auto hangup after configured seconds |
+| Voicemail | Greeting / beep detected -> auto hangup after configured seconds |
 | Waiting | Idle, ready for next number |
 
 ## Live detection and audio
@@ -236,9 +236,9 @@ Full troubleshooting: **[docs/RUNBOOK.md](docs/RUNBOOK.md)** (stuck slots, clien
 
 ## Troubleshooting
 
-### "Google Voice is not readyâ€
+### "Google Voice is not ready"
 
-1. **Settings** â†’ **Connect account** for that line  
+1. **Settings** -> **Connect account** for that line  
 2. Or wait ~90s after adding an account with automatic sign-in  
 3. Check **Live Calls** shows **Ready**
 
