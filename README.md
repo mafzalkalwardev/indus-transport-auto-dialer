@@ -14,10 +14,11 @@ Multi-line dialing · AMD · CRM · Excel lists · Predictive pacing
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://www.microsoft.com/windows)
 [![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?style=for-the-badge)](https://www.riverbankcomputing.com/software/pyqt/)
+[![Built with Cursor](https://img.shields.io/badge/Built_with-Cursor-000000?style=for-the-badge&logo=cursor&logoColor=white)](https://cursor.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen?style=for-the-badge)](CONTRIBUTING.md)
 
-[Features](#features) · [Quick Start](#quick-start) · [Documentation](#documentation) · [Screenshots](#-screenshots) · [Contributing](CONTRIBUTING.md)
+[Features](#features) · [Quick Start](#quick-start) · [Documentation](#documentation) · [Screenshots](#-screenshots) · [Contributors](#contributors) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -27,19 +28,33 @@ Professional Windows desktop dialer for **INDUS TRANSPORTS LLC**. Agents use a s
 
 ## 🖼 Screenshots
 
-![Login page](docs/screenshots/login-dark.png)
+Captured from the live application UI (light and dark themes).
 
-![Dialer tab](docs/screenshots/dialer-dark.png)
+### Light mode
 
-![Live calls dashboard](docs/screenshots/live-calls-dark.png)
+| | |
+|:--|:--|
+| Sign-in | Dialer |
+| ![Login — light mode](docs/screenshots/login-light.png) | ![Dialer — light mode](docs/screenshots/dialer-light.png) |
+| Live calls | Call logs |
+| ![Live calls — light mode](docs/screenshots/live-calls-light.png) | ![Call logs — light mode](docs/screenshots/call-logs-light.png) |
+| CRM | Settings |
+| ![CRM — light mode](docs/screenshots/crm-light.png) | ![Settings — light mode](docs/screenshots/settings-light.png) |
+| Administration | |
+| ![Administration — light mode](docs/screenshots/administration-light.png) | |
 
-![Call logs](docs/screenshots/call-logs-dark.png)
+### Dark mode
 
-![CRM contacts](docs/screenshots/crm-dark.png)
-
-![Settings panel](docs/screenshots/settings-dark.png)
-
-![Administration panel](docs/screenshots/administration-dark.png)
+| | |
+|:--|:--|
+| Sign-in | Dialer |
+| ![Login — dark mode](docs/screenshots/login-dark.png) | ![Dialer — dark mode](docs/screenshots/dialer-dark.png) |
+| Live calls | Call logs |
+| ![Live calls — dark mode](docs/screenshots/live-calls-dark.png) | ![Call logs — dark mode](docs/screenshots/call-logs-dark.png) |
+| CRM | Settings |
+| ![CRM — dark mode](docs/screenshots/crm-dark.png) | ![Settings — dark mode](docs/screenshots/settings-dark.png) |
+| Administration | |
+| ![Administration — dark mode](docs/screenshots/administration-dark.png) | |
 
 ---
 
@@ -52,6 +67,8 @@ Professional Windows desktop dialer for **INDUS TRANSPORTS LLC**. Agents use a s
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Community standards |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Operator runbook |
 | [docs/AMD_TESTING.md](docs/AMD_TESTING.md) | AMD / pacing test guide |
+| [CLIENT.md](CLIENT.md) | End-user install and daily use |
+| [CLIENT_DELIVERY.md](CLIENT_DELIVERY.md) | How to package and deliver to clients |
 
 
 ## Who uses what
@@ -292,13 +309,17 @@ Pipeline details and dataset layout: [docs/DETECTION_PIPELINE.md](docs/DETECTION
 - **Reset password** / **Activate / deactivate** / **Delete user**
 - Admins see all call logs; agents see only their own
 
-## Build EXE
+## Build EXE (client-ready)
+
+Double-click **`Build Auto Dialer.bat`** or run:
 
 ```bash
-python build_exe.py
+python build.py
 ```
 
 Output: `dist/IndusTransports_AutoDialer.exe`
+
+See **[CLIENT_DELIVERY.md](CLIENT_DELIVERY.md)** for the full administrator → client handoff checklist.
 
 ## Data on disk (do not share)
 
@@ -343,6 +364,15 @@ If this message still appears repeatedly, collect:
 ### Client cannot change voice settings
 
 Expected — only administrators configure Google Voice. Clients use Dialer and Live Calls only.
+
+## Contributors
+
+| | |
+|:--|:--|
+| **INDUS TRANSPORTS LLC** | Product owner and primary development |
+| **[Cursor](https://cursor.com)** | AI-assisted development — planning, implementation, and documentation |
+
+Screenshots are regenerated from the live UI with `python scripts/capture_readme_screenshots.py`.
 
 ## Support
 

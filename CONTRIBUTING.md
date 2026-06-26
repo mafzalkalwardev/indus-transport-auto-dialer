@@ -18,3 +18,13 @@ Thank you for improving FT Solutions projects.
 ## Reporting issues
 
 Use GitHub Issues with steps to reproduce, expected vs actual behavior, and RAM/line count if stability-related.
+
+## Acknowledgments
+
+Parts of this project were developed with [Cursor](https://cursor.com), an AI-assisted code editor used for implementation, refactoring, and documentation updates.
+
+To refresh README screenshots after UI changes:
+
+```bash
+python scripts/capture_readme_screenshots.py
+```
