@@ -43,3 +43,4 @@ Automated micro-entries for Pull Shark / Pair Extraordinaire progress. Each line
 | 5 | achievement/pull-shark-20260627142908-5 | 2026-06-27 14:29 | no |
 | 6 | achievement/pull-shark-20260627142923-6 | 2026-06-27 14:29 | no |
 | 7 | achievement/pull-shark-20260627142944-7 | 2026-06-27 14:29 | no |
+| 8 | achievement/pull-shark-20260627143002-8 | 2026-06-27 14:30 | no |
