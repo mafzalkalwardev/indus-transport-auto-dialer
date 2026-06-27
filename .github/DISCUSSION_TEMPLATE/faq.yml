@@ -1,0 +1,18 @@
+title: FAQ
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: Common operator or developer question about the Auto Dialer
+      placeholder: How do I export a client package for agent-only PCs?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Optional — OS version, deployment mode, error message
+      placeholder: Windows 11, deployment_mode client, agent cannot sign in
+    validations:
+      required: false

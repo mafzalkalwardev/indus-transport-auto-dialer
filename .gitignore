@@ -9,6 +9,8 @@ __pycache__/
 logo.ico
 call_logs.csv
 .codegraph/
+.pytest_cache/
+.sixth/
 *.spec.bak
 Archive_OldProjects/
 New Project/Auto Dialer Pro/
@@ -21,3 +23,22 @@ data/gv_accounts.json
 phones_test.xlsx
 phones.xlsx
 dialer_config.json
+
+# Local dev notes (not for clients)
+MEMORIES.md
+prompt.md
+errors.md
+TODO.md
+README_call_state_detector_integration.md
+README_call_state_detectors_extensions.md
+
+# Duplicate / local assets
+INDUS TRANSPORTS LOGO.jpg
+FTSolutions_AutoDialer.spec
+
+# Heavy vendored prototype (use src/detection instead)
+voicemail_vs_human_detection/
+
+# Client delivery zips
+IndusTransports_AutoDialer_Client/
+*.zip

@@ -90,7 +90,7 @@ def test_answered_without_timer_becomes_answered_pending():
     assert decision.state == DecisionState.ANSWERED_PENDING.value or decision.state == DecisionState.UNKNOWN.value
 
 
-def test_connected_ctrl_state_counts_as_answer_control_evidence():
+def test_connected_ctrl_without_enabled_control_stays_ringing():
     cfg = DetectionConfig(max_ring_seconds=55, answered_pending_seconds=10)
     det = LocalCallDetector(cfg)
     dom = {
@@ -108,10 +108,7 @@ def test_connected_ctrl_state_counts_as_answer_control_evidence():
         vad_confidence=0.75,
     )
     decision = det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=25)
-    assert decision.state in {
-        DecisionState.ANSWERED_PENDING.value,
-        DecisionState.HUMAN.value,
-    }
+    assert decision.state == DecisionState.RINGING.value
 
 
 def test_connected_ctrl_with_vad_speech_becomes_human():

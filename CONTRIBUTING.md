@@ -28,3 +28,5 @@ To refresh README screenshots after UI changes:
 ```bash
 python scripts/capture_readme_screenshots.py
 ```
+
+For GitHub profile badges (Pull Shark, Quickdraw, YOLO, Pair Extraordinaire), see [docs/GITHUB_ACHIEVEMENTS.md](docs/GITHUB_ACHIEVEMENTS.md).

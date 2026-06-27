@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 import traceback
 import uuid
@@ -20,6 +21,8 @@ from src.webengine_env import configure_webengine_environment
 from src.dialer_logging import log_call_event
 
 configure_webengine_environment()
+
+_DIAG_SCREENSHOT_LOCK = threading.Lock()
 
 from PyQt6.QtCore import QObject, QPoint, QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor
@@ -1997,8 +2000,9 @@ class GVController(QObject):
                 rect = screen.availableGeometry()
                 max_x = max(20, rect.width() - width - 20)
                 max_y = max(20, rect.height() - height - 20)
-                x = rect.x() + max(20, min(80 + self.slot_id * 24, max_x))
-                y = rect.y() + max(20, min(80 + self.slot_id * 24, max_y))
+                cascade = max(420, min(560, width // 2))
+                x = rect.x() + max(20, min(40 + self.slot_id * cascade, max_x))
+                y = rect.y() + max(20, min(40 + self.slot_id * 72, max_y))
                 self.view.move(x, y)
         self._set_render_dimensions(width, height)
         if hasattr(self._page, "setViewportSize"):
@@ -2077,10 +2081,15 @@ class GVController(QObject):
             else:
                 self._page.load(QUrl(GV_URL))
 
-    def set_audio_muted(self, muted: bool) -> None:
+    def set_audio_muted(self, muted: bool, *, force: bool = False) -> None:
         if not self._page_alive():
             return
-        if muted and self._active_call and bool(self._runtime_cfg.get("enable_ai_audio", True)):
+        if (
+            muted
+            and not force
+            and self._active_call
+            and bool(self._runtime_cfg.get("enable_ai_audio", True))
+        ):
             return
         self._page.setAudioMuted(muted)
 
@@ -2945,9 +2954,10 @@ class GVController(QObject):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         prefix = os.path.join(LOGS_DIR, f"gv_slot{self.slot_id}_{label}_{stamp}")
         try:
-            pix = self.view.grab()
-            if not pix.isNull():
-                pix.save(prefix + ".png")
+            with _DIAG_SCREENSHOT_LOCK:
+                pix = self.view.grab()
+                if not pix.isNull():
+                    pix.save(prefix + ".png")
         except Exception as exc:
             self._emit_log(f"Diagnostic screenshot failed: {exc}")
 

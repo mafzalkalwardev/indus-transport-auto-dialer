@@ -39,6 +39,19 @@ DEFAULT_NUMBERS = [
 
 TERMINAL_STATES = {"CONNECTED", "VOICEMAIL", "ENDED", "ENDED_MANUALLY", "FAILED", "NO_ANSWER", "BUSY"}
 ANSWERED_SUCCESS_STATES = {"HUMAN", "CONNECTED", "CONNECTED_AUDIO_EVIDENCE"}
+SEQUENTIAL_GATE_RELEASE_STATES = {
+    "RINGING",
+    "CONNECTED",
+    "HUMAN",
+    "CONNECTED_AUDIO_EVIDENCE",
+    "ANSWERED_PENDING",
+    "VOICEMAIL",
+    "BUSY",
+    "FAILED",
+    "NO_ANSWER",
+    "ENDED",
+    "ENDED_MANUALLY",
+}
 LIVE_TEST_CONFIRMATION = "I OWN OR HAVE PERMISSION TO CALL THESE NUMBERS"
 
 
@@ -213,6 +226,9 @@ class LiveCallSmoke:
         self.stop_requested = False
         self.stop_on_failure = bool(stop_on_failure)
         self.manual_connect_confirmation = bool(manual_connect_confirmation)
+        self._sequential_dial = False
+        self._sequential_queue: list[int] = []
+        self._sequential_gate_slot: int | None = None
 
     def log(self, slot: int | None, message: str) -> None:
         stamp = datetime.now().isoformat(timespec="seconds")
@@ -260,6 +276,8 @@ class LiveCallSmoke:
             ctrl.load()
             if self.visible:
                 ctrl.prepare_for_visible_display()
+                if idx > 0:
+                    ctrl.view.raise_()
             else:
                 ctrl.prepare_for_background_rendering()
             self.controllers.append(ctrl)
@@ -319,8 +337,42 @@ class LiveCallSmoke:
 
     def begin_dialing(self) -> None:
         self.log(None, f"Starting live smoke test for {len(self.numbers)} number(s)")
+        if len(self.controllers) > 1:
+            self._sequential_dial = True
+            self._sequential_queue = list(range(len(self.controllers)))
+            self._sequential_gate_slot = None
+            self.log(
+                None,
+                "Multi-line mode: dialing one slot at a time until RINGING "
+                "(avoids concurrent WebEngine dial races).",
+            )
+            self._start_next_sequential_slot()
+            return
         for idx, _ctrl in enumerate(self.controllers):
             QTimer.singleShot(idx * self.stagger_ms, lambda i=idx: self.assign_next(i))
+
+    def _start_next_sequential_slot(self) -> None:
+        if self.finished or not self._sequential_dial:
+            return
+        while self._sequential_queue:
+            slot = self._sequential_queue.pop(0)
+            if slot in self.active_by_slot or self.next_number_idx >= len(self.numbers):
+                continue
+            self._sequential_gate_slot = slot
+            self.log(None, f"Sequential dial gate: starting slot {slot}")
+            self.assign_next(slot)
+            QTimer.singleShot(
+                max(25000, int(self.stagger_ms * 4)),
+                lambda s=slot: self._release_sequential_gate(s, reason="gate timeout"),
+            )
+            return
+
+    def _release_sequential_gate(self, slot: int, *, reason: str) -> None:
+        if not self._sequential_dial or self._sequential_gate_slot != slot:
+            return
+        self._sequential_gate_slot = None
+        self.log(None, f"Sequential dial gate: releasing slot {slot} ({reason})")
+        QTimer.singleShot(int(self.stagger_ms), self._start_next_sequential_slot)
 
     def assign_next(self, slot: int) -> None:
         if self.finished or self.stop_requested or slot in self.active_by_slot:
@@ -405,6 +457,12 @@ class LiveCallSmoke:
             "FAILED": "failed",
         }.get(state, state.lower())
         self.log(slot, f"STATE {state} ({status})")
+        if (
+            self._sequential_dial
+            and self._sequential_gate_slot == slot
+            and state in SEQUENTIAL_GATE_RELEASE_STATES
+        ):
+            self._release_sequential_gate(slot, reason=f"state {state}")
         if state == "CONNECTED":
             rec["final"] = "CONNECTED"
             self.schedule_hangup(slot, self.connected_hold, "connected hold complete")

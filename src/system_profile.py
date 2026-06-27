@@ -36,7 +36,11 @@ def recommended_slots(requested: int) -> int:
         return min(requested, 1)
     if ram < 16 or chrome >= 10:
         return min(requested, 2)
-    return min(requested, 3)
+    if ram < 24:
+        return min(requested, 5)
+    if ram < 32:
+        return min(requested, 10)
+    return min(requested, 15)
 
 
 def recommended_amd_audio(requested: bool) -> bool:

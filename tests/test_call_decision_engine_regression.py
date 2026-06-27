@@ -71,6 +71,31 @@ def test_engine_fast_beep_path_after_safe_window():
     assert second.state == "VOICEMAIL"
 
 
+def test_engine_no_voicemail_while_ringing_with_beep():
+    """Beep + speech during RINGING must not promote to VOICEMAIL via engine path."""
+    engine = CallDecisionEngine(
+        detector_config=DetectionConfig(decision_stability_window=1)
+    )
+    engine.start_call()
+    dom = {
+        "state": "RINGING",
+        "hasRingingText": True,
+        "hasRingingNode": True,
+        "hasTimer": False,
+        "hasEnabledAnswerControl": False,
+    }
+    audio = DummyAudio(
+        beep_detected=True,
+        beep_hz_confidence=0.9,
+        has_speech_like=True,
+        rms=0.2,
+        is_silent=False,
+    )
+    decision = engine.update(dom_evidence=dom, audio_features=audio, elapsed_seconds=12.0)
+    assert decision.state == "RINGING"
+    assert decision.debug.get("detector_state") == "RINGING"
+
+
 def test_engine_keeps_ringing_until_ring_timeout():
     engine = CallDecisionEngine(
         detector_config=DetectionConfig(max_ring_seconds=55, decision_stability_window=1)

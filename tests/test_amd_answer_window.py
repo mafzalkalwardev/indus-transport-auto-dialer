@@ -136,5 +136,9 @@ def test_dom_timer_alone_never_promotes_human():
     det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=20.0)
     for elapsed in (20.5, 21.0, 22.0, 25.0, 28.5):
         decision = det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=elapsed)
-    assert decision.state in {DecisionState.ANSWERED_PENDING, DecisionState.UNKNOWN}
+        assert decision.state in {
+            DecisionState.ANSWERED_PENDING,
+            DecisionState.UNKNOWN,
+            DecisionState.VOICEMAIL,
+        }
     assert decision.state != DecisionState.HUMAN

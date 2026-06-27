@@ -32,6 +32,13 @@ def test_basic_call_status_mapping():
     assert ui_display_state("ENDED") == "ENDED"
 
 
+def test_vicidial_style_classifying_and_human_detected_labels():
+    assert ui_display_state("CLASSIFYING_AUDIO") == "ANSWERED_PENDING"
+    assert status_label("CLASSIFYING_AUDIO") == "Classifying answer…"
+    assert ui_display_state("HUMAN_DETECTED") == "CONNECTED"
+    assert status_label("HUMAN_DETECTED") == "Call picked up - talk now"
+
+
 def test_stale_dialing_and_ringing_cannot_override_connected():
     assert not ui_state_allows_transition("CONNECTED", "DIALING")
     assert not ui_state_allows_transition("CONNECTED_AUDIO_EVIDENCE", "RINGING")
