@@ -151,7 +151,7 @@ def main() -> int:
         print("\nNext steps:")
         print("  1. Test: double-click dist\\IndusTransports_AutoDialer.exe")
         print("  2. Admin: configure Google Voice in Settings")
-        print("  3. Administration → Export client package for each agent PC")
+        print("  3. Administration -> Export client package for each agent PC")
         return 0
 
     print("Build failed — check output above.")
