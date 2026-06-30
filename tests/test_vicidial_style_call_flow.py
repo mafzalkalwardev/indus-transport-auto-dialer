@@ -76,7 +76,13 @@ def test_answered_call_without_machine_signals_becomes_human_after_amd_window():
     )
     later = det.decide(
         dom_evidence=dom,
-        audio_features=DummyAudio(),
+        audio_features=DummyAudio(
+            has_speech_like=True,
+            human_greeting_detected=True,
+            short_speech_burst_detected=True,
+            speech_duration_seconds=0.8,
+            is_silent=False,
+        ),
         elapsed_seconds=16,
     )
 

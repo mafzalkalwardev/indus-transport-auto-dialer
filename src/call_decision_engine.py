@@ -17,6 +17,8 @@ from typing import Any, Dict
 
 from .detection.call_state_machine import CallStateMachine, CallStateMachineConfig
 from .local_call_detector import AudioFeatures, DetectionConfig, LocalCallDetector
+from .detection.external_evidence_manager import ExternalEvidenceManager
+from .detection.external_evidence_mapper import ExternalEvidenceMapper
 
 
 @dataclass
@@ -32,6 +34,7 @@ class CallDecisionEngine:
         self,
         detector: LocalCallDetector | None = None,
         detector_config: DetectionConfig | None = None,
+        external_evidence_manager: ExternalEvidenceManager | None = None,
     ):
         self.detector = detector or LocalCallDetector(detector_config)
         cfg = detector_config or DetectionConfig()
@@ -39,6 +42,7 @@ class CallDecisionEngine:
             CallStateMachineConfig(max_ring_seconds=float(cfg.max_ring_seconds))
         )
         self._in_call = False
+        self.external_evidence_manager = external_evidence_manager
 
     def start_call(self) -> None:
         self.detector.reset_for_new_call()
@@ -55,13 +59,23 @@ class CallDecisionEngine:
         dom_evidence: Dict[str, Any] | None,
         audio_features: AudioFeatures | Any | None,
         elapsed_seconds: float,
+        external_evidence: "ExternalEvidence | None" = None,
     ) -> CallDecisionResult:
         if not self._in_call:
             self.start_call()
+
+        latest_external = external_evidence
+        if latest_external is None and self.external_evidence_manager is not None:
+            try:
+                latest_external = self.external_evidence_manager.update()
+            except Exception:
+                latest_external = None
+
         detector_decision = self.detector.decide(
             dom_evidence=dom_evidence,
             audio_features=audio_features,
             elapsed_seconds=elapsed_seconds,
+            external_evidence=latest_external,
         )
         self.state_machine.update_dom(dom_evidence)
         self.state_machine.update_audio(audio_features)
@@ -77,6 +91,11 @@ class CallDecisionEngine:
         detector_state = str(detector_decision.state.value)
         state = self._compat_state(detector_state)
         reason = str(detector_decision.reason or snapshot.get("last_transition_reason") or "collecting evidence")
+
+        external_debug = ExternalEvidenceMapper.evidence_to_debug(latest_external)
+        if self.external_evidence_manager is not None:
+            external_debug.update(self.external_evidence_manager.get_diagnostics())
+
         return CallDecisionResult(
             state=state,
             confidence=float(detector_decision.confidence),
@@ -84,6 +103,7 @@ class CallDecisionEngine:
             debug={
                 **snapshot,
                 **detector_decision.debug,
+                **external_debug,
                 "fsm_state": fsm_state,
                 "detector_state": detector_state,
                 "candidate_state": detector_decision.debug.get("candidate_state", detector_state),

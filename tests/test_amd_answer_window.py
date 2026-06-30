@@ -80,6 +80,35 @@ def test_short_hello_promotes_human_in_first_window():
     assert decision.state == DecisionState.HUMAN
 
 
+def test_connected_ctrl_alone_never_promotes_human_even_without_audio_gate():
+    det = LocalCallDetector(
+        DetectionConfig(
+            decision_stability_window=1,
+            human_first_seconds=5,
+            require_audio_for_human=False,
+            enable_audio_detection=False,
+        )
+    )
+    dom = {
+        "state": "CONNECTED_CTRL",
+        "hasEnabledAnswerControl": True,
+        "hasTimer": False,
+        "hasRingingText": False,
+        "hasRingingNode": False,
+    }
+    audio = DummyAudio(
+        has_speech_like=False,
+        human_greeting_detected=False,
+        short_speech_burst_detected=False,
+        speech_duration_seconds=0.0,
+        rms=0.00002,
+        is_silent=True,
+        vad_confidence=0.0,
+    )
+    decision = det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=3.7)
+    assert decision.state != DecisionState.HUMAN
+
+
 def test_dom_timer_alone_never_promotes_human():
     det = LocalCallDetector(
         DetectionConfig(
@@ -107,5 +136,9 @@ def test_dom_timer_alone_never_promotes_human():
     det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=20.0)
     for elapsed in (20.5, 21.0, 22.0, 25.0, 28.5):
         decision = det.decide(dom_evidence=dom, audio_features=audio, elapsed_seconds=elapsed)
-    assert decision.state in {DecisionState.ANSWERED_PENDING, DecisionState.UNKNOWN}
+        assert decision.state in {
+            DecisionState.ANSWERED_PENDING,
+            DecisionState.UNKNOWN,
+            DecisionState.VOICEMAIL,
+        }
     assert decision.state != DecisionState.HUMAN

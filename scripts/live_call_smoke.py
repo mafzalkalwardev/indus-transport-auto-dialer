@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from datetime import datetime
 from glob import glob
 
@@ -22,7 +23,7 @@ from src.webengine_env import configure_webengine_environment
 configure_webengine_environment()
 
 from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
 from src.gv_accounts import load_accounts, profile_dir, has_session_marker
 from src.gv_controller import GVController
@@ -37,6 +38,9 @@ DEFAULT_NUMBERS = [
 ]
 
 TERMINAL_STATES = {"CONNECTED", "VOICEMAIL", "ENDED", "ENDED_MANUALLY", "FAILED", "NO_ANSWER", "BUSY"}
+ANSWERED_SUCCESS_STATES = {"HUMAN", "CONNECTED", "CONNECTED_AUDIO_EVIDENCE"}
+SEQUENTIAL_GATE_RELEASE_STATES = TERMINAL_STATES | ANSWERED_SUCCESS_STATES
+LIVE_TEST_CONFIRMATION = "I OWN OR HAVE PERMISSION TO CALL THESE NUMBERS"
 
 
 def _parse_numbers(values: list[str]) -> list[str]:
@@ -90,6 +94,39 @@ def _load_crm_numbers(limit: int, exclude: set[str] | None = None) -> list[str]:
     return numbers
 
 
+def _load_excel_numbers(path: str, limit: int) -> list[str]:
+    import pandas as pd
+
+    if not os.path.exists(path):
+        raise SystemExit(f"Live test phone file not found: {path}")
+    df = pd.read_excel(path)
+    df.columns = df.columns.astype(str).str.strip()
+    phone_col = next(
+        (
+            col for col in df.columns
+            if col.strip().lower() in {
+                "phone", "mobile", "number", "tel", "telephone", "cell", "phone number"
+            }
+        ),
+        None,
+    )
+    if not phone_col:
+        raise SystemExit(f"No phone column found in {path}. Columns: {list(df.columns)}")
+    numbers: list[str] = []
+    for raw in df[phone_col]:
+        cleaned = clean_phone(raw)
+        if not cleaned:
+            continue
+        phone = fmt_e164(cleaned)
+        if phone not in numbers:
+            numbers.append(phone)
+        if len(numbers) >= max(1, int(limit)):
+            break
+    if not numbers:
+        raise SystemExit(f"No dialable phone numbers found in {path}")
+    return numbers
+
+
 def _load_recent_report_numbers(hours: float) -> set[str]:
     if hours <= 0:
         return set()
@@ -98,6 +135,7 @@ def _load_recent_report_numbers(hours: float) -> set[str]:
     patterns = (
         os.path.join(LOGS_DIR, "live_call_smoke_*.json"),
         os.path.join(LOGS_DIR, "live_call_campaign_*_wave*.json"),
+        os.path.join(LOGS_DIR, "deep_live_test_*.json"),
     )
     for pattern in patterns:
         for path in glob(pattern):
@@ -119,7 +157,38 @@ def _load_recent_report_numbers(hours: float) -> set[str]:
     return numbers
 
 
+def load_all_report_dialed_numbers() -> set[str]:
+    """Every phone ever recorded in live/deep/campaign JSON reports."""
+    numbers: set[str] = set()
+    patterns = (
+        os.path.join(LOGS_DIR, "live_call_smoke_*.json"),
+        os.path.join(LOGS_DIR, "live_call_campaign_*.json"),
+        os.path.join(LOGS_DIR, "deep_live_test_*.json"),
+    )
+    for pattern in patterns:
+        for path in glob(pattern):
+            if path.endswith("_summary.json"):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    report = json.load(f)
+            except Exception:
+                continue
+            for raw in report.get("numbers", []):
+                cleaned = clean_phone(str(raw))
+                if cleaned:
+                    numbers.add(fmt_e164(cleaned))
+            for rec in report.get("results", []):
+                cleaned = clean_phone(str(rec.get("phone", "")))
+                if cleaned:
+                    numbers.add(fmt_e164(cleaned))
+    return numbers
+
+
 def select_smoke_numbers(args: argparse.Namespace, account_count: int) -> list[str]:
+    if getattr(args, "live_test_live_test", False):
+        path = getattr(args, "live_test_file", "") or os.path.join(ROOT, "phones_test.xlsx")
+        return _load_excel_numbers(path, int(getattr(args, "live_test_limit", 45) or 45))
     if args.numbers:
         return _parse_numbers(args.numbers)
     if args.from_crm:
@@ -147,6 +216,13 @@ class LiveCallSmoke:
         report_path: str | None = None,
         print_debug: bool = True,
         visible: bool = False,
+        max_parallel: int | None = None,
+        rate_limit_sec: float = 1.2,
+        stop_on_failure: bool = False,
+        manual_connect_confirmation: bool = False,
+        allow_duplicate_lines: bool = False,
+        accounts: list[dict] | None = None,
+        parallel_dial: bool = False,
     ) -> None:
         self.numbers = numbers
         self.call_timeout = call_timeout
@@ -154,15 +230,27 @@ class LiveCallSmoke:
         self.voicemail_hold = voicemail_hold
         self.stagger_ms = stagger_ms
         self.started_at = datetime.now().isoformat(timespec="seconds")
-        self.accounts = load_accounts()
+        self.accounts = accounts if accounts is not None else load_accounts()
         self.controllers: list[GVController] = []
         self.results: dict[int, dict] = {}
+        self.active_by_slot: dict[int, int] = {}
+        self.next_number_idx = 0
         self.events: list[dict] = []
         self.pending_hangups: set[int] = set()
         self.finished = False
         self.report_path = report_path
         self.print_debug = print_debug
         self.visible = visible
+        self.max_parallel = max(1, int(max_parallel or len(numbers) or 1))
+        self.rate_limit_sec = max(1.0, float(rate_limit_sec or 1.2))
+        self.stop_requested = False
+        self.stop_on_failure = bool(stop_on_failure)
+        self.manual_connect_confirmation = bool(manual_connect_confirmation)
+        self.allow_duplicate_lines = bool(allow_duplicate_lines)
+        self.parallel_dial = bool(parallel_dial)
+        self._sequential_dial = False
+        self._sequential_queue: list[int] = []
+        self._sequential_gate_slot: int | None = None
 
     def log(self, slot: int | None, message: str) -> None:
         stamp = datetime.now().isoformat(timespec="seconds")
@@ -171,26 +259,29 @@ class LiveCallSmoke:
         self.events.append({"time": stamp, "slot": slot, "message": message})
 
     def start(self) -> None:
-        if len(self.accounts) < len(self.numbers):
+        line_count = min(len(self.numbers), len(self.accounts), self.max_parallel)
+        if line_count <= 0:
             self.log(
                 None,
-                f"BLOCKED: {len(self.accounts)} Google Voice account(s) for "
-                f"{len(self.numbers)} requested live calls.",
+                "BLOCKED: no Google Voice accounts configured for live testing.",
             )
             self.finish()
             return
-        distinct_lines = distinct_line_count(self.accounts, len(self.numbers))
-        if distinct_lines < len(self.numbers):
+        distinct_lines = distinct_line_count(self.accounts, line_count)
+        if not self.allow_duplicate_lines and distinct_lines < line_count:
             self.log(
                 None,
                 f"BLOCKED: {distinct_lines} distinct Google Voice line(s) for "
-                f"{len(self.numbers)} requested concurrent live calls.",
+                f"{line_count} requested concurrent live calls.",
             )
             self.log(None, "Use one signed-in Google Voice account/email per realtime slot.")
             self.finish()
             return
 
-        for idx, phone in enumerate(self.numbers):
+        self._boot_line_count = line_count
+        self.controllers = [None] * line_count  # type: ignore[list-item]
+
+        def boot_slot(idx: int) -> None:
             acct = self.accounts[idx]
             ctrl = GVController(
                 idx,
@@ -201,6 +292,7 @@ class LiveCallSmoke:
                 runtime_cfg={
                     "call_timeout": self.call_timeout,
                     "allow_os_input": bool(self.visible),
+                    "defer_voicemail_hangup": True,
                 },
             )
             ctrl.state_changed.connect(self.on_state)
@@ -210,80 +302,262 @@ class LiveCallSmoke:
             ctrl.load()
             if self.visible:
                 ctrl.prepare_for_visible_display()
+                if idx > 0:
+                    ctrl.view.raise_()
             else:
                 ctrl.prepare_for_background_rendering()
-            self.controllers.append(ctrl)
-            self.results[idx] = {
-                "slot": idx,
-                "account": acct.get("name") or acct.get("email"),
-                "profile": acct.get("profile"),
-                "phone": phone,
-                "states": [],
-                "final": "PENDING",
-            }
+            self.controllers[idx] = ctrl
 
-        QTimer.singleShot(3000, lambda: self.wait_for_ready(0))
-        total_ms = (self.call_timeout + self.connected_hold + self.voicemail_hold + 70) * 1000
+        for idx in range(line_count):
+            QTimer.singleShot(idx * 2000, lambda i=idx: boot_slot(i))
+
+        ready_delay_ms = line_count * 2000 + 4000
+        QTimer.singleShot(ready_delay_ms, lambda: self.wait_for_ready(0))
+        waves = max(1, (len(self.numbers) + line_count - 1) // line_count)
+        total_ms = int((self.call_timeout + self.connected_hold + self.voicemail_hold + 70) * waves * 1000)
         QTimer.singleShot(total_ms, self.timeout_remaining)
 
     def wait_for_ready(self, waited: int) -> None:
+        controllers = [c for c in self.controllers if c is not None]
+        max_wait = 120 if getattr(self, "_boot_line_count", 1) >= 4 else 60
         missing = [
-            self.results[idx]["account"]
+            self.accounts[idx].get("name") or self.accounts[idx].get("email") or f"Slot {idx}"
             for idx, ctrl in enumerate(self.controllers)
-            if not ctrl.is_logged_in
+            if ctrl is not None and not ctrl.is_logged_in
         ]
-        if not missing:
+        blank_slots = [
+            f"Slot {idx}"
+            for idx, ctrl in enumerate(self.controllers)
+            if ctrl is not None and ctrl.is_logged_in and not ctrl.is_gv_page_ready()
+        ]
+        booting = [
+            f"Slot {idx}" for idx, ctrl in enumerate(self.controllers) if ctrl is None
+        ]
+        if booting and waited < max_wait:
+            if waited in (0, 6, 12, 18):
+                self.log(None, f"Booting Google Voice slots: {', '.join(booting)}")
+            QTimer.singleShot(3000, lambda: self.wait_for_ready(waited + 3))
+            return
+        if blank_slots:
+            for slot in blank_slots:
+                ctrl = self.controllers[int(slot.split()[-1])]
+                if ctrl._needs_gv_navigation():
+                    ctrl._ensure_gv_page(reason="Reloading Google Voice before live test…")
+        if not missing and not blank_slots:
             self.log(None, "Google Voice ready; waiting for call UI to settle")
             QTimer.singleShot(8000, self.begin_dialing)
             return
-        if waited >= 60:
-            self.log(None, "BLOCKED: Google Voice did not become ready for: " + ", ".join(missing))
+        if waited >= max_wait:
+            if blank_slots:
+                self.log(
+                    None,
+                    "BLOCKED: Google Voice page stuck on about:blank for: "
+                    + ", ".join(blank_slots),
+                )
+                self.log(None, "Check internet connection, sign in again, or reload the line.")
+            if missing:
+                self.log(None, "BLOCKED: Google Voice did not become ready for: " + ", ".join(missing))
             for idx, ctrl in enumerate(self.controllers):
-                if not ctrl.is_logged_in:
-                    self.results[idx]["final"] = "LOGIN_REQUIRED"
+                if ctrl is None:
+                    continue
+                if not ctrl.is_logged_in or not ctrl.is_gv_page_ready():
+                    acct = self.accounts[idx]
+                    self.results.setdefault(idx, {})
+                    self.results[idx].update({
+                        "slot": idx,
+                        "account": acct.get("name") or acct.get("email"),
+                        "profile": acct.get("profile"),
+                        "final": "LOGIN_REQUIRED" if not ctrl.is_logged_in else "GV_PAGE_BLANK",
+                    })
             self.finish()
             return
-        self.log(None, "Waiting for Google Voice readiness: " + ", ".join(missing))
+        if blank_slots:
+            self.log(None, "Waiting for Google Voice page load: " + ", ".join(blank_slots))
+        if missing:
+            self.log(None, "Waiting for Google Voice readiness: " + ", ".join(missing))
         QTimer.singleShot(3000, lambda: self.wait_for_ready(waited + 3))
 
     def begin_dialing(self) -> None:
         self.log(None, f"Starting live smoke test for {len(self.numbers)} number(s)")
-        for idx, phone in enumerate(self.numbers):
-            QTimer.singleShot(idx * self.stagger_ms, lambda i=idx, p=phone: self.dial(i, p))
+        live_controllers = [c for c in self.controllers if c is not None]
+        if len(live_controllers) > 1 and not self.parallel_dial:
+            self._sequential_dial = True
+            self._sequential_queue = [
+                idx for idx, ctrl in enumerate(self.controllers) if ctrl is not None
+            ]
+            self._sequential_gate_slot = None
+            self.log(
+                None,
+                "Multi-line mode: one active call at a time across all slots "
+                "(avoids concurrent WebEngine dial races).",
+            )
+            self._start_next_sequential_slot()
+            return
+        if len(live_controllers) > 1 and self.parallel_dial:
+            self.log(
+                None,
+                f"Parallel dial mode: {len(live_controllers)} lines placing calls concurrently.",
+            )
+        for idx, ctrl in enumerate(self.controllers):
+            if ctrl is None:
+                continue
+            QTimer.singleShot(idx * self.stagger_ms, lambda i=idx: self.assign_next(i))
 
-    def dial(self, slot: int, phone: str) -> None:
-        self.log(slot, f"Dialing {phone}")
-        self.results[slot]["dial_started_at"] = datetime.now().isoformat(timespec="seconds")
-        self.controllers[slot].dial(phone)
-        QTimer.singleShot(self.call_timeout * 1000, lambda s=slot: self.mark_no_answer(s))
+    def _start_next_sequential_slot(self) -> None:
+        if self.finished or not self._sequential_dial:
+            return
+        while self._sequential_queue:
+            slot = self._sequential_queue.pop(0)
+            if slot in self.active_by_slot or self.next_number_idx >= len(self.numbers):
+                continue
+            self._sequential_gate_slot = slot
+            self.log(None, f"Sequential dial gate: starting slot {slot}")
+            self.assign_next(slot)
+            return
+
+    def _release_sequential_gate(self, slot: int, *, reason: str) -> None:
+        if not self._sequential_dial or self._sequential_gate_slot != slot:
+            return
+        self._sequential_gate_slot = None
+        self.log(None, f"Sequential dial gate: releasing slot {slot} ({reason})")
+        QTimer.singleShot(int(self.stagger_ms), self._start_next_sequential_slot)
+
+    def assign_next(self, slot: int) -> None:
+        if self.finished or self.stop_requested or slot in self.active_by_slot:
+            return
+        if self.next_number_idx >= len(self.numbers):
+            self.check_done()
+            return
+        call_id = self.next_number_idx
+        self.next_number_idx += 1
+        phone = self.numbers[call_id]
+        acct = self.accounts[slot]
+        self.results[call_id] = {
+            "slot": slot,
+            "account": acct.get("name") or acct.get("email"),
+            "profile": acct.get("profile"),
+            "phone": phone,
+            "states": [],
+            "final": "PENDING",
+        }
+        self.active_by_slot[slot] = call_id
+        self.dial(slot, call_id, phone)
+
+    def dial(self, slot: int, call_id: int, phone: str) -> None:
+        self.log(slot, f"Dial attempt started: {phone}")
+        self.results[call_id]["dial_started_at"] = datetime.now().isoformat(timespec="seconds")
+        try:
+            self.controllers[slot].dial(phone)
+        except Exception:
+            self.results[call_id]["final"] = "FAILED"
+            tb = traceback.format_exc()
+            self.results[call_id]["exception_traceback"] = tb
+            self.log(slot, "FAILED: exception while starting dial\n" + tb)
+            self.active_by_slot.pop(slot, None)
+            QTimer.singleShot(int(self.rate_limit_sec * 1000), lambda s=slot: self.assign_next(s))
+            return
+        QTimer.singleShot(
+            (self.call_timeout + 35) * 1000,
+            lambda s=slot, c=call_id: self.mark_pre_dial_timeout(s, c),
+        )
 
     def on_controller_log(self, slot: int, message: str) -> None:
         self.log(slot, message)
+        call_id = self.active_by_slot.get(slot)
+        rec = self.results.get(call_id) if call_id is not None else None
+        if rec is None:
+            return
+        if (
+            (
+                "Dial UI status: call_button_clicked" in message
+                or "Dial UI status: call_suggestion_clicked" in message
+                or "Dial UI status: os_number_submitted" in message
+            )
+            and not rec.get("call_clicked_at")
+        ):
+            rec["call_clicked_at"] = datetime.now().isoformat(timespec="seconds")
+            QTimer.singleShot(
+                self.call_timeout * 1000,
+                lambda s=slot, c=call_id: self.mark_no_answer(s, c),
+            )
 
     def on_state(self, slot: int, state: str) -> None:
-        rec = self.results.get(slot)
+        call_id = self.active_by_slot.get(slot)
+        if call_id is None:
+            return
+        rec = self.results.get(call_id)
         if rec is None:
             return
         rec["states"].append({
             "time": datetime.now().isoformat(timespec="seconds"),
             "state": state,
         })
-        self.log(slot, f"STATE {state}")
+        status = {
+            "RINGING": "ringing",
+            "ANSWERED_PENDING": "classifying answer",
+            "CONNECTED_AUDIO_EVIDENCE": "call picked up - talk now",
+            "CONNECTED": "call picked up - talk now",
+            "VOICEMAIL": "voicemail",
+            "NO_ANSWER": "no answer / hung up before pickup",
+            "ENDED": "call ended",
+            "ENDED_MANUALLY": "call ended by operator",
+            "BUSY": "busy",
+            "FAILED": "failed",
+        }.get(state, state.lower())
+        self.log(slot, f"STATE {state} ({status})")
+        if (
+            getattr(self, "_sequential_dial", False)
+            and self._sequential_gate_slot == slot
+            and state in SEQUENTIAL_GATE_RELEASE_STATES
+            and state not in TERMINAL_STATES
+        ):
+            self._release_sequential_gate(slot, reason=f"state {state}")
         if state == "CONNECTED":
             rec["final"] = "CONNECTED"
             self.schedule_hangup(slot, self.connected_hold, "connected hold complete")
-        elif state == "VOICEMAIL":
-            rec["final"] = "VOICEMAIL"
-            self.schedule_hangup(slot, self.voicemail_hold, "voicemail detected")
-        elif state in ("NO_ANSWER", "ENDED", "ENDED_MANUALLY", "FAILED", "BUSY"):
+        elif state == "HUMAN":
+            rec["final"] = "HUMAN"
+            self.schedule_hangup(slot, self.connected_hold, "human pickup hold complete")
+        elif state in ANSWERED_SUCCESS_STATES:
             if rec.get("final") == "PENDING":
                 rec["final"] = state
-            self.check_done()
+                self.schedule_hangup(slot, self.connected_hold, "answered hold complete")
+        elif state == "VOICEMAIL":
+            rec["final"] = "VOICEMAIL"
+            if slot not in self.pending_hangups:
+                self.schedule_hangup(slot, self.voicemail_hold, "voicemail detected")
+        elif state in ("NO_ANSWER", "ENDED", "ENDED_MANUALLY", "FAILED", "BUSY"):
+            if (
+                state in {"NO_ANSWER", "FAILED"}
+                and rec.get("final") == "PENDING"
+                and self._confirm_connected_manually(slot, rec)
+            ):
+                self.controllers[slot].hangup()
+                self.release_slot(slot)
+                return
+            if rec.get("final") == "PENDING":
+                rec["final"] = state
+            if self.stop_on_failure and state == "FAILED":
+                self.stop_requested = True
+                self.log(None, "Stopping guarded live test after first failed dial")
+            if state in {"NO_ANSWER", "BUSY", "FAILED"}:
+                self._ensure_line_idle(slot)
+            self.release_slot(slot)
 
     def on_detection(self, slot: int, debug: dict) -> None:
-        rec = self.results.get(slot)
+        call_id = self.active_by_slot.get(slot)
+        rec = self.results.get(call_id) if call_id is not None else None
         if rec is not None:
             rec.setdefault("detection", []).append(debug)
+            rec["last_debug"] = debug
+            if str(debug.get("fused_state") or "").upper() == "HUMAN":
+                rec["human_detection"] = "Human Detected"
+                rec["human_detection_reason"] = str(debug.get("reason") or "")
+                rec["human_detection_at"] = datetime.now().isoformat(timespec="seconds")
+            fused = str(debug.get("fused_state") or "").upper()
+            if fused == "VOICEMAIL" and rec.get("final") == "PENDING":
+                rec["final"] = "VOICEMAIL"
+                self.log(slot, "VOICEMAIL detected — waiting for state hangup")
         if not self.print_debug:
             return
         print("[CALL DEBUG]", flush=True)
@@ -294,6 +568,8 @@ class LiveCallSmoke:
             "speech_duration", "silence_duration", "beep_detected",
             "human_greeting_detected", "voicemail_confirmations",
             "should_hangup", "audio_backend_name", "vad_backend", "vad_confidence",
+            "external_provider_health", "external_last_label", "external_confidence",
+            "external_transcript", "external_accepted",
         ):
             print(f"{key}={debug.get(key)}", flush=True)
 
@@ -306,32 +582,152 @@ class LiveCallSmoke:
     def hangup(self, slot: int, reason: str) -> None:
         if self.finished:
             return
+        self.pending_hangups.discard(slot)
+        ctrl = self.controllers[slot]
+        if ctrl.current_state in {"IDLE", "ENDED", "ENDED_MANUALLY"}:
+            self.release_slot(slot)
+            return
         self.log(slot, f"Hangup after {reason}")
-        self.controllers[slot].hangup()
-        self.check_done()
+        ctrl.hangup()
+        self.release_slot(slot)
 
-    def mark_no_answer(self, slot: int) -> None:
-        rec = self.results.get(slot)
+    def _ensure_line_idle(self, slot: int) -> None:
+        """Hang up Google Voice if the line is still in an in-call state."""
+        ctrl = self.controllers[slot]
+        if ctrl.current_state not in {"IDLE", "ENDED", "ENDED_MANUALLY"}:
+            try:
+                ctrl.hangup()
+            except Exception:
+                self.log(slot, "Hangup cleanup failed\n" + traceback.format_exc())
+        else:
+            try:
+                ctrl.prepare_dial_ui_for_next_call()
+            except Exception:
+                pass
+
+    def mark_no_answer(self, slot: int, call_id: int) -> None:
+        if self.active_by_slot.get(slot) != call_id:
+            return
+        rec = self.results.get(call_id)
         if not rec or rec.get("final") != "PENDING":
             return
+        if not rec.get("call_clicked_at"):
+            return
         state = self.controllers[slot].current_state
-        if state in ("DIALING", "RINGING", "IDLE", "UNKNOWN", "ANSWERED_PENDING"):
+        if state in ANSWERED_SUCCESS_STATES:
+            rec["final"] = state
+            self.log(slot, f"{state} after answer evidence")
+            self.controllers[slot].hangup()
+            self.release_slot(slot)
+            return
+        if self._confirm_connected_manually(slot, rec):
+            self.controllers[slot].hangup()
+            self.release_slot(slot)
+            return
+        if state in ("ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE"):
+            rec["final"] = "VOICEMAIL"
+            self.log(slot, f"AMD classify timeout after {self.call_timeout}s — treating as voicemail")
+            self.controllers[slot].hangup()
+            self.release_slot(slot)
+            return
+        if state in ("DIALING", "RINGING", "IDLE", "UNKNOWN"):
             rec["final"] = "NO_ANSWER"
             self.log(slot, f"NO_ANSWER after {self.call_timeout}s timeout")
             self.controllers[slot].hangup()
+            self.release_slot(slot)
+
+    def _confirm_connected_manually(self, slot: int, rec: dict) -> bool:
+        if not (self.visible and self.manual_connect_confirmation):
+            return False
+        if not rec.get("call_clicked_at"):
+            return False
+        reply = QMessageBox.question(
+            None,
+            "Live call confirmation",
+            "Did the call connect on your phone? yes/no",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            rec["final"] = "CONNECTED_MANUAL_CONFIRMATION"
+            rec["manual_confirmation_at"] = datetime.now().isoformat(timespec="seconds")
+            self.log(slot, "CONNECTED by manual confirmation")
+            return True
+        rec["manual_confirmation_at"] = datetime.now().isoformat(timespec="seconds")
+        rec["manual_confirmation"] = "no"
+        return False
+
+    def mark_pre_dial_timeout(self, slot: int, call_id: int) -> None:
+        if self.active_by_slot.get(slot) != call_id:
+            return
+        rec = self.results.get(call_id)
+        if not rec or rec.get("final") != "PENDING" or rec.get("call_clicked_at"):
+            return
+        rec["final"] = "FAILED"
+        rec["failure_reason"] = "pre_dial_timeout_no_call_button_click"
+        self.log(slot, "FAILED: Google Voice did not become ready before live dial")
+        self.controllers[slot].hangup()
+        if self.stop_on_failure:
+            self.stop_requested = True
+            self.log(None, "Stopping guarded live test after first failed dial")
+        self.release_slot(slot)
+
+    def release_slot(self, slot: int) -> None:
+        self.pending_hangups.discard(slot)
+        if slot not in self.active_by_slot:
+            return
+        self.active_by_slot.pop(slot, None)
+        if getattr(self, "_sequential_dial", False):
+            if slot not in self._sequential_queue:
+                self._sequential_queue.append(slot)
+            if self._sequential_gate_slot == slot:
+                self._sequential_gate_slot = None
+                self.log(None, f"Sequential dial gate: slot {slot} finished — queueing next line")
+                QTimer.singleShot(int(self.rate_limit_sec * 1000), self._start_next_sequential_slot)
             self.check_done()
+            return
+        if self.stop_requested:
+            self.check_done()
+            return
+        QTimer.singleShot(int(self.rate_limit_sec * 1000), lambda s=slot: self.assign_next(s))
+        self.check_done()
 
     def timeout_remaining(self) -> None:
-        for slot, rec in self.results.items():
+        for slot, call_id in list(self.active_by_slot.items()):
+            rec = self.results.get(call_id)
+            if not rec:
+                continue
             if rec.get("final") == "PENDING":
                 rec["final"] = "TIMEOUT"
                 self.log(slot, "TIMEOUT waiting for terminal state")
                 self.controllers[slot].hangup()
+        self.active_by_slot.clear()
         self.finish()
 
     def check_done(self) -> None:
-        if self.results and all(r.get("final") != "PENDING" for r in self.results.values()):
+        if (
+            self.results
+            and self.next_number_idx >= len(self.numbers)
+            and not self.active_by_slot
+            and all(r.get("final") != "PENDING" for r in self.results.values())
+        ):
             QTimer.singleShot(1500, self.finish)
+
+    def emergency_stop(self) -> None:
+        if self.finished:
+            return
+        self.stop_requested = True
+        self.log(None, "EMERGENCY STOP requested")
+        for slot, call_id in list(self.active_by_slot.items()):
+            rec = self.results.get(call_id)
+            if rec and rec.get("final") == "PENDING":
+                rec["final"] = "STOPPED"
+            try:
+                self.controllers[slot].hangup()
+            except Exception:
+                self.log(slot, "Exception during emergency hangup\n" + traceback.format_exc())
+        self.active_by_slot.clear()
+        self.finish()
 
     def finish(self) -> None:
         if self.finished:
@@ -359,8 +755,22 @@ class LiveCallSmoke:
             json.dump(report, f, indent=2)
         print(f"\nReport written: {path}", flush=True)
         for rec in report["results"]:
-            print(f"Slot {rec['slot']}: {rec['phone']} -> {rec['final']}", flush=True)
+            slot = rec.get("slot", "?")
+            phone = rec.get("phone", "N/A")
+            final = rec.get("final", "UNKNOWN")
+            print(f"Slot {slot}: {phone} -> {final}", flush=True)
         QApplication.instance().quit()
+
+
+class EmergencyStopPanel(QWidget):
+    def __init__(self, smoke: LiveCallSmoke) -> None:
+        super().__init__()
+        self.setWindowTitle("Live Test Emergency Stop")
+        layout = QVBoxLayout(self)
+        btn = QPushButton("EMERGENCY STOP")
+        btn.setMinimumHeight(80)
+        btn.clicked.connect(smoke.emergency_stop)
+        layout.addWidget(btn)
 
 
 def _run_crm_campaign(args: argparse.Namespace, accounts: list[dict]) -> int:
@@ -435,7 +845,7 @@ def _run_crm_campaign(args: argparse.Namespace, accounts: list[dict]) -> int:
             final_counts[final] = final_counts.get(final, 0) + 1
             if final == "VOICEMAIL":
                 voicemail_count += 1
-            elif final in {"CONNECTED", "HUMAN"}:
+            elif final in {"CONNECTED", "HUMAN", "ANSWERED_PENDING", "CONNECTED_AUDIO_EVIDENCE", "CONNECTED_MANUAL_CONFIRMATION"}:
                 live_count += 1
         print(
             f"Campaign progress: voicemails={voicemail_count}/{target_voicemail}, "
@@ -470,6 +880,11 @@ def _run_crm_campaign(args: argparse.Namespace, accounts: list[dict]) -> int:
 
 
 def main() -> None:
+    def _excepthook(exc_type, exc, tb):
+        print("UNHANDLED EXCEPTION", file=sys.stderr, flush=True)
+        traceback.print_exception(exc_type, exc, tb)
+
+    sys.excepthook = _excepthook
     parser = argparse.ArgumentParser(description="Dial approved live test numbers.")
     parser.add_argument("numbers", nargs="*", help="Phone numbers to dial")
     parser.add_argument("--from-crm", action="store_true", help="Load test numbers from CRM contacts")
@@ -483,11 +898,28 @@ def main() -> None:
     parser.add_argument("--quiet-debug", action="store_true", help="Store detection debug in JSON without printing every poll")
     parser.add_argument("--print-debug", action="store_true", help="Print every child wave detection debug block during CRM campaigns")
     parser.add_argument("--visible", action="store_true", help="Show the WebEngine slot while running the live smoke test")
+    parser.add_argument("--live-test-live-test", action="store_true", help="Guarded live test mode: load phones_test.xlsx and require owner/permission confirmation")
+    parser.add_argument("--live-test-file", default=os.path.join(ROOT, "phones_test.xlsx"), help="Excel file for guarded live tests")
+    parser.add_argument("--live-test-limit", type=int, default=45, help="Numbers to load for guarded live tests; default 45")
+    parser.add_argument("--confirm-live-test", default="", help="Must equal the live-test consent phrase to skip interactive prompt")
+    parser.add_argument("--rate-limit-sec", type=float, default=6.0, help="Minimum delay before each line dials its next live-test number")
+    parser.add_argument("--max-parallel", type=int, default=1, help="Maximum concurrent live-test lines")
     parser.add_argument("--call-timeout", type=int, default=45)
     parser.add_argument("--connected-hold", type=int, default=8)
     parser.add_argument("--voicemail-hold", type=int, default=4)
     parser.add_argument("--stagger-ms", type=int, default=1200)
     args = parser.parse_args()
+
+    if args.live_test_live_test:
+        args.live_test_limit = max(1, int(args.live_test_limit or 45))
+        if not args.confirm_live_test:
+            print("LIVE TEST MODE will place real calls from phones_test.xlsx.", flush=True)
+            print(f"Default guarded batch size is 45; this run will load {args.live_test_limit}.", flush=True)
+            print(f"Type exactly: {LIVE_TEST_CONFIRMATION}", flush=True)
+            args.confirm_live_test = input("Confirmation: ").strip()
+        if args.confirm_live_test != LIVE_TEST_CONFIRMATION:
+            raise SystemExit("Live test confirmation failed; no calls placed.")
+        args.stagger_ms = max(args.stagger_ms, int(float(args.rate_limit_sec) * 1000))
 
     accounts = load_accounts()
     if args.target_voicemails or args.target_live:
@@ -495,6 +927,8 @@ def main() -> None:
 
     numbers = select_smoke_numbers(args, len(accounts))
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
+    app.aboutToQuit.connect(lambda: print("QApplication aboutToQuit", flush=True))
     smoke = LiveCallSmoke(
         numbers,
         call_timeout=args.call_timeout,
@@ -504,7 +938,14 @@ def main() -> None:
         report_path=args.report_path or None,
         print_debug=not args.quiet_debug,
         visible=bool(args.visible),
+        max_parallel=args.max_parallel if args.live_test_live_test else len(numbers),
+        rate_limit_sec=args.rate_limit_sec if args.live_test_live_test else max(1.0, args.stagger_ms / 1000.0),
+        stop_on_failure=bool(args.live_test_live_test),
+        manual_connect_confirmation=bool(args.visible),
     )
+    panel = EmergencyStopPanel(smoke) if args.live_test_live_test else None
+    if panel is not None:
+        panel.show()
     QTimer.singleShot(0, smoke.start)
     sys.exit(app.exec())
 

@@ -19,6 +19,12 @@ def test_recommended_slots_allows_two_on_mid_ram(monkeypatch):
     assert recommended_slots(3) == 2
 
 
+def test_recommended_slots_allows_fifteen_on_high_ram(monkeypatch):
+    monkeypatch.setattr("src.system_profile.system_ram_gb", lambda: 64.0)
+    monkeypatch.setattr("src.system_profile.chrome_process_count", lambda: 2)
+    assert recommended_slots(20) == 15
+
+
 def test_effective_enable_ai_audio_respects_low_ram(monkeypatch):
     monkeypatch.setattr("src.system_profile.system_ram_gb", lambda: 8.0)
     monkeypatch.setattr("src.system_profile.chrome_process_count", lambda: 30)

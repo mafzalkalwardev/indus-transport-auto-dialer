@@ -1,0 +1,28 @@
+{
+  "captured_at": "2026-06-25T21:05:30",
+  "themes": [
+    "light",
+    "dark"
+  ],
+  "files": [
+    "administration-dark.png",
+    "administration-light.png",
+    "administration-tab.png",
+    "call-logs-dark.png",
+    "call-logs-light.png",
+    "call-logs-tab.png",
+    "crm-dark.png",
+    "crm-light.png",
+    "crm-tab.png",
+    "dialer-dark.png",
+    "dialer-light.png",
+    "live-calls-dark.png",
+    "live-calls-light.png",
+    "live-calls-tab.png",
+    "login-dark.png",
+    "login-light.png",
+    "settings-dark.png",
+    "settings-light.png",
+    "settings-tab.png"
+  ]
+}

@@ -188,34 +188,18 @@ If watchdog decides a slot is stuck:
 
 Below are the main workflow problems observed by reading the code paths.
 
-### Issue 1 — Scheduling logic for retries is likely broken
-In `_assign_pending_calls()`:
-```python
-ready_retries = self._retry_queue.pop_ready()
-for idx, (phone, name, attempt) in enumerate(ready_retries):
-    ctrl = self._idle_controller()
-    if ctrl is None:
-        for p, n, a in ready_retries[idx:]:
-            self._retry_queue.requeue(p, n, a, 2.0)
-        break
-    self._dial_on_slot(ctrl, phone, name, attempt)
-    assigned += 1
-    break
-```
-Problems:
-- `assigned += 1` then `break` means at most **one** retry entry is dialed per scheduler tick.
-- But then it still loops over controllers and dials new contacts *in the same tick*, so retries don’t get fair priority.
-- If there is no free controller, it requeues *the remaining ready retries* with `delay_sec=2.0` but doesn’t adjust attempt count; it passes `attempt` as `a` (which in this code is the retry queue’s stored attempt field). That may or may not align with `defer()` semantics.
-- There is a suspicious mixing of retry semantics between:
-  - `defer(phone,name,attempt)` expects `attempt` to be how many dials have already failed (0-based)
-  - `pop_ready()` returns `entry.attempt`
-  - `defer()` increments attempt by 1.
-This is easy to get off-by-one and cause either too many or too few retries.
+### Issue 1 — Retry scheduling has been improved; keep regression coverage
+Current `_assign_pending_calls()` now drains all ready retries before assigning
+fresh contacts, respects the predictive pacing `max_assign` limit, and requeues
+deferred retry entries without incrementing their attempt count.
 
-**Why it matters to workflow:** retries are part of reliability. If the queue logic is off, the system can:
-- spam immediate retries
-- starve retries while dialing fresh numbers
-- mis-label outcomes (FAILED vs retried)
+The remaining risk is regression: retry fairness depends on the UI scheduler,
+`DialRetryQueue.defer()`, `DialRetryQueue.pop_ready()`, and
+`DialRetryQueue.requeue()` staying aligned. Keep focused tests around:
+- preserving attempt count when a ready retry is requeued because no line is
+  available
+- ensuring retries are assigned before new contacts when lines are idle
+- ensuring predictive pacing caps apply to retries and fresh contacts together
 
 ### Issue 2 — UI cooldown vs watchdog cooldown/restart can fight
 There are multiple timers/cooldowns:

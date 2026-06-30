@@ -71,6 +71,11 @@ class AudioAnalyzer:
         self._capture_failures = 0
         self._disabled_until = 0.0
         self._last_pcm: list[float] = []
+        self._last_pcm_sample_rate: int = self.sample_rate
+
+    def last_pcm_chunk(self) -> tuple[list[float], int]:
+        """Return the most recent mono PCM window and its sample rate."""
+        return list(self._last_pcm), int(self._last_pcm_sample_rate or self.sample_rate)
 
     def analyze_from_pcm(
         self,
@@ -92,7 +97,8 @@ class AudioAnalyzer:
         if peak > 2.0:
             x = [v / 32768.0 for v in x]
 
-        self._last_pcm = x[-8000:]
+        self._last_pcm = x[-16000:]
+        self._last_pcm_sample_rate = int(sample_rate)
 
         rms = math.sqrt(sum(v * v for v in x) / len(x))
         mean = sum(x) / len(x)

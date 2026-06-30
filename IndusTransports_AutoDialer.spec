@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('dialer_config.json', '.'), ('src', 'src'), ('ftsolutionslogo.jpg', '.')]
+datas = [('dialer_config.json', '.'), ('src', 'src'), ('indus_transports_logo.jpg', '.')]
 binaries = []
 hiddenimports = ['PyQt6.QtWebEngineWidgets', 'PyQt6.QtWebEngineCore', 'PyQt6.sip', 'pandas', 'openpyxl', 'PIL', 'pyperclip', 'psutil', 'sounddevice']
 tmp_ret = collect_all('PyQt6')
@@ -33,7 +33,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='FTSolutions_AutoDialer',
+    name='IndusTransports_AutoDialer',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

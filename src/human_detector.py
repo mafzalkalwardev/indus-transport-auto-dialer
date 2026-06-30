@@ -13,6 +13,8 @@ HUMAN_KEYWORDS = (
     "yes",
     "yeah",
     "who is this",
+    "assalamualaikum",
+    "salam alaikum",
     "speaking",
 )
 

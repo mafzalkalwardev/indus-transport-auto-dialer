@@ -18,6 +18,7 @@ class DummyAudio:
         self.beep_detected = kwargs.get("beep_detected", False)
         self.busy_tone_cadence_confidence = kwargs.get("busy_tone_cadence_confidence", 0.0)
         self.background_noise_level = kwargs.get("background_noise_level", 0.0)
+        self.vad_confidence = kwargs.get("vad_confidence", 0.0)
         self.transcript = kwargs.get("transcript", "")
 
 
@@ -49,8 +50,8 @@ def test_engine_uses_hardened_detector_not_eager_fsm_for_voicemail():
     fourth = engine.update(dom_evidence=dom, audio_features=audio, elapsed_seconds=17)
 
     assert first.state == "ANSWERED_PENDING"
-    assert second.state == "ANSWERED_PENDING"
-    assert third.state == "ANSWERED_PENDING"
+    assert second.state == "VOICEMAIL"
+    assert third.state == "VOICEMAIL"
     assert fourth.state == "VOICEMAIL"
 
 
@@ -68,6 +69,31 @@ def test_engine_fast_beep_path_after_safe_window():
     engine.update(dom_evidence=dom, audio_features=audio, elapsed_seconds=8)
     second = engine.update(dom_evidence=dom, audio_features=audio, elapsed_seconds=13.5)
     assert second.state == "VOICEMAIL"
+
+
+def test_engine_no_voicemail_while_ringing_with_beep():
+    """Beep + speech during RINGING must not promote to VOICEMAIL via engine path."""
+    engine = CallDecisionEngine(
+        detector_config=DetectionConfig(decision_stability_window=1)
+    )
+    engine.start_call()
+    dom = {
+        "state": "RINGING",
+        "hasRingingText": True,
+        "hasRingingNode": True,
+        "hasTimer": False,
+        "hasEnabledAnswerControl": False,
+    }
+    audio = DummyAudio(
+        beep_detected=True,
+        beep_hz_confidence=0.9,
+        has_speech_like=True,
+        rms=0.2,
+        is_silent=False,
+    )
+    decision = engine.update(dom_evidence=dom, audio_features=audio, elapsed_seconds=12.0)
+    assert decision.state == "RINGING"
+    assert decision.debug.get("detector_state") == "RINGING"
 
 
 def test_engine_keeps_ringing_until_ring_timeout():
@@ -91,3 +117,82 @@ def test_engine_keeps_ringing_until_ring_timeout():
 
     assert ringing.state == "RINGING"
     assert timeout.state == "NO_ANSWER"
+
+
+def test_engine_allows_post_ringing_audio_evidence_with_stale_ringing_text():
+    engine = CallDecisionEngine(
+        detector_config=DetectionConfig(max_ring_seconds=55, decision_stability_window=3)
+    )
+    engine.start_call()
+    stale_dom = {
+        "state": "RINGING",
+        "callText": "Latest calls Outgoing call Calling",
+        "hasRingingText": True,
+        "hasRingingNode": False,
+        "hasTimer": False,
+        "hasEnabledAnswerControl": False,
+    }
+
+    engine.update(
+        dom_evidence=stale_dom,
+        audio_features=DummyAudio(ringback_cadence_confidence=0.9),
+        elapsed_seconds=4,
+    )
+    decision = engine.update(
+        dom_evidence=stale_dom,
+        audio_features=DummyAudio(
+            rms=0.2,
+            is_silent=False,
+            has_speech_like=True,
+            ringback_cadence_confidence=0.1,
+            speech_duration_seconds=0.67,
+            short_speech_burst_detected=True,
+            vad_confidence=0.75,
+            transcript="hello hello",
+        ),
+        elapsed_seconds=8,
+    )
+
+    assert decision.state == "HUMAN"
+
+
+def test_engine_promotes_connected_ctrl_short_speech_without_debounce_delay():
+    engine = CallDecisionEngine(
+        detector_config=DetectionConfig(max_ring_seconds=55, decision_stability_window=3)
+    )
+    engine.start_call()
+    idle_dom = {"state": "IDLE", "callText": "latest calls", "hasTimer": False}
+    silent = DummyAudio(is_silent=True)
+    engine.update(dom_evidence=idle_dom, audio_features=silent, elapsed_seconds=17.2)
+    engine.update(
+        dom_evidence={"state": "RINGING", "hasRingingText": True},
+        audio_features=silent,
+        elapsed_seconds=18.4,
+    )
+    ctrl_dom = {
+        "state": "CONNECTED_CTRL",
+        "callText": "phone_forwarded transfer hold dialpad keypad mute record call_end",
+        "hasEnabledAnswerControl": True,
+        "hasTimer": False,
+        "hasRingingText": False,
+        "hasRingingNode": False,
+    }
+    for elapsed in (19.66, 20.70, 21.66, 22.67):
+        engine.update(dom_evidence=ctrl_dom, audio_features=silent, elapsed_seconds=elapsed)
+
+    decision = engine.update(
+        dom_evidence=ctrl_dom,
+        audio_features=DummyAudio(
+            rms=0.0,
+            is_silent=False,
+            has_speech_like=True,
+            ringback_cadence_confidence=0.35,
+            speech_duration_seconds=0.72,
+            short_speech_burst_detected=True,
+            vad_confidence=0.75,
+            transcript="hello hello",
+        ),
+        elapsed_seconds=24.69,
+    )
+
+    assert decision.state == "HUMAN"

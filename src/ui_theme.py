@@ -1,4 +1,4 @@
-"""Client-ready UI themes for FT Solutions Auto Dialer."""
+"""Client-ready UI themes for INDUS TRANSPORTS LLC Auto Dialer."""
 
 from __future__ import annotations
 
@@ -12,11 +12,17 @@ STATUS_LABELS = {
     "LOGIN_NEEDED": "Sign-in required",
     "DIALING": "Dialing",
     "RINGING": "Ringing",
-    "CONNECTED": "On call",
+    "CONNECTED": "Call picked up - talk now",
+    "ANSWERED": "Call picked up - talk now",
+    "CONNECTED_CTRL": "Call picked up - talk now",
+    "CONNECTED_AUDIO_EVIDENCE": "Call picked up - talk now",
+    "CONNECTED_MANUAL_CONFIRMATION": "Call picked up - talk now",
     "VOICEMAIL": "Voicemail",
     "BUSY": "Busy",
-    "ANSWERED_PENDING": "Classifying",
-    "CLASSIFYING": "Classifying",
+    "ANSWERED_PENDING": "Classifying answer…",
+    "CLASSIFYING": "Classifying answer…",
+    "CLASSIFYING_AUDIO": "Classifying answer…",
+    "HUMAN_DETECTED": "Call picked up - talk now",
     "ENDED_MANUALLY": "Ended by operator",
     "ENDED": "Call ended",
     "NO_ANSWER": "No answer",
@@ -34,9 +40,15 @@ STATUS_COLORS = {
     "DIALING": "#2563eb",
     "RINGING": "#b45309",
     "CONNECTED": "#15803d",
+    "ANSWERED": "#15803d",
+    "CONNECTED_CTRL": "#15803d",
+    "CONNECTED_AUDIO_EVIDENCE": "#15803d",
+    "CONNECTED_MANUAL_CONFIRMATION": "#15803d",
     "VOICEMAIL": "#c2410c",
     "BUSY": "#9333ea",
     "ANSWERED_PENDING": "#2563eb",
+    "CLASSIFYING_AUDIO": "#2563eb",
+    "HUMAN_DETECTED": "#15803d",
     "ENDED_MANUALLY": "#64748b",
     "ENDED": "#64748b",
     "NO_ANSWER": "#64748b",

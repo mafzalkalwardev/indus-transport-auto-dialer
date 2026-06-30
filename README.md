@@ -1,10 +1,10 @@
 <div align="center">
 
 <p align="center">
-  <img src="ftsolutionslogo.jpg" alt="FT Solutions logo" width="120" />
+  <img src="indus_transports_logo.jpg" alt="INDUS TRANSPORTS LLC logo" width="120" />
 </p>
 
-# 📞 Indus Transport Auto Dialer
+# Indus Transports Auto Dialer
 
 **Professional Windows auto dialer — Google Voice, AMD, predictive pacing.**
 
@@ -14,30 +14,47 @@ Multi-line dialing · AMD · CRM · Excel lists · Predictive pacing
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://www.microsoft.com/windows)
 [![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?style=for-the-badge)](https://www.riverbankcomputing.com/software/pyqt/)
+[![Built with Cursor](https://img.shields.io/badge/Built_with-Cursor-000000?style=for-the-badge&logo=cursor&logoColor=white)](https://cursor.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen?style=for-the-badge)](CONTRIBUTING.md)
 
-[Features](#features) · [Quick Start](#quick-start) · [Documentation](#documentation) · [Screenshots](#-screenshots) · [Contributing](CONTRIBUTING.md)
+[Features](#features) · [Quick Start](#quick-start) · [Documentation](#documentation) · [Screenshots](#-screenshots) · [Contributors](#contributors) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
 ---
 
-Professional Windows desktop dialer for FT Solutions. Agents use a simple branded app while Google Voice runs in the background on each line.
+Professional Windows desktop dialer for **INDUS TRANSPORTS LLC**. Agents use a simple branded app while Google Voice runs in the background on each line.
 
 ## 🖼 Screenshots
 
-![Live calls dashboard — dark theme](docs/screenshots/live-calls-dark.png)
+Captured from the live application UI (light and dark themes).
 
-![Settings panel — light theme](docs/screenshots/settings-light.png)
+### Light mode
 
-## 🐍 Contribution graph
+| | |
+|:--|:--|
+| Sign-in | Dialer |
+| ![Login — light mode](docs/screenshots/login-light.png) | ![Dialer — light mode](docs/screenshots/dialer-light.png) |
+| Live calls | Call logs |
+| ![Live calls — light mode](docs/screenshots/live-calls-light.png) | ![Call logs — light mode](docs/screenshots/call-logs-light.png) |
+| CRM | Settings |
+| ![CRM — light mode](docs/screenshots/crm-light.png) | ![Settings — light mode](docs/screenshots/settings-light.png) |
+| Administration | |
+| ![Administration — light mode](docs/screenshots/administration-light.png) | |
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mafzalkalwardev/indus-transport-auto-dialer/output/snake-dark.svg" />
-  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/mafzalkalwardev/indus-transport-auto-dialer/output/snake.svg" />
-  <img alt="Contribution snake" src="https://raw.githubusercontent.com/mafzalkalwardev/indus-transport-auto-dialer/output/snake.svg" />
-</picture>
+### Dark mode
+
+| | |
+|:--|:--|
+| Sign-in | Dialer |
+| ![Login — dark mode](docs/screenshots/login-dark.png) | ![Dialer — dark mode](docs/screenshots/dialer-dark.png) |
+| Live calls | Call logs |
+| ![Live calls — dark mode](docs/screenshots/live-calls-dark.png) | ![Call logs — dark mode](docs/screenshots/call-logs-dark.png) |
+| CRM | Settings |
+| ![CRM — dark mode](docs/screenshots/crm-dark.png) | ![Settings — dark mode](docs/screenshots/settings-dark.png) |
+| Administration | |
+| ![Administration — dark mode](docs/screenshots/administration-dark.png) | |
 
 ---
 
@@ -50,6 +67,8 @@ Professional Windows desktop dialer for FT Solutions. Agents use a simple brande
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Community standards |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Operator runbook |
 | [docs/AMD_TESTING.md](docs/AMD_TESTING.md) | AMD / pacing test guide |
+| [CLIENT.md](CLIENT.md) | End-user install and daily use |
+| [CLIENT_DELIVERY.md](CLIENT_DELIVERY.md) | How to package and deliver to clients |
 
 
 ## Who uses what
@@ -78,7 +97,7 @@ Use this when you configure everything on **your** machine and deliver a ready f
 1. Complete Google Voice setup in **Settings**.
 2. **Administration** → **Export client package…**
 3. Enter the client’s name, login email, and password (8+ characters).
-4. Choose a save location (e.g. Desktop). You get a folder like `FTSolutions_AutoDialer_Client` with:
+4. Choose a save location (e.g. Desktop). You get a folder like `IndusTransports_AutoDialer_Client` with:
    - `dialer_config.json` (`deployment_mode: client`)
    - `logs/crm.sqlite3` (single agent account)
    - `data/gv_accounts.json` and `chrome_profiles/` (signed-in voice lines)
@@ -206,13 +225,29 @@ Dry-run simulates `DIALING -> RINGING -> NO_ANSWER` and lets you verify queueing
 logging, retries, cooldown, and UI behavior without touching Google Voice. Keep
 it `false` for real calling.
 
-Live smoke tests must use only owner-approved test or CRM numbers:
+Do not mass dial or call random numbers for verification.
+
+### CRM sustained test (administrator QA)
+
+Before client delivery, run the headless CRM sustained test. It dials **new CRM contacts only** (skips numbers from prior test reports):
+
+```powershell
+Run CRM Sustained Test.bat
+```
+
+Or:
+
+```powershell
+python scripts/deep_live_test.py --min-minutes 7 --max-parallel 3 --skip-pytest --confirm "I OWN OR HAVE PERMISSION TO CALL THESE NUMBERS"
+```
+
+See [docs/QA_VERIFICATION.md](docs/QA_VERIFICATION.md) for pass criteria and [docs/releases/v1.0.1.md](docs/releases/v1.0.1.md) for release notes.
+
+Quick smoke (2 numbers):
 
 ```bash
 python scripts/live_call_smoke.py --from-crm --crm-limit 2 --call-timeout 45
 ```
-
-Do not mass dial or call random numbers for verification.
 
 ## Live line panel
 
@@ -290,13 +325,17 @@ Pipeline details and dataset layout: [docs/DETECTION_PIPELINE.md](docs/DETECTION
 - **Reset password** / **Activate / deactivate** / **Delete user**
 - Admins see all call logs; agents see only their own
 
-## Build EXE
+## Build EXE (client-ready)
+
+Double-click **`Build Auto Dialer.bat`** or run:
 
 ```bash
-python build_exe.py
+python build.py
 ```
 
-Output: `dist/FTSolutions_AutoDialer.exe`
+Output: `dist/IndusTransports_AutoDialer.exe`
+
+See **[CLIENT_DELIVERY.md](CLIENT_DELIVERY.md)** for the full administrator → client handoff checklist.
 
 ## Data on disk (do not share)
 
@@ -341,6 +380,27 @@ If this message still appears repeatedly, collect:
 ### Client cannot change voice settings
 
 Expected — only administrators configure Google Voice. Clients use Dialer and Live Calls only.
+
+## Compliance and Responsible Use
+
+This auto dialer is intended for lawful, permission-based business calling only. Users are responsible for consent, Do Not Call compliance, caller ID rules, recording disclosure where required, Google Voice terms, carrier limits, and anti-spam regulations.
+
+Do not use this software for harassment, unsolicited spam calling, or deceptive outreach. Use verified contact lists, permission-based campaigns, and proper business identification.
+
+The maintainers are not responsible for misuse of this software.
+
+**Status:** Client-ready · Windows desktop · demo/sample contacts for testing
+
+---
+
+## Contributors
+
+| | |
+|:--|:--|
+| **INDUS TRANSPORTS LLC** | Product owner and primary development |
+| **[Cursor](https://cursor.com)** | AI-assisted development — planning, implementation, and documentation |
+
+Screenshots are regenerated from the live UI with `python scripts/capture_readme_screenshots.py`.
 
 ## Support
 

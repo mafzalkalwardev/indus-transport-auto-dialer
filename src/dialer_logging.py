@@ -48,3 +48,12 @@ def log_error(msg: str) -> None:
 def log_path() -> str:
     setup_dialer_logging()
     return _LOG_PATH or ""
+
+
+def log_call_event(event: dict) -> None:
+    """Emit one structured JSON line per call outcome for log parsers."""
+    import json
+
+    setup_dialer_logging().info(
+        "CALL_EVENT " + json.dumps(event, separators=(",", ":"), default=str)
+    )
