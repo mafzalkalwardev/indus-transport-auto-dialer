@@ -43,6 +43,15 @@ def recommended_slots(requested: int) -> int:
     return min(requested, 15)
 
 
+def effective_requested_slots(requested: int, cfg: dict | None = None) -> int:
+    """Return the slot count to boot, honoring an explicit live-test override."""
+    requested = max(1, min(int(requested or 1), 15))
+    cfg = cfg or {}
+    if bool(cfg.get("force_requested_slots", False)):
+        return requested
+    return recommended_slots(requested)
+
+
 def recommended_amd_audio(requested: bool) -> bool:
     """Return whether local AMD audio should run on this PC."""
     if not requested:

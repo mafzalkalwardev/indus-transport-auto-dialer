@@ -48,12 +48,19 @@ Client workstations use `deployment_mode: "client"` in `dialer_config.json` (set
 
 | Step | Action |
 |------|--------|
-| 1 | Build EXE with `Build Auto Dialer.bat` |
-| 2 | Configure GV lines in Settings |
-| 3 | Create agent user in Administration |
-| 4 | Export client package |
-| 5 | Copy EXE + package to client PC |
-| 6 | Send agent email/password only |
+| 1 | Run [docs/QA_VERIFICATION.md](docs/QA_VERIFICATION.md) (unit tests + CRM sustained test) |
+| 2 | Build EXE with `Build Auto Dialer.bat` |
+| 3 | Configure GV lines in Settings (Johnson + Barry minimum) |
+| 4 | Create agent user in Administration |
+| 5 | Export client package |
+| 6 | Copy EXE + package to client PC |
+| 7 | Send agent email/password only |
+
+### Quick QA (before every client handoff)
+
+Double-click **`Run CRM Sustained Test.bat`** on the admin PC. Pass = summary shows `PASS` and ≥ 5 unique CRM calls in ~7 minutes. Reports land in `logs/deep_live_test_*_summary.json`.
+
+Do **not** ship to clients until QA passes or you document a known issue.
 
 ## Support files in this repo
 
@@ -67,3 +74,5 @@ Client workstations use `deployment_mode: "client"` in `dialer_config.json` (set
 | `Repair Start.bat` | Clear cache + reinstall deps |
 | `scripts/prepare_client_install.py` | CLI export (same as Administration UI) |
 | `CLIENT.md` | End-user instructions |
+| `Run CRM Sustained Test.bat` | Admin QA only (not for client PCs) |
+| `docs/QA_VERIFICATION.md` | Full pre-delivery checklist |

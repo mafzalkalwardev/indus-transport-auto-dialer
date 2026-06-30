@@ -225,13 +225,29 @@ Dry-run simulates `DIALING -> RINGING -> NO_ANSWER` and lets you verify queueing
 logging, retries, cooldown, and UI behavior without touching Google Voice. Keep
 it `false` for real calling.
 
-Live smoke tests must use only owner-approved test or CRM numbers:
+Do not mass dial or call random numbers for verification.
+
+### CRM sustained test (administrator QA)
+
+Before client delivery, run the headless CRM sustained test. It dials **new CRM contacts only** (skips numbers from prior test reports):
+
+```powershell
+Run CRM Sustained Test.bat
+```
+
+Or:
+
+```powershell
+python scripts/deep_live_test.py --min-minutes 7 --max-parallel 3 --skip-pytest --confirm "I OWN OR HAVE PERMISSION TO CALL THESE NUMBERS"
+```
+
+See [docs/QA_VERIFICATION.md](docs/QA_VERIFICATION.md) for pass criteria and [docs/releases/v1.0.1.md](docs/releases/v1.0.1.md) for release notes.
+
+Quick smoke (2 numbers):
 
 ```bash
 python scripts/live_call_smoke.py --from-crm --crm-limit 2 --call-timeout 45
 ```
-
-Do not mass dial or call random numbers for verification.
 
 ## Live line panel
 
@@ -364,6 +380,18 @@ If this message still appears repeatedly, collect:
 ### Client cannot change voice settings
 
 Expected — only administrators configure Google Voice. Clients use Dialer and Live Calls only.
+
+## Compliance and Responsible Use
+
+This auto dialer is intended for lawful, permission-based business calling only. Users are responsible for consent, Do Not Call compliance, caller ID rules, recording disclosure where required, Google Voice terms, carrier limits, and anti-spam regulations.
+
+Do not use this software for harassment, unsolicited spam calling, or deceptive outreach. Use verified contact lists, permission-based campaigns, and proper business identification.
+
+The maintainers are not responsible for misuse of this software.
+
+**Status:** Client-ready · Windows desktop · demo/sample contacts for testing
+
+---
 
 ## Contributors
 

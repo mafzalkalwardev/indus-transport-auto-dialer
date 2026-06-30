@@ -61,6 +61,20 @@ def _format_traceback() -> str:
     return traceback.format_exc()
 
 
+def _wait_for_js_callback(done: dict, key: str = "status", timeout_ms: int = 600) -> str:
+    """Pump the Qt event loop until an async runJavaScript callback fires."""
+    settled_key = f"__settled__{key}"
+    deadline = time.monotonic() + (timeout_ms / 1000.0)
+    while time.monotonic() < deadline:
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
+        if settled_key in done:
+            return str(done.get(key, ""))
+        QTest.qWait(30)
+    return str(done.get(key, ""))
+
+
 def _gv_direct_call_url(phone: str) -> str:
     return _gv_dial_url_variants(phone)[0]
 
@@ -2244,6 +2258,7 @@ class GVController(QObject):
         if audio_enabled := bool(self._runtime_cfg.get("enable_ai_audio", True)):
             self._page.setAudioMuted(False)
         self._page.runJavaScript(_JS_FORCE_VISIBLE)
+        self._prepare_dial_ui_for_next_call()
         self._ensure_calls_page_then_dial()
         if self._dial_stuck_timer is not None:
             self._dial_stuck_timer.stop()
@@ -2363,6 +2378,7 @@ class GVController(QObject):
                 self._handle_retryable_dial_status("call_button_wrong_number")
                 return
             self._mark_call_click_pending()
+            QTimer.singleShot(350, self._submit_dial_enter_key)
             QTimer.singleShot(800, self._poll_once)
             QTimer.singleShot(1600, self._poll_once)
             QTimer.singleShot(2400, self.start_polling)
@@ -2377,6 +2393,7 @@ class GVController(QObject):
                 self._mark_call_click_pending()
                 clicked_kind = "call_suggestion_clicked" if status.startswith("call_suggestion_ready") else "call_button_clicked"
                 self._emit_log(f"Dial UI status: {clicked_kind}")
+                QTimer.singleShot(350, self._submit_dial_enter_key)
                 QTimer.singleShot(800, self._poll_once)
                 QTimer.singleShot(1600, self._poll_once)
                 QTimer.singleShot(2400, self.start_polling)
@@ -2387,6 +2404,7 @@ class GVController(QObject):
                 status_base = status
         if status_base == "enter_pressed_no_call_button":
             self._mark_call_click_pending()
+            QTimer.singleShot(350, self._submit_dial_enter_key)
             QTimer.singleShot(800, self._poll_once)
             QTimer.singleShot(1600, self._poll_once)
             QTimer.singleShot(2400, self.start_polling)
@@ -2584,8 +2602,68 @@ class GVController(QObject):
                     lambda: self._dial_step(click_only=False, force_native=True),
                 )
                 return
+            if self._call_start_verify_attempts == 3:
+                phone = self._current_call_phone or self._pending_dial_phone
+                self._pending_dial_phone = phone
+                self._call_clicked_at = 0.0
+                self._awaiting_call_panel_since = 0.0
+                self._emit_log("Dial UI status: retry_start_call_after_no_panel")
+                self._page.runJavaScript(_JS_CLEAR_DIAL_FIELD)
+                QTimer.singleShot(
+                    500,
+                    lambda p=phone: self._page.runJavaScript(
+                        _js_retry_start_call(p),
+                        self._on_retry_start_call_result,
+                    ),
+                )
+                QTimer.singleShot(4500, self._verify_call_started_after_click)
+                return
+            if self._call_start_verify_attempts == 4:
+                phone = self._current_call_phone or self._pending_dial_phone
+                variants = _gv_dial_url_variants(phone)
+                if self._dial_url_variant < len(variants) - 1:
+                    self._dial_url_variant += 1
+                    self._pending_dial_phone = phone
+                    self._call_clicked_at = 0.0
+                    self._awaiting_call_panel_since = 0.0
+                    self._call_start_verify_attempts = 0
+                    self._emit_log(
+                        "Dial UI status: trying_alternate_dial_url"
+                        f"|variant={self._dial_url_variant + 1}"
+                    )
+                    self._page.load(QUrl(self._current_dial_url()))
+                    QTimer.singleShot(2500, self._ensure_calls_page_then_dial)
+                    return
 
         self._page.runJavaScript(_JS_ACTIVE_CALL_PRESENT, after_active_check)
+
+    def _submit_dial_enter_key(self) -> None:
+        if not self._active_call or not self._page_alive():
+            return
+        if self._state not in {"DIALING"}:
+            return
+        try:
+            QTest.keyClick(self.view, Qt.Key.Key_Return)
+            self._emit_log("Dial UI status: enter_key_submitted")
+        except Exception as exc:
+            self._emit_log(f"Enter key submit failed: {exc}\n{_format_traceback()}")
+
+    def prepare_dial_ui_for_next_call(self) -> None:
+        """Clear stale dialpad state between outbound attempts."""
+        self._prepare_dial_ui_for_next_call()
+
+    def _prepare_dial_ui_for_next_call(self) -> None:
+        if not self._page_alive():
+            return
+        self._call_start_verify_attempts = 0
+        self._call_clicked_at = 0.0
+        self._awaiting_call_panel_since = 0.0
+        self._force_native_number_entry = False
+        self._native_key_attempts = 0
+        self._native_key_attempted = False
+        self._native_submit_scheduled = False
+        self._page.runJavaScript(_JS_CLEAR_DIAL_FIELD)
+        self._page.runJavaScript(_JS_REFRESH_LAYOUT)
 
     def _type_number_from_status(self, status: str) -> bool:
         if getattr(self, "_native_key_attempts", 0) >= 3:
@@ -2713,10 +2791,10 @@ class GVController(QObject):
 
             def _on_clear(result: object) -> None:
                 done["status"] = str(result or "")
+                done["__settled__status"] = True
 
             self._page.runJavaScript(_JS_CLEAR_DIAL_FIELD, _on_clear)
-            QTest.qWait(140)
-            return done["status"]
+            return _wait_for_js_callback(done, key="status", timeout_ms=700)
 
         result = run_clear()
         if result.startswith("cleared|value=") or result == "no_input":
@@ -2914,27 +2992,29 @@ class GVController(QObject):
         phone = self._current_call_phone or self._pending_dial_phone
         if not phone or not self._page_alive():
             return False
-        done = {"ok": False}
+        done = {"status": ""}
 
         def _on_focus(result: object) -> None:
-            done["ok"] = str(result or "") == "focused_target_call_button"
+            done["status"] = "ok" if str(result or "") == "focused_target_call_button" else ""
+            done["__settled__status"] = True
 
         self._page.runJavaScript(_js_focus_target_call_button(phone), _on_focus)
-        QTest.qWait(150)
-        return bool(done["ok"])
+        _wait_for_js_callback(done, key="status", timeout_ms=500)
+        return done["status"] == "ok"
 
     def _activate_target_call_button_js(self) -> bool:
         phone = self._current_call_phone or self._pending_dial_phone
         if not phone or not self._page_alive():
             return False
-        done = {"ok": False}
+        done = {"status": ""}
 
         def _on_activate(result: object) -> None:
-            done["ok"] = str(result or "") == "activated_target_call_button"
+            done["status"] = "ok" if str(result or "") == "activated_target_call_button" else ""
+            done["__settled__status"] = True
 
         self._page.runJavaScript(_js_activate_target_call_button(phone), _on_activate)
-        QTest.qWait(150)
-        return bool(done["ok"])
+        _wait_for_js_callback(done, key="status", timeout_ms=500)
+        return done["status"] == "ok"
 
     def _on_console_message(self, level, message: str, line_number: int, source_id: str) -> None:
         rec = {
@@ -3011,6 +3091,7 @@ class GVController(QObject):
     def hangup(self, *, manual: bool = False) -> None:
         if not self._page_alive():
             return
+        self._vm_hangup_scheduled = False
         self._active_call = False
         self._pending_dial_phone = ""
         self._force_native_number_entry = False
@@ -3036,6 +3117,7 @@ class GVController(QObject):
         }:
             self._set_state("ENDED")
         self._current_call_phone = ""
+        QTimer.singleShot(400, self._prepare_dial_ui_for_next_call)
         QTimer.singleShot(1000, lambda: self._set_state("IDLE"))
 
     def run_js(self, js: str,
@@ -3520,16 +3602,19 @@ class GVController(QObject):
             retrying_start = (
                 self._state == "DIALING"
                 and bool(self._pending_dial_phone)
-                and 0 < getattr(self, "_call_start_verify_attempts", 0) <= 2
+                and 0 < getattr(self, "_call_start_verify_attempts", 0) <= 4
             )
             if retrying_start:
                 state = "DIALING"
                 self._idle_count = 0
                 return self._set_state(state)
+            panel_timeout = 12.0
+            if getattr(self, "_call_start_verify_attempts", 0) > 0:
+                panel_timeout = 28.0
             if (
                 self._state == "DIALING"
                 and self._call_clicked_at
-                and (time.monotonic() - self._call_clicked_at) >= 12.0
+                and (time.monotonic() - self._call_clicked_at) >= panel_timeout
             ):
                 self._emit_log("Dial attempt did not open a call panel")
                 self._active_call = False
@@ -3687,6 +3772,8 @@ class GVController(QObject):
         self._emit_log("\n".join(lines))
 
     def _schedule_voicemail_hangup(self) -> None:
+        if bool(self._runtime_cfg.get("defer_voicemail_hangup")):
+            return
         if self._vm_hangup_scheduled:
             return
         self._vm_hangup_scheduled = True
@@ -3694,7 +3781,8 @@ class GVController(QObject):
         QTimer.singleShot(max(500, delay_ms), self._hangup_after_voicemail)
 
     def _hangup_after_voicemail(self) -> None:
-        if not self._active_call or self._state != "VOICEMAIL":
+        self._vm_hangup_scheduled = False
+        if self._state != "VOICEMAIL":
             return
         self._emit_log("Voicemail — hanging up and moving to next")
         self.hangup()

@@ -55,7 +55,8 @@ from src.retry_queue import DialRetryQueue
 from src.dialer_logging import setup_dialer_logging, log_info, log_warning, log_error, log_path
 from src.process_cleanup import cleanup_stale_webengine_processes
 from src.system_profile import (
-    recommended_slots, low_resource_reason, system_ram_gb, chrome_process_count,
+    recommended_slots, effective_requested_slots, low_resource_reason,
+    system_ram_gb, chrome_process_count,
     effective_enable_ai_audio,
 )
 from src.pacing.engine import PredictivePacingEngine, PacingMetrics, PacingConfig
@@ -124,6 +125,30 @@ UI_STATE_ORDER = {
     "FAILED": 6,
     "ENDED": 7,
 }
+
+
+def allow_duplicate_gv_accounts(cfg: dict | None) -> bool:
+    """Whether cloned GV profiles may be treated as separate live slots."""
+    cfg = cfg or {}
+    return bool(
+        cfg.get("allow_duplicate_gv_accounts", False)
+        or cfg.get("allow_duplicate_gv_profiles", False)
+    )
+
+
+def gv_available_line_count(accounts: list[dict], allow_duplicates: bool = False) -> int:
+    """Count usable configured lines for selected-slot validation."""
+    if allow_duplicates:
+        return len([
+            acct for acct in accounts
+            if str(acct.get("profile") or acct.get("email") or "").strip()
+        ])
+    identities = {
+        str(acct.get("email") or acct.get("profile") or "").strip().lower()
+        for acct in accounts
+        if str(acct.get("email") or acct.get("profile") or "").strip()
+    }
+    return len(identities)
 
 
 def ui_display_state(state: str) -> str:
@@ -204,7 +229,9 @@ def _load_cfg() -> dict:
         "live_debug_mode": False,
         "dry_run_mode": False,
         "predictive_mode": False,
-        "max_concurrent_dials": 3,
+        "max_concurrent_dials": 5,
+        "allow_duplicate_gv_accounts": False,
+        "force_requested_slots": False,
         "target_agent_wait_seconds": 3,
         "single_agent_audio": True,
         "hold_message_enabled": True,
@@ -1283,7 +1310,7 @@ class MainWindow(QMainWindow):
         self._headless_login_queue: list[dict] = []
         self._pacing_engine = PredictivePacingEngine(
             PacingConfig(
-                max_dials_per_interval=int(cfg.get("max_concurrent_dials", 3)),
+                max_dials_per_interval=int(cfg.get("max_concurrent_dials", 5)),
                 pacing_interval_sec=float(cfg.get("pacing_interval_sec", 2.5)),
             )
         )
@@ -1333,7 +1360,7 @@ class MainWindow(QMainWindow):
 
         # ── Boot controllers (deferred — UI shows first) ─────────────────────
         requested = int(cfg.get("n_slots", 1))
-        self._effective_slots = recommended_slots(requested)
+        self._effective_slots = effective_requested_slots(requested, cfg)
         self.statusBar().showMessage("Starting — Google Voice loads in a few seconds…")
         QTimer.singleShot(1800, self._deferred_boot_controllers)
         self._health_timer.start()
@@ -1364,8 +1391,10 @@ class MainWindow(QMainWindow):
     def _deferred_boot_controllers(self) -> None:
         """Load Google Voice after the UI is visible (prevents startup freeze)."""
         requested = int(self.cfg.get("n_slots", 1))
-        self._effective_slots = recommended_slots(requested)
-        reason = low_resource_reason(requested, self._effective_slots)
+        self._effective_slots = effective_requested_slots(requested, self.cfg)
+        reason = ""
+        if not bool(self.cfg.get("force_requested_slots", False)):
+            reason = low_resource_reason(requested, self._effective_slots)
         if reason:
             log_warning(reason)
             self._log(reason)
@@ -1781,17 +1810,21 @@ class MainWindow(QMainWindow):
                 f"{len(self._gv_accounts)} Google Voice account(s) are configured.\n\n"
                 "Add one signed-in Google Voice account for each slot. "
                 "For 5-slot dialing, configure 5 ready lines.")
-        distinct_lines = {
-            str(acct.get("email") or acct.get("profile") or "").strip().lower()
-            for acct in self._gv_accounts[:n]
-            if str(acct.get("email") or acct.get("profile") or "").strip()
-        }
-        if len(distinct_lines) < n:
+        allow_duplicates = allow_duplicate_gv_accounts(self.cfg)
+        available_lines = gv_available_line_count(
+            self._gv_accounts[:n],
+            allow_duplicates=allow_duplicates,
+        )
+        if available_lines < n:
+            duplicate_hint = (
+                "Enable allow_duplicate_gv_accounts only for owner-approved live tests "
+                "when each duplicate has its own ready browser profile."
+            )
             return False, (
-                f"You selected {n} live slot(s), but only {len(distinct_lines)} "
+                f"You selected {n} live slot(s), but only {available_lines} "
                 "distinct Google Voice line(s) are configured.\n\n"
                 "Each realtime slot needs its own signed-in Google Voice account. "
-                "Duplicate browser profiles for the same email cannot dial concurrently.")
+                f"{duplicate_hint}")
         missing: list[str] = []
         for i in range(n):
             acct = self._slot_account(i)
@@ -3080,6 +3113,8 @@ class MainWindow(QMainWindow):
         ctrl = self._get_ctrl(slot_id)
         if ctrl:
             ctrl.set_audio_muted(True, force=True)
+            if ctrl.current_state not in ("IDLE", "ENDED", "ENDED_MANUALLY"):
+                ctrl.hangup()
         self._agent_router_clear_slot(slot_id)
         self._slot_phone.pop(slot_id, None)
         self._slot_start.pop(slot_id, None)
@@ -3663,6 +3698,10 @@ class MainWindow(QMainWindow):
             return
         ctrl = self._get_ctrl(slot_id)
         if ctrl and ctrl.current_state == "VOICEMAIL":
+            ctrl.set_audio_muted(True, force=True)
+            ctrl.hangup()
+        elif ctrl and ctrl.current_state not in ("IDLE", "ENDED", "ENDED_MANUALLY"):
+            # Stuck in classify/ringing — force cleanup so the next dial is clean.
             ctrl.set_audio_muted(True, force=True)
             ctrl.hangup()
         self._agent_router_clear_slot(slot_id)

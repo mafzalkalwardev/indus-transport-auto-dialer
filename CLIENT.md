@@ -53,4 +53,6 @@ Repair Start.bat
 
 This clears temporary cache, recreates runtime folders, and reinstalls Python packages (source installs only).
 
+If calls get stuck on voicemail or the dialer stops advancing, contact your administrator — they may need to run an updated build or line recovery from the admin PC.
+
 For help, contact your administrator or FT Solutions: +92 307 967 0503 (WhatsApp).
