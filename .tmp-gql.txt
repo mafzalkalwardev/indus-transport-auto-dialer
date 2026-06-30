@@ -1,0 +1,1 @@
+﻿{ repository(owner:"mafzalkalwardev", name:"indus-transport-auto-dialer") { discussionCategories(first:10) { nodes { id name } } } }

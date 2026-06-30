@@ -55,11 +55,13 @@ from src.retry_queue import DialRetryQueue
 from src.dialer_logging import setup_dialer_logging, log_info, log_warning, log_error, log_path
 from src.process_cleanup import cleanup_stale_webengine_processes
 from src.system_profile import (
-    recommended_slots, low_resource_reason, system_ram_gb, chrome_process_count,
+    recommended_slots, effective_requested_slots, low_resource_reason,
+    system_ram_gb, chrome_process_count,
     effective_enable_ai_audio,
 )
 from src.pacing.engine import PredictivePacingEngine, PacingMetrics, PacingConfig
-from src.pacing.agents import available_agent_count
+from src.agent_call_router import AgentCallRouter
+from src.hold_message_player import HoldMessagePlayer
 from src.gv_accounts import (
     load_accounts as load_gv_accounts,
     save_accounts as save_gv_accounts,
@@ -86,6 +88,7 @@ UI_CONNECTED_STATES = {
     "CONNECTED_AUDIO_EVIDENCE",
     "CONNECTED_MANUAL_CONFIRMATION",
     "HUMAN",
+    "HUMAN_DETECTED",
 }
 UI_STATE_DISPLAY = {
     "IDLE": "IDLE",
@@ -97,6 +100,7 @@ UI_STATE_DISPLAY = {
     "CALLING": "DIALING",
     "RINGING": "RINGING",
     "ANSWERED_PENDING": "ANSWERED_PENDING",
+    "CLASSIFYING_AUDIO": "ANSWERED_PENDING",
     "CONNECTED_CTRL": "ANSWERED_PENDING",
     "NO_ANSWER": "NO_ANSWER",
     "FAILED": "FAILED",
@@ -121,6 +125,30 @@ UI_STATE_ORDER = {
     "FAILED": 6,
     "ENDED": 7,
 }
+
+
+def allow_duplicate_gv_accounts(cfg: dict | None) -> bool:
+    """Whether cloned GV profiles may be treated as separate live slots."""
+    cfg = cfg or {}
+    return bool(
+        cfg.get("allow_duplicate_gv_accounts", False)
+        or cfg.get("allow_duplicate_gv_profiles", False)
+    )
+
+
+def gv_available_line_count(accounts: list[dict], allow_duplicates: bool = False) -> int:
+    """Count usable configured lines for selected-slot validation."""
+    if allow_duplicates:
+        return len([
+            acct for acct in accounts
+            if str(acct.get("profile") or acct.get("email") or "").strip()
+        ])
+    identities = {
+        str(acct.get("email") or acct.get("profile") or "").strip().lower()
+        for acct in accounts
+        if str(acct.get("email") or acct.get("profile") or "").strip()
+    }
+    return len(identities)
 
 
 def ui_display_state(state: str) -> str:
@@ -201,8 +229,14 @@ def _load_cfg() -> dict:
         "live_debug_mode": False,
         "dry_run_mode": False,
         "predictive_mode": False,
-        "max_concurrent_dials": 3,
+        "max_concurrent_dials": 5,
+        "allow_duplicate_gv_accounts": False,
+        "force_requested_slots": False,
         "target_agent_wait_seconds": 3,
+        "single_agent_audio": True,
+        "hold_message_enabled": True,
+        "hold_message_text": "Please wait while we connect your call.",
+        "hold_message_output_device": "",
         "pacing_interval_sec": 2.5,
         "websocket_enabled": False,
         "websocket_port": 8765,
@@ -1014,7 +1048,7 @@ class SlotMonitorDialog(QDialog):
         fl = QVBoxLayout(frame)
         fl.setContentsMargins(0, 0, 0, 0)
         main_window._embed_browser_visible(controller.view, fl)
-        self.controller.set_audio_muted(False)
+        self.controller.set_audio_muted(False, force=True)
         lay.addWidget(frame, stretch=1)
         btn_row = QHBoxLayout()
         refresh_btn = _btn("Redraw view", "secondary")
@@ -1113,7 +1147,7 @@ class SlotMonitorDialog(QDialog):
         if self._released:
             return
         self._released = True
-        self.controller.set_audio_muted(True)
+        self.controller.set_audio_muted(True, force=True)
         try:
             self.controller.log_message.disconnect(self._on_log)
         except TypeError:
@@ -1164,7 +1198,7 @@ class CreateUserDialog(QDialog):
         self.plan = QComboBox()
         self.plan.addItems(["15 days", "Weekly", "Monthly", "No expiry"])
         self.max_slots = QSpinBox()
-        self.max_slots.setRange(1, 5)
+        self.max_slots.setRange(1, 15)
         self.max_slots.setValue(5)
         form.addRow("Name:", self.e_name)
         form.addRow("Email:", self.e_email)
@@ -1276,12 +1310,17 @@ class MainWindow(QMainWindow):
         self._headless_login_queue: list[dict] = []
         self._pacing_engine = PredictivePacingEngine(
             PacingConfig(
-                max_dials_per_interval=int(cfg.get("max_concurrent_dials", 3)),
+                max_dials_per_interval=int(cfg.get("max_concurrent_dials", 5)),
                 pacing_interval_sec=float(cfg.get("pacing_interval_sec", 2.5)),
             )
         )
         self._pacing_dial_history: list[int] = []
         self._slot_agent_handled: set[int] = set()
+        self._agent_router = AgentCallRouter()
+        self._hold_player = HoldMessagePlayer(
+            message=str(cfg.get("hold_message_text") or ""),
+            output_device=cfg.get("hold_message_output_device") or None,
+        )
         self._ws_thread = None
         self._dial_assign_count: int = 0
         self._dial_started_at: float = 0.0
@@ -1321,7 +1360,7 @@ class MainWindow(QMainWindow):
 
         # ── Boot controllers (deferred — UI shows first) ─────────────────────
         requested = int(cfg.get("n_slots", 1))
-        self._effective_slots = recommended_slots(requested)
+        self._effective_slots = effective_requested_slots(requested, cfg)
         self.statusBar().showMessage("Starting — Google Voice loads in a few seconds…")
         QTimer.singleShot(1800, self._deferred_boot_controllers)
         self._health_timer.start()
@@ -1352,8 +1391,10 @@ class MainWindow(QMainWindow):
     def _deferred_boot_controllers(self) -> None:
         """Load Google Voice after the UI is visible (prevents startup freeze)."""
         requested = int(self.cfg.get("n_slots", 1))
-        self._effective_slots = recommended_slots(requested)
-        reason = low_resource_reason(requested, self._effective_slots)
+        self._effective_slots = effective_requested_slots(requested, self.cfg)
+        reason = ""
+        if not bool(self.cfg.get("force_requested_slots", False)):
+            reason = low_resource_reason(requested, self._effective_slots)
         if reason:
             log_warning(reason)
             self._log(reason)
@@ -1645,6 +1686,76 @@ class MainWindow(QMainWindow):
             card.raise_()
             card.setFocus()
 
+    def _single_agent_audio_enabled(self) -> bool:
+        return bool(self.cfg.get("single_agent_audio", True))
+
+    def _apply_agent_audio_routing(self) -> None:
+        """Only the live agent slot may be audible; all others stay force-muted."""
+        if not self._single_agent_audio_enabled():
+            return
+        live = self._agent_router.agent_ears_slot()
+        for ctrl in self._controllers:
+            if ctrl is None:
+                continue
+            sid = ctrl.slot_id
+            if live is not None and sid == live:
+                ctrl.set_audio_muted(False, force=True)
+            else:
+                ctrl.set_audio_muted(True, force=True)
+
+    def _on_agent_pickup(self, slot_id: int, phone: str, disp: str) -> str:
+        """Route a live human answer. Returns 'live' or 'queued'."""
+        if not self._single_agent_audio_enabled():
+            return "live"
+        role = self._agent_router.on_pickup(slot_id)
+        self._apply_agent_audio_routing()
+        if role == "queued":
+            self._log(
+                f"[Slot {slot_id}] Live answer queued — agent busy on "
+                f"Line {(self._agent_router.agent_ears_slot() or 0) + 1}"
+            )
+            if slot_id in getattr(self, "_slot_cards", {}):
+                self._slot_cards[slot_id].set_dial_detail("Waiting for agent")
+            waiting = self._agent_router.waiting_count()
+            self.statusBar().showMessage(
+                f"{waiting} queued live answer(s) — active line: "
+                f"Line {(self._agent_router.agent_ears_slot() or 0) + 1}"
+            )
+            if bool(self.cfg.get("hold_message_enabled", True)):
+                self._hold_player.play()
+        return role
+
+    def _on_agent_promoted(self, slot_id: int) -> None:
+        phone = self._slot_phone.get(slot_id, "")
+        disp = fmt_display(phone[2:]) if phone.startswith("+1") and len(phone) == 12 else phone
+        self._apply_agent_audio_routing()
+        self._log(f"[Slot {slot_id}] Agent connected to queued live answer: {disp}")
+        self._focus_answered_slot(slot_id)
+        if slot_id in getattr(self, "_slot_cards", {}):
+            self._slot_cards[slot_id].set_dial_detail("")
+        ui_cfg = self.cfg.get("ui") if isinstance(self.cfg.get("ui"), dict) else {}
+        if bool(ui_cfg.get("auto_open_panel_on_human", False)):
+            self._open_slot_monitor(slot_id)
+        self.statusBar().showMessage(
+            f"Call picked up - talk now - Line {slot_id + 1}: {disp}"
+        )
+
+    def _on_agent_release(self, slot_id: int) -> None:
+        if not self._single_agent_audio_enabled():
+            return
+        promoted = self._agent_router.release_agent(slot_id)
+        self._apply_agent_audio_routing()
+        if promoted is not None:
+            self._on_agent_promoted(promoted)
+
+    def _agent_router_clear_slot(self, slot_id: int) -> None:
+        if not self._single_agent_audio_enabled():
+            return
+        promoted = self._agent_router.remove_slot(slot_id)
+        self._apply_agent_audio_routing()
+        if promoted is not None:
+            self._on_agent_promoted(promoted)
+
     def _open_slot_audio_monitor(self, slot_id: int) -> None:
         self._open_slot_monitor(slot_id, debug_monitor=True)
 
@@ -1699,17 +1810,21 @@ class MainWindow(QMainWindow):
                 f"{len(self._gv_accounts)} Google Voice account(s) are configured.\n\n"
                 "Add one signed-in Google Voice account for each slot. "
                 "For 5-slot dialing, configure 5 ready lines.")
-        distinct_lines = {
-            str(acct.get("email") or acct.get("profile") or "").strip().lower()
-            for acct in self._gv_accounts[:n]
-            if str(acct.get("email") or acct.get("profile") or "").strip()
-        }
-        if len(distinct_lines) < n:
+        allow_duplicates = allow_duplicate_gv_accounts(self.cfg)
+        available_lines = gv_available_line_count(
+            self._gv_accounts[:n],
+            allow_duplicates=allow_duplicates,
+        )
+        if available_lines < n:
+            duplicate_hint = (
+                "Enable allow_duplicate_gv_accounts only for owner-approved live tests "
+                "when each duplicate has its own ready browser profile."
+            )
             return False, (
-                f"You selected {n} live slot(s), but only {len(distinct_lines)} "
+                f"You selected {n} live slot(s), but only {available_lines} "
                 "distinct Google Voice line(s) are configured.\n\n"
                 "Each realtime slot needs its own signed-in Google Voice account. "
-                "Duplicate browser profiles for the same email cannot dial concurrently.")
+                f"{duplicate_hint}")
         missing: list[str] = []
         for i in range(n):
             acct = self._slot_account(i)
@@ -1936,7 +2051,7 @@ class MainWindow(QMainWindow):
         slay = QHBoxLayout(grp_settings)
         slay.addWidget(_label("Lines at once:", "muted"))
         self.spin_slots = QSpinBox()
-        self.spin_slots.setRange(1, 5)
+        self.spin_slots.setRange(1, 15)
         self.spin_slots.setValue(self.cfg.get("n_slots", 1))
         slay.addWidget(self.spin_slots)
         slay.addSpacing(20)
@@ -2219,7 +2334,7 @@ class MainWindow(QMainWindow):
         dlay.setSpacing(8)
         dlay.addWidget(QLabel("Default lines:"))
         self.settings_slots = QSpinBox()
-        self.settings_slots.setRange(1, 5)
+        self.settings_slots.setRange(1, 15)
         self.settings_slots.setValue(self.cfg.get("n_slots", 5))
         dlay.addWidget(self.settings_slots)
         self.chk_ai_audio = QCheckBox("AI audio detection")
@@ -2277,6 +2392,32 @@ class MainWindow(QMainWindow):
         dlay.addStretch()
         lay.addWidget(grp_d)
 
+        grp_agent = QGroupBox("Agent experience")
+        grp_agent.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        alay = QHBoxLayout(grp_agent)
+        alay.setContentsMargins(8, 4, 8, 4)
+        alay.setSpacing(8)
+        self.chk_single_agent_audio = QCheckBox("Single-agent audio (one live call at a time)")
+        self.chk_single_agent_audio.setChecked(bool(self.cfg.get("single_agent_audio", True)))
+        self.chk_single_agent_audio.setToolTip(
+            "When enabled, only the active agent line is audible; other live answers queue.")
+        alay.addWidget(self.chk_single_agent_audio)
+        self.chk_hold_message = QCheckBox("Hold message while queued")
+        self.chk_hold_message.setChecked(bool(self.cfg.get("hold_message_enabled", True)))
+        alay.addWidget(self.chk_hold_message)
+        alay.addWidget(QLabel("Message:"))
+        self.hold_message_input = QLineEdit(
+            str(self.cfg.get("hold_message_text") or "Please wait while we connect your call."))
+        self.hold_message_input.setMinimumWidth(280)
+        alay.addWidget(self.hold_message_input)
+        ui_cfg = self.cfg.get("ui") if isinstance(self.cfg.get("ui"), dict) else {}
+        self.chk_auto_open_panel = QCheckBox("Auto-open line panel on live answer")
+        self.chk_auto_open_panel.setChecked(bool(ui_cfg.get("auto_open_panel_on_human", False)))
+        alay.addWidget(self.chk_auto_open_panel)
+        alay.addStretch()
+        lay.addWidget(grp_agent)
+
         grp_b = QGroupBox("Voice connection profiles")
         grp_b.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
@@ -2333,12 +2474,30 @@ class MainWindow(QMainWindow):
         grp = QGroupBox("Your account")
         gl = QVBoxLayout(grp)
         gl.setContentsMargins(8, 6, 8, 6)
+        plan = str(self.user.get("subscription_plan") or "manual")
+        expires = str(self.user.get("subscription_expires_at") or "").strip() or "No expiry"
+        slots = int(self.user.get("max_slots") or self.cfg.get("n_slots", 1))
         gl.addWidget(QLabel(
+            f"Plan: {plan}\n"
+            f"Expires: {expires}\n"
+            f"Live lines allowed: {slots}\n\n"
             "Google Voice lines are configured by your administrator.\n"
             "Use the Dialer and Live Calls tabs to work. "
             "Click Listen on a line to hear the call through your speakers."
         ))
         lay.addWidget(grp)
+
+        grp_listen = QGroupBox("Listening")
+        ll = QVBoxLayout(grp_listen)
+        ll.setContentsMargins(8, 6, 8, 6)
+        self.chk_single_agent_audio = QCheckBox("Single-agent audio (one live call at a time)")
+        self.chk_single_agent_audio.setChecked(bool(self.cfg.get("single_agent_audio", True)))
+        self.chk_single_agent_audio.setEnabled(False)
+        ll.addWidget(self.chk_single_agent_audio)
+        ll.addWidget(QLabel(
+            "When your administrator enables this, only one live answer is audible at a time."
+        ))
+        lay.addWidget(grp_listen)
         lay.addStretch()
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -2422,7 +2581,7 @@ class MainWindow(QMainWindow):
             ).strftime("%Y-%m-%d %H:%M:%S")
         max_slots, ok = QInputDialog.getInt(
             self, "Max live slots", "Allowed simultaneous slots:",
-            min(5, max(1, int(self.cfg.get("n_slots", 1)))), 1, 5)
+            min(15, max(1, int(self.cfg.get("n_slots", 1)))), 1, 15)
         if not ok:
             return
 
@@ -2953,7 +3112,10 @@ class MainWindow(QMainWindow):
             return
         ctrl = self._get_ctrl(slot_id)
         if ctrl:
-            ctrl.set_audio_muted(True)
+            ctrl.set_audio_muted(True, force=True)
+            if ctrl.current_state not in ("IDLE", "ENDED", "ENDED_MANUALLY"):
+                ctrl.hangup()
+        self._agent_router_clear_slot(slot_id)
         self._slot_phone.pop(slot_id, None)
         self._slot_start.pop(slot_id, None)
         self._slot_name.pop(slot_id, None)
@@ -3270,7 +3432,8 @@ class MainWindow(QMainWindow):
             self._slot_cooldown_until[i] = _now() + i * stagger
         for ctrl in self._controllers:
             if ctrl:
-                ctrl.set_audio_muted(True)
+                ctrl.set_audio_muted(True, force=True)
+        self._agent_router.reset()
         self._configure_watchdog()
         self._sync_dial_buttons(True)
         self.statusBar().showMessage("Dialing in progress…")
@@ -3285,6 +3448,7 @@ class MainWindow(QMainWindow):
     def _stop_dialing(self):
         self._campaign_generation += 1
         self._running = False
+        self._agent_router.reset()
         self._dial_timer.stop()
         self._assign_debounce.stop()
         self._elapsed_timer.stop()
@@ -3490,9 +3654,10 @@ class MainWindow(QMainWindow):
         started = self._slot_start.get(slot_id)
         duration_s = max(0.0, _now() - started) if started else 0.0
         if ctrl:
-            ctrl.set_audio_muted(True)
+            ctrl.set_audio_muted(True, force=True)
             ctrl.hangup(manual=True)
             self._log(f"[Slot {slot_id}] Cut call")
+        self._agent_router_clear_slot(slot_id)
         if phone:
             status = "ENDED_MANUALLY"
             self._log_final_call(
@@ -3512,6 +3677,7 @@ class MainWindow(QMainWindow):
 
     def _next_call(self, slot_id: int):
         """Cut the current call and assign the next number after a short pause."""
+        self._on_agent_release(slot_id)
         self._cut_call(slot_id, advance=False)
         self._log(f"[Slot {slot_id}] Moving to next call")
         if self._running:
@@ -3532,8 +3698,13 @@ class MainWindow(QMainWindow):
             return
         ctrl = self._get_ctrl(slot_id)
         if ctrl and ctrl.current_state == "VOICEMAIL":
-            ctrl.set_audio_muted(True)
+            ctrl.set_audio_muted(True, force=True)
             ctrl.hangup()
+        elif ctrl and ctrl.current_state not in ("IDLE", "ENDED", "ENDED_MANUALLY"):
+            # Stuck in classify/ringing — force cleanup so the next dial is clean.
+            ctrl.set_audio_muted(True, force=True)
+            ctrl.hangup()
+        self._agent_router_clear_slot(slot_id)
         self._slot_phone.pop(slot_id, None)
         self._slot_start.pop(slot_id, None)
         self._slot_name.pop(slot_id, None)
@@ -3620,11 +3791,12 @@ class MainWindow(QMainWindow):
         ctrl = self._get_ctrl(slot_id)
         if ctrl:
             try:
-                ctrl.set_audio_muted(True)
+                ctrl.set_audio_muted(True, force=True)
                 if ctrl.current_state in ("RINGING", "ANSWERED_PENDING", "CONNECTED", "VOICEMAIL"):
                     ctrl.hangup()
             except Exception:
                 pass
+        self._agent_router_clear_slot(slot_id)
         if phone:
             if slot_id in self._manual_test_slots:
                 self._log_final_call(slot_id, "FAILED", phone, contact_name=name)
@@ -3684,6 +3856,7 @@ class MainWindow(QMainWindow):
         self._log(f"[Slot {slot_id}] → {state}  {disp}")
 
         if display_state == "CONNECTED":
+            role = self._on_agent_pickup(slot_id, phone, disp)
             ui_cfg = self.cfg.get("ui") if isinstance(self.cfg.get("ui"), dict) else {}
             panel_delay_ms = int(float(ui_cfg.get("agent_panel_delay_seconds", 0)) * 1000)
 
@@ -3696,18 +3869,19 @@ class MainWindow(QMainWindow):
                 if auto_listen and effective_enable_ai_audio(self.cfg):
                     self._open_slot_monitor(sid)
 
-            if panel_delay_ms > 0:
-                QTimer.singleShot(panel_delay_ms, _show_connected)
-            else:
-                _show_connected()
-            wait_sec = float(self.cfg.get("target_agent_wait_seconds", 3))
-            token = self._slot_call_token.get(slot_id, 0)
-            gen = self._campaign_generation
-            QTimer.singleShot(
-                int(wait_sec * 1000),
-                lambda sid=slot_id, tok=token, g=gen:
-                self._check_abandoned_call(sid, tok, g),
-            )
+            if role == "live":
+                if panel_delay_ms > 0:
+                    QTimer.singleShot(panel_delay_ms, _show_connected)
+                else:
+                    _show_connected()
+                wait_sec = float(self.cfg.get("target_agent_wait_seconds", 3))
+                token = self._slot_call_token.get(slot_id, 0)
+                gen = self._campaign_generation
+                QTimer.singleShot(
+                    int(wait_sec * 1000),
+                    lambda sid=slot_id, tok=token, g=gen:
+                    self._check_abandoned_call(sid, tok, g),
+                )
         elif state == "VOICEMAIL":
             vm_sec = int(self.cfg.get("voicemail_hangup_sec", 3))
             self._log(
@@ -3792,6 +3966,8 @@ class MainWindow(QMainWindow):
             return
         if slot_id in self._slot_agent_handled:
             return
+        if not self._agent_router.is_live(slot_id):
+            return
         ctrl = self._get_ctrl(slot_id)
         if not ctrl or ctrl.current_state != "CONNECTED":
             return
@@ -3843,6 +4019,10 @@ class MainWindow(QMainWindow):
             self._broadcast_amd_event(slot_id, debug)
             if fused_state in {"HUMAN", "CONNECTED", "CONNECTED_AUDIO_EVIDENCE"}:
                 self._pacing_engine.record_outcome(connected=True, abandoned=False)
+            if fused_state == "VOICEMAIL":
+                ctrl = self._get_ctrl(slot_id)
+                if ctrl and ctrl.current_state != "VOICEMAIL":
+                    self._on_slot_state(slot_id, "VOICEMAIL")
 
     def _update_card(self, slot_id: int, state: str, phone: str):
         if hasattr(self, "_slot_cards") and slot_id in self._slot_cards:
@@ -4235,7 +4415,19 @@ class MainWindow(QMainWindow):
             self.cfg["audio_device"] = self.audio_device_combo.currentData() or ""
         if hasattr(self, "chk_live_debug"):
             self.cfg["live_debug_mode"] = self.chk_live_debug.isChecked()
+        if hasattr(self, "chk_single_agent_audio"):
+            self.cfg["single_agent_audio"] = self.chk_single_agent_audio.isChecked()
+        if hasattr(self, "chk_hold_message"):
+            self.cfg["hold_message_enabled"] = self.chk_hold_message.isChecked()
+        if hasattr(self, "hold_message_input"):
+            self.cfg["hold_message_text"] = self.hold_message_input.text().strip()
+        if hasattr(self, "chk_auto_open_panel"):
+            ui_cfg = self.cfg.get("ui") if isinstance(self.cfg.get("ui"), dict) else {}
+            ui_cfg["auto_open_panel_on_human"] = self.chk_auto_open_panel.isChecked()
+            self.cfg["ui"] = ui_cfg
         _save_cfg(self.cfg)
+        if hasattr(self, "_hold_player"):
+            self._hold_player.set_message(str(self.cfg.get("hold_message_text") or ""))
         if hasattr(self, "_slot_cards"):
             for card in self._slot_cards.values():
                 card.set_ai_audio_enabled(bool(self.cfg.get("enable_ai_audio", True)))

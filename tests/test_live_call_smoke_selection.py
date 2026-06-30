@@ -94,6 +94,7 @@ def test_visible_failed_state_can_be_overridden_by_manual_confirmation(monkeypat
 
     smoke = live_call_smoke.LiveCallSmoke.__new__(live_call_smoke.LiveCallSmoke)
     smoke.active_by_slot = {0: 0}
+    smoke.pending_hangups = set()
     smoke.results = {
         0: {
             "phone": "+15127616455",
@@ -105,6 +106,8 @@ def test_visible_failed_state_can_be_overridden_by_manual_confirmation(monkeypat
     smoke.controllers = [type("Controller", (), {"hangup": lambda self: hung_up.append(True)})()]
     smoke.stop_on_failure = True
     smoke.stop_requested = False
+    smoke._sequential_dial = False
+    smoke._sequential_gate_slot = None
     smoke.log = lambda _slot, _message: None
     smoke.release_slot = lambda slot: released.append(slot)
     smoke._confirm_connected_manually = lambda _slot, rec: rec.__setitem__(
@@ -117,6 +120,28 @@ def test_visible_failed_state_can_be_overridden_by_manual_confirmation(monkeypat
     assert smoke.stop_requested is False
     assert hung_up == [True]
     assert released == [0]
+
+
+def test_schedule_hangup_can_be_rescheduled_after_release():
+    smoke = live_call_smoke.LiveCallSmoke.__new__(live_call_smoke.LiveCallSmoke)
+    smoke.pending_hangups = {0}
+    smoke.finished = False
+    smoke.controllers = [
+        type("Controller", (), {"current_state": "VOICEMAIL", "hangup": lambda self: None})()
+    ]
+    smoke.log = lambda _slot, _message: None
+    released = []
+    smoke.release_slot = lambda _slot: released.append(_slot) or smoke.pending_hangups.discard(0)
+
+    smoke.schedule_hangup(0, 4, "first")
+    assert 0 in smoke.pending_hangups
+    assert smoke.pending_hangups == {0}
+
+    smoke.release_slot(0)
+    assert 0 not in smoke.pending_hangups
+
+    smoke.schedule_hangup(0, 4, "second")
+    assert 0 in smoke.pending_hangups
 
 
 def test_detection_update_records_last_debug_snapshot():

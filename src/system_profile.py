@@ -36,7 +36,20 @@ def recommended_slots(requested: int) -> int:
         return min(requested, 1)
     if ram < 16 or chrome >= 10:
         return min(requested, 2)
-    return min(requested, 3)
+    if ram < 24:
+        return min(requested, 5)
+    if ram < 32:
+        return min(requested, 10)
+    return min(requested, 15)
+
+
+def effective_requested_slots(requested: int, cfg: dict | None = None) -> int:
+    """Return the slot count to boot, honoring an explicit live-test override."""
+    requested = max(1, min(int(requested or 1), 15))
+    cfg = cfg or {}
+    if bool(cfg.get("force_requested_slots", False)):
+        return requested
+    return recommended_slots(requested)
 
 
 def recommended_amd_audio(requested: bool) -> bool:

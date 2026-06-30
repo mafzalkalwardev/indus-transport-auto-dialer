@@ -65,6 +65,7 @@ _DEBOUNCE_BYPASS = frozenset({
     DecisionState.HUMAN,
     DecisionState.ANSWERED_PENDING,
     DecisionState.CONNECTED_AUDIO_EVIDENCE,
+    DecisionState.VOICEMAIL,
     DecisionState.FAILED,
     DecisionState.ENDED,
     DecisionState.ENDED_MANUALLY,
@@ -391,7 +392,7 @@ class LocalCallDetector:
         # (or when UI/slots are transitioning), which causes early VOICEMAIL gating.
         dom_state0 = evidence.state.upper()
         timer_evidence0 = bool(getattr(evidence, "hasTimer", False)) or dom_state0 == "CONNECTED"
-        ctrl_evidence0 = bool(getattr(evidence, "hasEnabledAnswerControl", False)) or dom_state0 == "CONNECTED_CTRL"
+        ctrl_evidence0 = bool(getattr(evidence, "hasEnabledAnswerControl", False))
         has_speech_like0 = bool(getattr(af, "has_speech_like", False))
         is_silent0 = bool(getattr(af, "is_silent", False))
 
@@ -541,7 +542,7 @@ class LocalCallDetector:
             and self.config.enable_audio_detection
             and has_speech_like
             and not is_silent
-            and ring_cad < self.config.ringing_confidence_threshold
+            and ring_cad < 0.30
             and busy_conf < 0.8
             and beep_conf < 0.55
             and not beep_detected
@@ -596,11 +597,29 @@ class LocalCallDetector:
 
             return self._transition(DecisionState.RINGING, min(0.95, max(ringing_conf, 0.55)), "ring evidence")
 
+        # Ringback cadence can remain after GV hides ringing text. Stay ringing until
+        # timer/enabled hold evidence or ringback fades.
+        audio_still_ringing = (
+            self.config.enable_audio_detection
+            and ring_cad >= 0.30
+            and not timer_evidence0
+            and not ctrl_evidence0
+        )
+        if audio_still_ringing:
+            if elapsed_seconds >= self.config.max_ring_seconds:
+                self._emit(DecisionState.NO_ANSWER, 0.7, "max ring timeout reached")
+                return self._build(DecisionState.NO_ANSWER, 0.7, "max ring timeout reached")
+            return self._transition(
+                DecisionState.RINGING,
+                min(0.9, max(0.55, ring_cad)),
+                "ringback cadence still present",
+            )
+
         # If not confidently ringing, we expect answer/voicemail checks.
 
         # Answered pending evidence:
         timer_evidence = bool(evidence.hasTimer) or dom_state == "CONNECTED"
-        ctrl_evidence = bool(evidence.hasEnabledAnswerControl) or dom_state == "CONNECTED_CTRL"
+        ctrl_evidence = bool(evidence.hasEnabledAnswerControl)
         audio_answer_like = (
             self.config.enable_audio_detection and has_speech_like and not is_silent
         )
@@ -625,11 +644,24 @@ class LocalCallDetector:
         background_noise_level = float(_get("background_noise_level", rms) or 0.0)
 
         can_classify_answer = bool(
-            timer_evidence or (ctrl_evidence and audio_answer_like)
+            timer_evidence
+            or (
+                ctrl_evidence
+                and (
+                    audio_answer_like
+                    or self._answer_detected_elapsed_seconds is not None
+                )
+            )
         )
 
+        if ctrl_evidence and self._answer_detected_elapsed_seconds is not None:
+            answered_pending_conf = max(answered_pending_conf, 0.45)
+
         # Start pending window if evidence suggests answer has happened.
-        if can_classify_answer and answered_pending_conf >= 0.35:
+        if can_classify_answer and (
+            answered_pending_conf >= 0.35
+            or self._answer_detected_elapsed_seconds is not None
+        ):
             current_debug_base = {
                 "current_state": self._current_state.value,
                 "candidate_state": "ANSWERED_PENDING",
@@ -657,7 +689,6 @@ class LocalCallDetector:
                     and (beep_detected or beep_conf >= 0.55)
                     and answer_elapsed_seconds > self.config.beep_immediate_vm_seconds
                     and not human_greeting_detected
-                    and not short_speech_burst_detected
                 ):
                     vm_conf = min(0.98, max(0.88, beep_conf + 0.15))
                     return self._transition(
@@ -708,7 +739,6 @@ class LocalCallDetector:
                 and (beep_detected or beep_conf >= 0.55)
                 and answer_elapsed_seconds > self.config.beep_immediate_vm_seconds
                 and not human_greeting_detected
-                and not short_speech_burst_detected
             ):
                 vm_conf = min(0.98, max(0.88, beep_conf + 0.15))
                 return self._transition(
@@ -755,6 +785,52 @@ class LocalCallDetector:
                     **current_debug_base,
                 )
 
+            # Post-greeting silence: typical after voicemail beep / machine message ends.
+            if (
+                answer_elapsed_seconds >= self.config.answered_pending_safe_min_seconds
+                and silence_duration_seconds >= 6.0
+                and not human_greeting_detected
+                and not self._human_detector.has_human_keyword(transcript)
+                and not short_speech_burst_detected
+            ):
+                return self._transition(
+                    DecisionState.VOICEMAIL,
+                    0.84,
+                    "post-greeting silence after answer — voicemail",
+                    **{**current_debug_base, "candidate_state": "VOICEMAIL"},
+                )
+
+            # AMD classify timeout: no human evidence within the pending window.
+            if (
+                answer_elapsed_seconds >= self.config.answered_pending_seconds
+                and not human_greeting_detected
+                and not self._human_detector.has_human_keyword(transcript)
+                and not short_speech_burst_detected
+            ):
+                return self._transition(
+                    DecisionState.VOICEMAIL,
+                    0.8,
+                    "amd classify timeout without human — voicemail",
+                    **{**current_debug_base, "candidate_state": "VOICEMAIL"},
+                )
+
+            # Machine greeting without beep: long one-sided speech, no human cues.
+            if (
+                answer_elapsed_seconds >= self.config.answered_pending_safe_min_seconds
+                and speech_duration_seconds >= 3.5
+                and has_speech_like
+                and not human_greeting_detected
+                and not self._human_detector.has_human_keyword(transcript)
+                and not short_speech_burst_detected
+                and ring_cad < 0.30
+            ):
+                return self._transition(
+                    DecisionState.VOICEMAIL,
+                    0.82,
+                    "machine greeting speech after answer — voicemail",
+                    **{**current_debug_base, "candidate_state": "VOICEMAIL"},
+                )
+
             # Otherwise run strict human-vs-voicemail classification.
             return self._classify_human_or_voicemail(
                 evidence=evidence,
@@ -778,9 +854,6 @@ class LocalCallDetector:
                 answer_elapsed_seconds=answer_elapsed_seconds,
                 debug_base=current_debug_base,
             )
-
-
-
 
         # DOM voicemail cue alone is not enough (and must not happen while ringing).
         # If DOM claims VOICEMAIL without ringing evidence, we still require pending window confirmation.

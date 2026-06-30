@@ -120,6 +120,21 @@ Voicemail guardrails:
 3. Follow [LOAD_TEST.md](LOAD_TEST.md) checklist
 4. Between campaigns, **Stop** dialing (clears HTTP cache per line)
 
+## CRM sustained live test (administrator)
+
+Use before client handoff or after dial-path changes:
+
+```powershell
+Run CRM Sustained Test.bat
+```
+
+- Loads fresh CRM numbers; excludes phones from prior `logs/deep_live_test_*.json` reports
+- Recommended: **7 minutes**, **3 lines**, sequential (one call at a time)
+- Do not use `--force-parallel-dial` on 8 GB PCs (WebEngine may crash)
+- Full checklist: [QA_VERIFICATION.md](QA_VERIFICATION.md)
+
+Reports: `logs/deep_live_test_YYYYMMDD_HHMMSS.json` and `_summary.json`.
+
 ## Configuration (`dialer_config.json`)
 
 ```json
