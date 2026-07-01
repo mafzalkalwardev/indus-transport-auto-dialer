@@ -23,6 +23,8 @@ data/gv_accounts.json
 phones_test.xlsx
 phones.xlsx
 dialer_config.json
+indus-license*.json
+data/indus_license_cache.json
 
 # Local dev notes (not for clients)
 MEMORIES.md

@@ -151,6 +151,10 @@ def export_client_package(
             dirs_exist_ok=True,
         )
 
+    for name in os.listdir(ROOT):
+        if name.lower().startswith("indus-license") and name.lower().endswith(".json"):
+            shutil.copy2(os.path.join(ROOT, name), os.path.join(pkg, name))
+
     readme = f"""INDUS TRANSPORTS LLC Auto Dialer - Client workstation
 =====================================================
 
@@ -161,6 +165,7 @@ INSTALL ON CLIENT PC
 
 2. Copy ALL files from this package INTO that folder (merge/replace):
    - dialer_config.json
+   - indus-license-*.json  (required — from INDUS dashboard download)
    - logs\\
    - data\\
    - chrome_profiles\\

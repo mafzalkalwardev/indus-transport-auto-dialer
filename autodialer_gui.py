@@ -9,6 +9,7 @@ import sys
 import json
 import argparse
 import traceback
+import shutil
 from datetime import datetime, timedelta
 
 from src.webengine_env import configure_webengine_environment
@@ -30,13 +31,14 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QColor, QPalette, QFont, QIcon, QPixmap, QAction, QFontDatabase,
+    QDesktopServices,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 
 import pandas as pd
 
 from src.paths       import (LOGO_PNG, LOGO_JPEG, CONFIG_FILE,
-                              CHROME_PROFILES_DIR, LOGS_DIR)
+                              CHROME_PROFILES_DIR, LOGS_DIR, ROOT as APP_ROOT)
 from src.crm_db      import CRMDatabase
 from src.phone_utils import clean_phone, fmt_e164, fmt_display
 from src.gv_controller import (
@@ -50,6 +52,12 @@ from src.ui_theme import (
     apply_theme, table_item_color, log_status_color,
 )
 from src.client_deploy import export_client_package, is_client_deployment
+from src.indus_license import (
+    verify_license,
+    find_license_file,
+    expires_at_display,
+    LicenseCheckResult,
+)
 from src.slot_watchdog import SlotWatchdog, webengine_total_memory_mb
 from src.retry_queue import DialRetryQueue
 from src.dialer_logging import setup_dialer_logging, log_info, log_warning, log_error, log_path
@@ -665,6 +673,70 @@ class ClientNotConfiguredPage(QWidget):
         msg.setWordWrap(True)
         msg.setMaximumWidth(480)
         lay.addWidget(msg)
+
+
+class LicenseGatePage(QWidget):
+    """Blocks the app until a valid INDUS subscription license is present."""
+
+    retry = pyqtSignal()
+    license_loaded = pyqtSignal(str)
+
+    def __init__(self, result: LicenseCheckResult, parent=None):
+        super().__init__(parent)
+        self._result = result
+        outer = QVBoxLayout(self)
+        outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        card = QFrame()
+        card.setObjectName("loginCard")
+        card.setFixedWidth(520)
+        lay = QVBoxLayout(card)
+        lay.setSpacing(12)
+        lay.setContentsMargins(36, 32, 36, 32)
+
+        title = "Subscription required"
+        if result.reason == "expired":
+            title = "Subscription expired"
+        elif result.reason == "network":
+            title = "License server unreachable"
+
+        lay.addWidget(_label(title, "heroTitle"))
+        lay.addWidget(_label(result.message or "A valid INDUS license file is required.", "muted"))
+        if result.expires_at:
+            lay.addWidget(_label(f"Expires: {expires_at_display(result.expires_at)}", "muted"))
+
+        lay.addSpacing(12)
+        lay.addWidget(_label(
+            "Place the license file from your INDUS dashboard download in this "
+            "folder, or load it manually.",
+            "muted",
+        ))
+
+        btn_row = QHBoxLayout()
+        load_btn = _btn("Load license file…", "primary")
+        load_btn.clicked.connect(self._pick_license)
+        btn_row.addWidget(load_btn)
+        retry_btn = _btn("Retry verification", "secondary")
+        retry_btn.clicked.connect(self.retry.emit)
+        btn_row.addWidget(retry_btn)
+        lay.addLayout(btn_row)
+
+        renew = _btn("Renew subscription online", "secondary")
+        renew.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl("https://indus-web-agency.vercel.app/dashboard"))
+        )
+        lay.addWidget(renew)
+        outer.addWidget(card)
+
+    def _pick_license(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select INDUS license file",
+            APP_ROOT,
+            "INDUS License (*.json);;All files (*.*)",
+        )
+        if path:
+            self.license_loaded.emit(path)
 
 
 class LoginPage(QWidget):
@@ -1350,6 +1422,10 @@ class MainWindow(QMainWindow):
         self._health_timer.setInterval(5000)
         self._health_timer.timeout.connect(self._update_health_panel)
 
+        self._license_timer = QTimer(self)
+        self._license_timer.setInterval(6 * 60 * 60 * 1000)
+        self._license_timer.timeout.connect(self._recheck_license)
+
         # ── Build UI ──────────────────────────────────────────────────────────
         self._build_hidden_browser_container()
         self._build_header()
@@ -1364,7 +1440,27 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Starting — Google Voice loads in a few seconds…")
         QTimer.singleShot(1800, self._deferred_boot_controllers)
         self._health_timer.start()
+        self._license_timer.start()
         log_info(f"Session started — user {user.get('email', '?')}")
+
+    def _recheck_license(self) -> None:
+        result = verify_license(APP_ROOT)
+        if result.ok:
+            return
+        self._running = False
+        self._dial_timer.stop()
+        self._license_timer.stop()
+        log_warning(f"License recheck failed: {result.reason} — {result.message}")
+        QMessageBox.warning(
+            self,
+            "Subscription expired",
+            result.message + "\n\nThe dialer will close. Renew at indus-web-agency.vercel.app",
+        )
+        app_ref = getattr(self, "_app_ref", None)
+        if app_ref is not None:
+            app_ref.show_license_gate(result)
+        else:
+            self.close()
 
     def closeEvent(self, event) -> None:
         self._watchdog.stop()
@@ -1374,6 +1470,7 @@ class MainWindow(QMainWindow):
         self._headless_timer.stop()
         self._stuck_dial_timer.stop()
         self._health_timer.stop()
+        self._license_timer.stop()
         self._save_campaign_progress()
         for dialog in list(self._slot_monitors.values()):
             try:
@@ -4475,6 +4572,8 @@ class DialerApp:
         self.cfg = _load_cfg()
         self._client_mode = is_client_deployment(self.cfg)
         self._main_win: MainWindow | None = None
+        self._license_page: LicenseGatePage | None = None
+        self._license_path: str | None = find_license_file(APP_ROOT)
         self._stack = QStackedWidget()
         self._stack.setWindowTitle(APP_NAME)
         self._stack.setWindowIcon(_icon())
@@ -4490,6 +4589,77 @@ class DialerApp:
         self._stack.show()
 
     def _route_startup(self) -> None:
+        license_result = verify_license(APP_ROOT, self._license_path)
+        if not license_result.ok:
+            self._show_license_gate(license_result)
+            return
+        self._apply_license_to_users(license_result)
+        self._bootstrap_admin_from_env()
+        if self._client_mode:
+            if not self.db.has_any_user():
+                self._show_client_not_configured()
+            else:
+                self._show_login()
+            return
+        if self.db.needs_admin_setup():
+            self._show_admin_setup()
+        else:
+            self._show_login()
+
+    def _apply_license_to_users(self, result: LicenseCheckResult) -> None:
+        if not result.expires_at:
+            return
+        display = expires_at_display(result.expires_at)
+        for user in self.db.get_all_users():
+            if user.get("role") == "admin":
+                continue
+            self.db.set_user_subscription(
+                int(user["id"]),
+                result.product_slug or str(user.get("subscription_plan") or "indus"),
+                display,
+                int(user.get("max_slots") or 1),
+            )
+
+    def _show_license_gate(self, result: LicenseCheckResult) -> None:
+        if self._license_page is None:
+            page = LicenseGatePage(result)
+            page.retry.connect(self._retry_license)
+            page.license_loaded.connect(self._on_license_loaded)
+            self._stack.addWidget(page)
+            self._license_page = page
+        else:
+            self._license_page._result = result
+        self._stack.setCurrentWidget(self._license_page)
+
+    def show_license_gate(self, result: LicenseCheckResult) -> None:
+        if self._main_win:
+            self._main_win.close()
+            self._main_win = None
+        self._stack.resize(1000, 680)
+        self._show_license_gate(result)
+        self._stack.show()
+
+    def _retry_license(self) -> None:
+        result = verify_license(APP_ROOT, self._license_path)
+        if result.ok:
+            self._apply_license_to_users(result)
+            self._route_after_license()
+            return
+        self._show_license_gate(result)
+
+    def _on_license_loaded(self, path: str) -> None:
+        dest = os.path.join(APP_ROOT, os.path.basename(path))
+        if os.path.abspath(path) != os.path.abspath(dest):
+            try:
+                shutil.copy2(path, dest)
+                path = dest
+            except OSError as exc:
+                QMessageBox.warning(None, "License", f"Could not copy license file:\n{exc}")
+                return
+        self._license_path = path
+        self._retry_license()
+
+    def _route_after_license(self) -> None:
         self._bootstrap_admin_from_env()
         if self._client_mode:
             if not self.db.has_any_user():
@@ -4536,6 +4706,7 @@ class DialerApp:
         self._stack.hide()
         win = MainWindow(self.db, user, self.cfg)
         win.set_app_ref(self)
+        win._app_ref = self
         self._main_win = win
         win.show()
 
