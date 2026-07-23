@@ -1,7 +1,7 @@
 <div align="center">
 
 <p align="center">
-  <img src="indus_transports_logo.jpg" alt="INDUS TRANSPORTS LLC logo" width="120" />
+  <img src="docs/screenshots/indus-logo.svg" alt="INDUS TRANSPORTS LLC logo" width="120" />
 </p>
 
 # Indus Transports Auto Dialer
@@ -28,33 +28,13 @@ Professional Windows desktop dialer for **INDUS TRANSPORTS LLC**. Agents use a s
 
 ## 🖼 Screenshots
 
-Captured from the live application UI (light and dark themes).
+Captured from the live application UI.
 
-### Light mode
+| Dialer | Settings | Live calls |
+|:--|:--|:--|
+| ![Dialer](docs/screenshots/dialer-light.png) | ![Settings](docs/screenshots/settings-light.png) | ![Live calls](docs/screenshots/live-calls-dark.png) |
 
-| | |
-|:--|:--|
-| Sign-in | Dialer |
-| ![Login — light mode](docs/screenshots/login-light.png) | ![Dialer — light mode](docs/screenshots/dialer-light.png) |
-| Live calls | Call logs |
-| ![Live calls — light mode](docs/screenshots/live-calls-light.png) | ![Call logs — light mode](docs/screenshots/call-logs-light.png) |
-| CRM | Settings |
-| ![CRM — light mode](docs/screenshots/crm-light.png) | ![Settings — light mode](docs/screenshots/settings-light.png) |
-| Administration | |
-| ![Administration — light mode](docs/screenshots/administration-light.png) | |
-
-### Dark mode
-
-| | |
-|:--|:--|
-| Sign-in | Dialer |
-| ![Login — dark mode](docs/screenshots/login-dark.png) | ![Dialer — dark mode](docs/screenshots/dialer-dark.png) |
-| Live calls | Call logs |
-| ![Live calls — dark mode](docs/screenshots/live-calls-dark.png) | ![Call logs — dark mode](docs/screenshots/call-logs-dark.png) |
-| CRM | Settings |
-| ![CRM — dark mode](docs/screenshots/crm-dark.png) | ![Settings — dark mode](docs/screenshots/settings-dark.png) |
-| Administration | |
-| ![Administration — dark mode](docs/screenshots/administration-dark.png) | |
+![Application overview](docs/screenshots/app.png)
 
 ---
 
