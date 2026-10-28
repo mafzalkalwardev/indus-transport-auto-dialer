@@ -1,40 +1,68 @@
 <div align="center">
 
-<p align="center">
-  <img src="docs/screenshots/indus-logo.svg" alt="INDUS TRANSPORTS LLC logo" width="120" />
+# Indus Transport Auto Dialer
+
+<img src="https://readme-typing-svg.demolab.com?font=Inter&weight=700&size=28&duration=2800&pause=700&color=F5A623&center=true&vCenter=true&width=900&lines=Production+Windows+Auto+Dialer;Google+Voice+Browser+Automation;Built+for+dispatch+teams;Operational+call+workflows" alt="Typing SVG" />
+
+<p>
+  <img src="https://komarev.com/ghpvc/?username=mafzalkalwardev&label=Project%20Views&color=f5a623&style=for-the-badge" alt="Project views" />
+  <img src="https://img.shields.io/github/stars/mafzalkalwardev/indus-transport-auto-dialer?style=for-the-badge&color=22c55e" alt="GitHub stars" />
+  <img src="https://img.shields.io/github/forks/mafzalkalwardev/indus-transport-auto-dialer?style=for-the-badge&color=f59e0b" alt="GitHub forks" />
+  <img src="https://img.shields.io/github/license/mafzalkalwardev/indus-transport-auto-dialer?style=for-the-badge&color=64748b" alt="License" />
 </p>
 
-# Indus Transports Auto Dialer
+<p>
+  <img src="https://skillicons.dev/icons?i=python,selenium,windows,powershell" alt="Skill icons" />
+</p>
 
-**Professional Windows auto dialer — Google Voice, AMD, predictive pacing.**
-
-Multi-line dialing · AMD · CRM · Excel lists · Predictive pacing
-
-[![Tests](https://github.com/mafzalkalwardev/indus-transport-auto-dialer/actions/workflows/test.yml/badge.svg)](https://github.com/mafzalkalwardev/indus-transport-auto-dialer/actions/workflows/test.yml)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
-[![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://www.microsoft.com/windows)
-[![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?style=for-the-badge)](https://www.riverbankcomputing.com/software/pyqt/)
-[![Built with Cursor](https://img.shields.io/badge/Built_with-Cursor-000000?style=for-the-badge&logo=cursor&logoColor=white)](https://cursor.com)
-[![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
-[![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen?style=for-the-badge)](CONTRIBUTING.md)
-
-[Features](#features) · [Quick Start](#quick-start) · [Documentation](#documentation) · [Screenshots](#-screenshots) · [Contributors](#contributors) · [Contributing](CONTRIBUTING.md)
+<p>
+  <strong>Production Windows auto dialer for dispatch teams with Google Voice browser automation and operational calling workflows.</strong>
+</p>
 
 </div>
 
 ---
 
-Professional Windows desktop dialer for **INDUS TRANSPORTS LLC**. Agents use a simple branded app while Google Voice runs in the background on each line.
+## Trophy Cards
 
-## 🖼 Screenshots
+<div align="center">
+  <img src="https://github-profile-trophy.vercel.app/?username=mafzalkalwardev&theme=algolia&no-frame=true&no-bg=true&margin-w=12&margin-h=12&column=4" alt="GitHub trophy cards" />
+</div>
 
-Captured from the live application UI.
+---
 
-| Dialer | Settings | Live calls |
-|:--|:--|:--|
-| ![Dialer](docs/screenshots/dialer-light.png) | ![Settings](docs/screenshots/settings-light.png) | ![Live calls](docs/screenshots/live-calls-dark.png) |
+## Stats Cards
 
-![Application overview](docs/screenshots/app.png)
+<div align="center">
+  <img height="165" src="https://github-readme-stats-sigma-five.vercel.app/api?username=mafzalkalwardev&show_icons=true&theme=tokyonight&hide_border=true&rank_icon=github" alt="GitHub stats" />
+  <img height="165" src="https://github-readme-stats-sigma-five.vercel.app/api/top-langs/?username=mafzalkalwardev&layout=compact&theme=tokyonight&hide_border=true" alt="Top languages" />
+</div>
+
+---
+
+## Activity Graph
+
+<div align="center">
+  <img src="https://github-readme-activity-graph.vercel.app/graph?username=mafzalkalwardev&theme=react-dark&hide_border=true&area=true" alt="GitHub activity graph" />
+</div>
+
+---
+
+## Contribution Snake
+
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mafzalkalwardev/google-voice-dispatch-agent/output/github-contribution-grid-snake-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/mafzalkalwardev/google-voice-dispatch-agent/output/github-contribution-grid-snake.svg">
+    <img alt="Contribution snake" src="https://raw.githubusercontent.com/mafzalkalwardev/google-voice-dispatch-agent/output/github-contribution-grid-snake.svg">
+  </picture>
+</div>
+
+---
+
+## SEO Keywords
+
+`auto dialer` `dispatch dialer` `Google Voice` `Windows automation`
 
 ---
 
