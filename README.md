@@ -371,3 +371,27 @@ Screenshots are regenerated from the live UI with `python scripts/capture_readme
 ## Support
 
 WhatsApp: [+923079670503](https://wa.me/923079670503)
+
+---
+
+## Discoverability
+
+**Author:** Muhammad Afzal Kalwar ([@mafzalkalwardev](https://github.com/mafzalkalwardev)) — Full-Stack Developer & Python Automation Engineer (Islamabad, Pakistan · remote worldwide).
+
+**Hire / contact:** [Email](mailto:kalwarmuhammadafzal3@gmail.com) · [WhatsApp](https://wa.me/923079670503) · [Portfolio](https://mafzalkalwardev.github.io) · [LinkedIn](https://www.linkedin.com/in/muhammad-afzal-2670b527b/)
+
+### Who is this for?
+Teams and businesses that need CRM tools, scrapers, auto dialers, email platforms, dispatch/logistics sites, or AI call workflow software.
+
+### FAQ
+- **Who built this?** Muhammad Afzal Kalwar (`mafzalkalwardev`).
+- **Can I hire the author?** Yes — remote freelance and contract. See contact links above.
+- **Related work?** Browse [all repositories](https://github.com/mafzalkalwardev?tab=repositories) and the [live portfolio](https://mafzalkalwardev.github.io).
+
+<details>
+<summary><strong>SEO / GEO / AEO keywords</strong></summary>
+
+Muhammad Afzal Kalwar, mafzalkalwardev, indus-transport-auto-dialer, full-stack developer, Python automation engineer, Islamabad Pakistan, freelance remote developer, CRM scraping dialer email AI tools, voice-ai, auto-dialer, pyqt, trucking, ai, dispatch-software, excel, indus, call-analytics, windows, outbound-calling, automation
+
+</details>
+
