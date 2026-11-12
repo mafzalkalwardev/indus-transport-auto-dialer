@@ -65,7 +65,7 @@ Use this when you configure everything on **your** machine and deliver a ready f
 1. Complete Google Voice setup in **Settings**.
 2. **Administration** → **Export client package…**
 3. Enter the client’s name, login email, and password (8+ characters).
-4. Choose a save location (e.g. Desktop). You get a folder like `IndusTransports_AutoDialer_Client` with:
+4. Choose a save location (e.g. Desktop). You get a folder named `FTSolutions_AutoDialer_Client` with:
    - `dialer_config.json` (`deployment_mode: client`)
    - `logs/crm.sqlite3` (single agent account)
    - `data/gv_accounts.json` and `chrome_profiles/` (signed-in voice lines)
@@ -215,9 +215,9 @@ For long campaigns (many numbers, several lines):
 
 Tune in `dialer_config.json` — see [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
-**First-time setup:** copy `dialer_config.example.json` to `dialer_config.json` (defaults: 1 line, 6s cooldown). Local config is not tracked in git. On the **Dialer** tab, use **Apply stable mode** for safe settings on 8 GB PCs.
+**First-time setup:** the app writes `dialer_config.json` on first run with defaults (5 lines, 4 s cooldown, 60 s call timeout). Edit it to match your setup — local config is not tracked in git. On the **Dialer** tab, lower **Lines at once** for 8 GB PCs.
 
-**Dev cycle (test + optional push):** `.\scripts\dev_cycle.ps1` or `.\scripts\dev_cycle.ps1 -Push`
+**Dev cycle:** run `python -m pytest tests` for the unit tests (needs `pip install pytest`), and `python scripts/live_call_smoke.py` for a live smoke test against your own Google Voice lines.
 
 See [docs/GV_DIAL_RESEARCH.md](docs/GV_DIAL_RESEARCH.md) for Google Voice web dialing notes.
 
@@ -285,7 +285,7 @@ Double-click **`Build Auto Dialer.bat`** or run:
 python build.py
 ```
 
-Output: `dist/IndusTransports_AutoDialer.exe`
+Output: `dist/FTSolutions_AutoDialer.exe`
 
 See **[CLIENT_DELIVERY.md](CLIENT_DELIVERY.md)** for the full administrator → client handoff checklist.
 
@@ -351,8 +351,6 @@ The maintainers are not responsible for misuse of this software.
 |:--|:--|
 | **INDUS TRANSPORTS LLC** | Product owner and primary development |
 | **[Cursor](https://cursor.com)** | AI-assisted development — planning, implementation, and documentation |
-
-Screenshots are regenerated from the live UI with `python scripts/capture_readme_screenshots.py`.
 
 ## Support
 
